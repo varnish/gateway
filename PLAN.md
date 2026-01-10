@@ -137,21 +137,32 @@ sub gateway_backend_fetch {
     }
     # No match - falls through to default backend or returns 503
 }
+
+sub vcl_backend_fetch {
+    call gateway_backend_fetch;
+}
+
+# --- User VCL concatenated below ---
 ```
 
 **`internal/vcl/merge.go`**
 
-Combines user VCL + generated routing using the VCL parser (github.com/perbu/vclparser):
+Combines generated routing VCL with user VCL via simple concatenation. VCL allows multiple definitions of
+the same subroutine - they are concatenated at compile time. This means we don't need to parse or modify user VCL at all.
 
-1. Parse user VCL into AST using `parser.Parse()`
-2. Find `vcl_backend_fetch` SubDecl - iterate `Program.Declarations`, type assert to `*ast.SubDecl`, check
-   `Name == "vcl_backend_fetch"`
-3. Check if first statement is already `call gateway_backend_fetch;` (check for `*ast.CallStatement` with function name)
-4. If not present, prepend a `CallStatement` to `Body.Statements`
-5. Prepend the generated subroutines and imports to `Program.Declarations`
-6. Render back to VCL using `renderer.Render(program)`
+The merge process:
 
-If user VCL doesn't have `vcl_backend_fetch`, generate a default one that calls the gateway subroutine.
+1. Generate the routing VCL (imports, vcl_init, gateway_backend_fetch, and a vcl_backend_fetch that calls it)
+2. Concatenate user VCL after the generated VCL
+3. Write the combined output
+
+If the user also defines `vcl_backend_fetch`, their code runs *after* the gateway routing call. This allows users to
+modify backend request headers, add logging, etc. after the routing decision is made.
+
+If the user needs to run code *before* routing (e.g., URL normalization), they should do it in `vcl_recv` instead,
+which is the appropriate place for request manipulation anyway.
+
+Optional: use vclparser for syntax validation before attempting to load, to provide better error messages.
 
 **`internal/status/conditions.go`**
 
@@ -285,10 +296,10 @@ k8s.io/client-go                  # kubernetes client (pulled in by controller-r
 sigs.k8s.io/gateway-api           # Gateway API types
 ```
 
-**VCL Processing:**
+**VCL Processing (optional):**
 
 ```
-github.com/perbu/vclparser        # VCL parser and renderer
+github.com/perbu/vclparser        # VCL syntax validation (not required for merging)
 ```
 
 **Utility:**
@@ -319,7 +330,12 @@ Unit tests use the standard library `testing` package.
 
 3. **Hash key** - Use udo's default (vcl_hash, typically req.url + host). Good enough for v1.
 
-4. **VCL validation** - The parser validates syntax. Full compilation check (`varnishd -C`) deferred for now.
+4. **VCL validation** - Syntax validation via parser is optional. Full compilation check (`varnishd -C`) deferred for now.
+
+5. **VCL merging via concatenation** - VCL allows multiple definitions of the same subroutine, which get concatenated
+   at compile time. We exploit this to avoid parsing user VCL entirely. Generated VCL comes first (with routing call),
+   user VCL is appended. User code in `vcl_backend_fetch` runs after routing. Users who need pre-routing logic should
+   use `vcl_recv` instead.
 
 ---
 
