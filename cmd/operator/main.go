@@ -69,6 +69,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup HTTPRoute controller
+	if err := (&controller.HTTPRouteReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: cfg,
+		Logger: logger.With("controller", "HTTPRoute"),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create controller", "controller", "HTTPRoute", "error", err)
+		os.Exit(1)
+	}
+
 	// Setup health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error("unable to setup health check", "error", err)
