@@ -8,6 +8,36 @@ Kubernetes Gateway API implementation using Varnish. Two binaries:
 
 See PLAN.md for full architecture.
 
+## Progress
+
+### Completed
+
+**Sidecar** (`cmd/sidecar/main.go`):
+- Environment variable configuration with defaults
+- Kubernetes client (in-cluster + kubeconfig fallback for local dev)
+- Graceful shutdown on SIGTERM/SIGINT
+- Health endpoint for k8s probes
+- Component integration: varnishadm server, backends watcher, VCL reloader
+
+**Backends package** (`internal/backends/`):
+- `nodes_file.go` - Generates INI-format backends.conf for nodes vmod
+- `services.go` - Parses services.json
+- `watcher.go` - Watches services.json + EndpointSlices, regenerates backends.conf
+
+**VCL package** (`internal/vcl/`):
+- `reloader.go` - Watches main.vcl, hot-reloads via varnishadm with garbage collection
+
+**Varnishadm package** (`internal/varnishadm/`):
+- Full varnishadm protocol implementation (reverse mode, -M flag)
+- Authentication, VCL commands, parameter commands, TLS cert commands
+
+### Not Started
+
+- Operator binary
+- VCL generator (from HTTPRoutes)
+- Gateway/HTTPRoute controllers
+- Custom resource definitions (GatewayClassParameters, VarnishConfig)
+
 ## Development Setup
 
 ### Prerequisites
@@ -116,15 +146,20 @@ pod_10_0_1_1 = 10.0.1.1:8080
 ## Running Locally
 
 ```bash
-# Run operator against your cluster (not in-cluster)
-go run ./cmd/operator
-
 # Run tests
 go test ./...
 
 # Build both binaries
 go build ./cmd/operator
 go build ./cmd/sidecar
+
+# Run sidecar locally (uses ~/.kube/config)
+NAMESPACE=default \
+VARNISH_SECRET_PATH=/tmp/secret \
+SERVICES_FILE_PATH=/tmp/services.json \
+BACKENDS_FILE_PATH=/tmp/backends.conf \
+VCL_PATH=/tmp/main.vcl \
+./sidecar
 ```
 
 ## Conventions
