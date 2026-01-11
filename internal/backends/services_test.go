@@ -109,3 +109,92 @@ func TestServicesConfig_ToMap(t *testing.T) {
 		t.Errorf("svc_b not found or wrong port")
 	}
 }
+
+func TestWriteServicesConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "services.json")
+
+	services := []Service{
+		{Name: "svc_foo", Port: 8080},
+		{Name: "svc_bar", Port: 9090},
+	}
+
+	// Test writing
+	err := WriteServicesConfig(path, services)
+	if err != nil {
+		t.Fatalf("WriteServicesConfig() error = %v", err)
+	}
+
+	// Verify file exists
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		t.Fatal("services.json was not created")
+	}
+
+	// Test round-trip: read back and verify
+	config, err := LoadServicesConfig(path)
+	if err != nil {
+		t.Fatalf("LoadServicesConfig() error = %v", err)
+	}
+
+	if len(config.Services) != 2 {
+		t.Errorf("expected 2 services, got %d", len(config.Services))
+	}
+
+	// Check services are present (order may differ from input due to JSON)
+	m := config.ToMap()
+	if svc, ok := m["svc_foo"]; !ok || svc.Port != 8080 {
+		t.Errorf("svc_foo not found or wrong port")
+	}
+	if svc, ok := m["svc_bar"]; !ok || svc.Port != 9090 {
+		t.Errorf("svc_bar not found or wrong port")
+	}
+}
+
+func TestWriteServicesConfig_EmptyServices(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "services.json")
+
+	err := WriteServicesConfig(path, []Service{})
+	if err != nil {
+		t.Fatalf("WriteServicesConfig() error = %v", err)
+	}
+
+	config, err := LoadServicesConfig(path)
+	if err != nil {
+		t.Fatalf("LoadServicesConfig() error = %v", err)
+	}
+
+	if len(config.Services) != 0 {
+		t.Errorf("expected 0 services, got %d", len(config.Services))
+	}
+}
+
+func TestWriteServicesConfig_Overwrite(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "services.json")
+
+	// Write initial data
+	err := WriteServicesConfig(path, []Service{{Name: "old_svc", Port: 1234}})
+	if err != nil {
+		t.Fatalf("first WriteServicesConfig() error = %v", err)
+	}
+
+	// Overwrite with new data
+	err = WriteServicesConfig(path, []Service{{Name: "new_svc", Port: 5678}})
+	if err != nil {
+		t.Fatalf("second WriteServicesConfig() error = %v", err)
+	}
+
+	// Verify only new data exists
+	config, err := LoadServicesConfig(path)
+	if err != nil {
+		t.Fatalf("LoadServicesConfig() error = %v", err)
+	}
+
+	if len(config.Services) != 1 {
+		t.Errorf("expected 1 service, got %d", len(config.Services))
+	}
+	if config.Services[0].Name != "new_svc" {
+		t.Errorf("expected new_svc, got %s", config.Services[0].Name)
+	}
+}

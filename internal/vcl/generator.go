@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/varnish/gateway/internal/backends"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -247,4 +248,17 @@ func CollectServices(routes []gatewayv1.HTTPRoute) []Service {
 	})
 
 	return services
+}
+
+// ServicesToBackends converts vcl.Service slice to backends.Service slice.
+// This allows CollectServices output to be used with WriteServicesConfig.
+func ServicesToBackends(services []Service) []backends.Service {
+	result := make([]backends.Service, len(services))
+	for i, svc := range services {
+		result[i] = backends.Service{
+			Name: svc.Name,
+			Port: svc.Port,
+		}
+	}
+	return result
 }

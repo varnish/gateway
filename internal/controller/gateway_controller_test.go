@@ -1,0 +1,420 @@
+package controller
+
+import (
+	"context"
+	"log/slog"
+	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+)
+
+func newTestScheme() *runtime.Scheme {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = gatewayv1.Install(scheme)
+	return scheme
+}
+
+func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayReconciler {
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithRuntimeObjects(objs...).
+		WithStatusSubresource(&gatewayv1.Gateway{}).
+		Build()
+
+	return &GatewayReconciler{
+		Client: fakeClient,
+		Scheme: scheme,
+		Config: Config{
+			GatewayClassName:    "varnish",
+			DefaultVarnishImage: "quay.io/varnish-software/varnish-plus:7.6",
+			SidecarImage:        "ghcr.io/varnish/gateway-sidecar:latest",
+		},
+		Logger: slog.Default(),
+	}
+}
+
+func TestBuildLabels(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{GatewayClassName: "varnish"},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	labels := r.buildLabels(gateway)
+
+	if labels[LabelManagedBy] != ManagedByValue {
+		t.Errorf("expected managed-by label %q, got %q", ManagedByValue, labels[LabelManagedBy])
+	}
+	if labels[LabelGatewayName] != "test-gateway" {
+		t.Errorf("expected gateway-name label %q, got %q", "test-gateway", labels[LabelGatewayName])
+	}
+	if labels[LabelGatewayNamespace] != "default" {
+		t.Errorf("expected gateway-namespace label %q, got %q", "default", labels[LabelGatewayNamespace])
+	}
+}
+
+func TestBuildDeployment(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{
+			GatewayClassName:    "varnish",
+			DefaultVarnishImage: "varnish:7.6",
+			SidecarImage:        "sidecar:latest",
+		},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	deployment := r.buildDeployment(gateway)
+
+	if deployment.Name != "test-gateway" {
+		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
+	}
+	if deployment.Namespace != "default" {
+		t.Errorf("expected deployment namespace %q, got %q", "default", deployment.Namespace)
+	}
+	if len(deployment.Spec.Template.Spec.Containers) != 2 {
+		t.Errorf("expected 2 containers, got %d", len(deployment.Spec.Template.Spec.Containers))
+	}
+
+	// Verify container images
+	containers := deployment.Spec.Template.Spec.Containers
+	var varnishFound, sidecarFound bool
+	for _, c := range containers {
+		if c.Name == "varnish" && c.Image == "varnish:7.6" {
+			varnishFound = true
+		}
+		if c.Name == "sidecar" && c.Image == "sidecar:latest" {
+			sidecarFound = true
+		}
+	}
+	if !varnishFound {
+		t.Error("varnish container not found or wrong image")
+	}
+	if !sidecarFound {
+		t.Error("sidecar container not found or wrong image")
+	}
+
+	// Verify volumes
+	if len(deployment.Spec.Template.Spec.Volumes) != 3 {
+		t.Errorf("expected 3 volumes, got %d", len(deployment.Spec.Template.Spec.Volumes))
+	}
+
+	// Verify service account
+	expectedSA := "test-gateway-sidecar"
+	if deployment.Spec.Template.Spec.ServiceAccountName != expectedSA {
+		t.Errorf("expected service account %q, got %q", expectedSA, deployment.Spec.Template.Spec.ServiceAccountName)
+	}
+}
+
+func TestBuildService(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{GatewayClassName: "varnish"},
+	}
+
+	tests := []struct {
+		name          string
+		listeners     []gatewayv1.Listener
+		expectedPorts int
+		expectedPort  int32
+	}{
+		{
+			name: "single HTTP listener",
+			listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+			expectedPorts: 1,
+			expectedPort:  80,
+		},
+		{
+			name:          "no listeners defaults to port 80",
+			listeners:     nil,
+			expectedPorts: 1,
+			expectedPort:  80,
+		},
+		{
+			name: "multiple listeners",
+			listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+			},
+			expectedPorts: 2,
+			expectedPort:  80, // First port
+		},
+		{
+			name: "custom port",
+			listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 8000, Protocol: gatewayv1.HTTPProtocolType},
+			},
+			expectedPorts: 1,
+			expectedPort:  8000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gateway := &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					GatewayClassName: "varnish",
+					Listeners:        tc.listeners,
+				},
+			}
+
+			svc := r.buildService(gateway)
+
+			if len(svc.Spec.Ports) != tc.expectedPorts {
+				t.Errorf("expected %d ports, got %d", tc.expectedPorts, len(svc.Spec.Ports))
+			}
+			if svc.Spec.Ports[0].Port != tc.expectedPort {
+				t.Errorf("expected port %d, got %d", tc.expectedPort, svc.Spec.Ports[0].Port)
+			}
+			if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+				t.Errorf("expected service type LoadBalancer, got %s", svc.Spec.Type)
+			}
+		})
+	}
+}
+
+func TestBuildVCLConfigMap(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{GatewayClassName: "varnish"},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	cm := r.buildVCLConfigMap(gateway)
+
+	if cm.Name != "test-gateway-vcl" {
+		t.Errorf("expected configmap name %q, got %q", "test-gateway-vcl", cm.Name)
+	}
+
+	if _, ok := cm.Data["main.vcl"]; !ok {
+		t.Error("expected main.vcl in configmap data")
+	}
+	if _, ok := cm.Data["services.json"]; !ok {
+		t.Error("expected services.json in configmap data")
+	}
+
+	// Verify VCL contains expected content
+	vcl := cm.Data["main.vcl"]
+	if vcl == "" {
+		t.Error("expected non-empty VCL")
+	}
+}
+
+func TestBuildAdminSecret(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{GatewayClassName: "varnish"},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	secret := r.buildAdminSecret(gateway)
+
+	if secret.Name != "test-gateway-secret" {
+		t.Errorf("expected secret name %q, got %q", "test-gateway-secret", secret.Name)
+	}
+
+	secretData, ok := secret.Data["secret"]
+	if !ok {
+		t.Error("expected secret data key 'secret'")
+	}
+	if len(secretData) != 64 { // 32 bytes hex encoded = 64 chars
+		t.Errorf("expected secret length 64, got %d", len(secretData))
+	}
+}
+
+func TestBuildServiceAccount(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{GatewayClassName: "varnish"},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+	}
+
+	sa := r.buildServiceAccount(gateway)
+
+	if sa.Name != "test-gateway-sidecar" {
+		t.Errorf("expected service account name %q, got %q", "test-gateway-sidecar", sa.Name)
+	}
+	if sa.Namespace != "default" {
+		t.Errorf("expected service account namespace %q, got %q", "default", sa.Namespace)
+	}
+}
+
+func TestReconcile_SkipsDifferentGatewayClass(t *testing.T) {
+	scheme := newTestScheme()
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "other-class", // Not our class
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	r := newTestReconciler(scheme, gateway)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-gateway", Namespace: "default"},
+	})
+
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue for different gateway class")
+	}
+
+	// Verify no deployment was created
+	var deployment appsv1.Deployment
+	err = r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway", Namespace: "default"},
+		&deployment)
+	if err == nil {
+		t.Error("expected no deployment to be created for different gateway class")
+	}
+}
+
+func TestReconcile_CreatesResources(t *testing.T) {
+	scheme := newTestScheme()
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	r := newTestReconciler(scheme, gateway)
+
+	// First reconcile adds finalizer
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-gateway", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+	if !result.Requeue {
+		t.Error("expected requeue after adding finalizer")
+	}
+
+	// Second reconcile creates resources
+	result, err = r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-gateway", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+
+	// Verify Deployment was created
+	var deployment appsv1.Deployment
+	err = r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway", Namespace: "default"},
+		&deployment)
+	if err != nil {
+		t.Errorf("expected deployment to be created: %v", err)
+	}
+
+	// Verify Service was created
+	var service corev1.Service
+	err = r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway", Namespace: "default"},
+		&service)
+	if err != nil {
+		t.Errorf("expected service to be created: %v", err)
+	}
+
+	// Verify ConfigMap was created
+	var configMap corev1.ConfigMap
+	err = r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway-vcl", Namespace: "default"},
+		&configMap)
+	if err != nil {
+		t.Errorf("expected configmap to be created: %v", err)
+	}
+
+	// Verify Secret was created
+	var secret corev1.Secret
+	err = r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway-secret", Namespace: "default"},
+		&secret)
+	if err != nil {
+		t.Errorf("expected secret to be created: %v", err)
+	}
+
+	// Verify ServiceAccount was created
+	var sa corev1.ServiceAccount
+	err = r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway-sidecar", Namespace: "default"},
+		&sa)
+	if err != nil {
+		t.Errorf("expected service account to be created: %v", err)
+	}
+}
+
+func TestReconcile_NotFoundReturnsNoError(t *testing.T) {
+	scheme := newTestScheme()
+	r := newTestReconciler(scheme) // No gateway exists
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "nonexistent", Namespace: "default"},
+	})
+
+	if err != nil {
+		t.Errorf("expected no error for not found gateway, got: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue for not found gateway")
+	}
+}

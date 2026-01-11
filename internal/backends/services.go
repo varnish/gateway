@@ -43,3 +43,26 @@ func (c *ServicesConfig) ToMap() map[string]Service {
 	}
 	return m
 }
+
+// WriteServicesConfig writes a services.json file atomically.
+// It writes to a temp file first, then renames to ensure atomicity.
+func WriteServicesConfig(path string, services []Service) error {
+	config := ServicesConfig{Services: services}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("json.MarshalIndent: %w", err)
+	}
+
+	// Write to temp file first for atomic operation
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("os.WriteFile(%s): %w", tmpPath, err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath) // cleanup on failure
+		return fmt.Errorf("os.Rename(%s, %s): %w", tmpPath, path, err)
+	}
+
+	return nil
+}
