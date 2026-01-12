@@ -1,9 +1,11 @@
 package main
 
 import (
+	_ "embed"
 	"flag"
 	"log/slog"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -16,6 +18,9 @@ import (
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/controller"
 )
+
+//go:embed .version
+var version string
 
 var scheme = runtime.NewScheme()
 
@@ -93,6 +98,7 @@ func main() {
 	}
 
 	logger.Info("starting operator",
+		"version", strings.TrimSpace(version),
 		"gatewayClassName", cfg.GatewayClassName,
 		"varnishImage", cfg.DefaultVarnishImage,
 		"sidecarImage", cfg.SidecarImage)
