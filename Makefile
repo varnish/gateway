@@ -3,7 +3,7 @@ REGISTRY ?= registry.digitalocean.com/varnish-gateway
 OPERATOR_IMAGE := $(REGISTRY)/gateway-operator
 SIDECAR_IMAGE := $(REGISTRY)/gateway-sidecar
 
-.PHONY: help test build build-linux docker docker-operator docker-sidecar docker-buildx clean vendor
+.PHONY: help test build build-linux docker docker-operator docker-sidecar docker-buildx docker-buildx-setup clean vendor
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -16,6 +16,7 @@ help:
 	@echo "  make docker           Build Docker images for current arch"
 	@echo "  make docker-push      Build and push single-arch images"
 	@echo "  make docker-buildx    Build and push multi-arch images (amd64+arm64)"
+	@echo "  make docker-buildx-setup  Create buildx builder for multi-arch (run once)"
 	@echo "  make vendor           Update vendor directory"
 	@echo "  make clean            Remove build artifacts"
 	@echo ""
@@ -80,6 +81,11 @@ docker-push: docker
 
 # Multi-arch build and push (amd64 + arm64)
 PLATFORMS := linux/amd64,linux/arm64
+BUILDX_BUILDER := varnish-gateway
+
+docker-buildx-setup:
+	docker buildx create --name $(BUILDX_BUILDER) --use || docker buildx use $(BUILDX_BUILDER)
+	docker buildx inspect --bootstrap
 
 docker-buildx: docker-buildx-operator docker-buildx-sidecar
 
