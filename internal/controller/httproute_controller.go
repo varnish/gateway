@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/backends"
 	"github.com/varnish/gateway/internal/status"
 	"github.com/varnish/gateway/internal/vcl"
@@ -252,15 +253,73 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 }
 
 // getUserVCL returns user-provided VCL from GatewayClassParameters.
-// Currently returns empty string as GatewayClassParameters CRD is not yet implemented.
+// It traverses: Gateway -> GatewayClass -> GatewayClassParameters -> ConfigMap
 func (r *HTTPRouteReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
-	// TODO: Implement when GatewayClassParameters CRD is created
-	// 1. Get GatewayClass from gateway.Spec.GatewayClassName
-	// 2. Get parametersRef from GatewayClass.Spec.ParametersRef
-	// 3. Fetch GatewayClassParameters CRD
-	// 4. If UserVCLConfigMapRef is set, fetch that ConfigMap
-	// 5. Return VCL from ConfigMap data["user.vcl"]
-	return ""
+	// 1. Get GatewayClass
+	var gatewayClass gatewayv1.GatewayClass
+	if err := r.Get(ctx, types.NamespacedName{Name: string(gateway.Spec.GatewayClassName)}, &gatewayClass); err != nil {
+		if !apierrors.IsNotFound(err) {
+			r.Logger.Error("failed to get GatewayClass", "error", err)
+		}
+		return ""
+	}
+
+	// 2. Check if ParametersRef is set
+	if gatewayClass.Spec.ParametersRef == nil {
+		return ""
+	}
+
+	// 3. Validate ParametersRef points to our CRD
+	ref := gatewayClass.Spec.ParametersRef
+	if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
+		string(ref.Kind) != "GatewayClassParameters" {
+		return "" // Not our parameters type
+	}
+
+	// 4. Fetch GatewayClassParameters
+	var params gatewayparamsv1alpha1.GatewayClassParameters
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, &params); err != nil {
+		if !apierrors.IsNotFound(err) {
+			r.Logger.Error("failed to get GatewayClassParameters",
+				"name", ref.Name, "error", err)
+		}
+		return ""
+	}
+
+	// 5. If UserVCLConfigMapRef is not set, return empty
+	if params.Spec.UserVCLConfigMapRef == nil {
+		return ""
+	}
+
+	// 6. Fetch the ConfigMap containing user VCL
+	cmRef := params.Spec.UserVCLConfigMapRef
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      cmRef.Name,
+		Namespace: cmRef.Namespace,
+	}, &cm); err != nil {
+		r.Logger.Error("failed to get user VCL ConfigMap",
+			"namespace", cmRef.Namespace, "name", cmRef.Name, "error", err)
+		return ""
+	}
+
+	// 7. Return VCL from ConfigMap (default key is "user.vcl")
+	key := cmRef.Key
+	if key == "" {
+		key = "user.vcl"
+	}
+
+	userVCL, ok := cm.Data[key]
+	if !ok {
+		r.Logger.Warn("user VCL ConfigMap missing expected key",
+			"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
+		return ""
+	}
+
+	r.Logger.Debug("loaded user VCL from ConfigMap",
+		"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
+
+	return userVCL
 }
 
 // updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.

@@ -14,12 +14,15 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
 
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = gatewayv1.Install(scheme)
+	_ = gatewayparamsv1alpha1.AddToScheme(scheme)
 	return scheme
 }
 

@@ -12,6 +12,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
 
 func newHTTPRouteTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *HTTPRouteReconciler {
@@ -619,5 +621,222 @@ func TestFindHTTPRoutesForGateway_DifferentGatewayClass(t *testing.T) {
 	// Should return no requests for Gateways with different GatewayClass
 	if len(requests) != 0 {
 		t.Errorf("expected 0 requests for different GatewayClass, got %d", len(requests))
+	}
+}
+
+func TestGetUserVCL_NoGatewayClass(t *testing.T) {
+	scheme := newTestScheme()
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+		},
+	}
+
+	// No GatewayClass exists
+	r := newHTTPRouteTestReconciler(scheme, gateway)
+
+	vcl := r.getUserVCL(context.Background(), gateway)
+
+	if vcl != "" {
+		t.Errorf("expected empty VCL when GatewayClass not found, got %q", vcl)
+	}
+}
+
+func TestGetUserVCL_NoParametersRef(t *testing.T) {
+	scheme := newTestScheme()
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "varnish",
+		},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: "varnish-software.com/gateway",
+			// No ParametersRef
+		},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gatewayClass, gateway)
+
+	vcl := r.getUserVCL(context.Background(), gateway)
+
+	if vcl != "" {
+		t.Errorf("expected empty VCL when no ParametersRef, got %q", vcl)
+	}
+}
+
+func TestGetUserVCL_WithConfigMap(t *testing.T) {
+	scheme := newTestScheme()
+
+	userVCLContent := `sub vcl_recv {
+    if (req.url ~ "^/health") {
+        return (synth(200, "OK"));
+    }
+}`
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-vcl",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"user.vcl": userVCLContent,
+		},
+	}
+
+	params := &gatewayparamsv1alpha1.GatewayClassParameters{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "varnish-params",
+		},
+		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
+			UserVCLConfigMapRef: &gatewayparamsv1alpha1.ConfigMapReference{
+				Name:      "my-vcl",
+				Namespace: "default",
+			},
+		},
+	}
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "varnish",
+		},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: "varnish-software.com/gateway",
+			ParametersRef: &gatewayv1.ParametersReference{
+				Group: gatewayv1.Group(gatewayparamsv1alpha1.GroupName),
+				Kind:  "GatewayClassParameters",
+				Name:  "varnish-params",
+			},
+		},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, configMap, params, gatewayClass, gateway)
+
+	vcl := r.getUserVCL(context.Background(), gateway)
+
+	if vcl != userVCLContent {
+		t.Errorf("expected user VCL content, got %q", vcl)
+	}
+}
+
+func TestGetUserVCL_CustomKey(t *testing.T) {
+	scheme := newTestScheme()
+
+	userVCLContent := "sub vcl_recv { return (pass); }"
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-vcl",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"custom.vcl": userVCLContent,
+		},
+	}
+
+	params := &gatewayparamsv1alpha1.GatewayClassParameters{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "varnish-params",
+		},
+		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
+			UserVCLConfigMapRef: &gatewayparamsv1alpha1.ConfigMapReference{
+				Name:      "my-vcl",
+				Namespace: "default",
+				Key:       "custom.vcl",
+			},
+		},
+	}
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "varnish",
+		},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: "varnish-software.com/gateway",
+			ParametersRef: &gatewayv1.ParametersReference{
+				Group: gatewayv1.Group(gatewayparamsv1alpha1.GroupName),
+				Kind:  "GatewayClassParameters",
+				Name:  "varnish-params",
+			},
+		},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, configMap, params, gatewayClass, gateway)
+
+	vcl := r.getUserVCL(context.Background(), gateway)
+
+	if vcl != userVCLContent {
+		t.Errorf("expected user VCL with custom key, got %q", vcl)
+	}
+}
+
+func TestGetUserVCL_DifferentGroup(t *testing.T) {
+	scheme := newTestScheme()
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "varnish",
+		},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: "varnish-software.com/gateway",
+			ParametersRef: &gatewayv1.ParametersReference{
+				Group: "other.group.io", // Different group
+				Kind:  "GatewayClassParameters",
+				Name:  "varnish-params",
+			},
+		},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gatewayClass, gateway)
+
+	vcl := r.getUserVCL(context.Background(), gateway)
+
+	// Should return empty since group doesn't match
+	if vcl != "" {
+		t.Errorf("expected empty VCL for different group, got %q", vcl)
 	}
 }

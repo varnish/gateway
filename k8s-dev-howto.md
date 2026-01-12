@@ -4,8 +4,28 @@ How to set up a noisy Kubernetes environment for testing the gateway operator.
 
 ## Prerequisites
 
-- Rancher Desktop (or any local k8s)
+- Rancher Desktop (or any local k8s), OR DigitalOcean Kubernetes
 - kubectl configured
+- doctl configured (for DO)
+
+## DigitalOcean Setup
+
+Cluster: `varnish-gateway-dev`
+Registry: `varnish-gateway`
+
+```bash
+# Connect registry to cluster (only needed once)
+doctl kubernetes cluster registry add varnish-gateway-dev
+
+# Authenticate docker to the registry
+doctl registry login
+
+# Build and push images (cross-compile for x86 cluster from ARM Mac)
+docker build --platform linux/amd64 -t registry.digitalocean.com/varnish-gateway/operator:latest -f Dockerfile.operator .
+docker build --platform linux/amd64 -t registry.digitalocean.com/varnish-gateway/sidecar:latest -f Dockerfile.sidecar .
+docker push registry.digitalocean.com/varnish-gateway/operator:latest
+docker push registry.digitalocean.com/varnish-gateway/sidecar:latest
+```
 
 ## Install Gateway API CRDs
 
@@ -82,8 +102,22 @@ kubectl get endpointslices -l kubernetes.io/service-name=app-alpha --watch -o ya
 
 ## Clean Up
 
+Remove test deployments:
+
 ```bash
 kubectl delete -f hack/test-env/deployments.yaml
+```
+
+## Clean Up Everything
+
+Remove all resources including Gateway API CRDs:
+
+```bash
+# Delete test deployments
+kubectl delete -f hack/test-env/deployments.yaml
+
+# Delete Gateway API CRDs
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
 ```
 
 ## What You'll See
