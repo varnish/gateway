@@ -1,6 +1,6 @@
 # Kubernetes Development Environment
 
-How to set up a noisy Kubernetes environment for testing the gateway operator.
+How to set up a local Kubernetes environment for testing the gateway operator.
 
 ## Prerequisites
 
@@ -35,20 +35,28 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 
 ## Deploy Test Applications
 
-Two unstable applications that simulate real-world pod churn:
+Two stable mock HTTP services for testing:
 
-- **app-alpha** and **app-beta**: Simple HTTP servers on port 8080
-- Pods crash randomly after 30-120 seconds
-- Readiness probes mark pods ready/unready
+- **app-alpha** and **app-beta**: JSON API servers on port 8080
+- Return hostname and request info (useful for verifying routing)
+- Stable by default - pods run indefinitely without crashing
 - Start with 2 replicas each
 
 ```bash
 kubectl apply -f hack/test-env/deployments.yaml
 ```
 
+Test that they're working:
+
+```bash
+kubectl port-forward svc/app-alpha 8080:8080 &
+curl localhost:8080
+# {"app": "alpha", "hostname": "app-alpha-xxx", "path": "/"}
+```
+
 ## Watch Endpoint Changes
 
-See EndpointSlices update in real-time as pods come and go:
+See EndpointSlices update in real-time:
 
 ```bash
 ./hack/test-env/watch-endpoints.sh
@@ -60,22 +68,62 @@ Or manually:
 kubectl get endpointslices -l 'kubernetes.io/service-name in (app-alpha, app-beta)' --watch
 ```
 
-## Add Extra Chaos (Optional)
+## Inject Chaos
 
-Randomly scale deployments between 1-3 replicas every 15-45 seconds:
+Use the interactive chaos tool to induce failures:
 
 ```bash
 ./hack/test-env/chaos.sh
 ```
 
-## Manual Scaling
+This opens an interactive menu:
+
+```
+=== Chaos Menu ===
+  1) Kill a random pod
+  2) Kill a specific pod
+  3) Scale a deployment
+  4) Start gentle continuous chaos
+  5) Start rolling chaos (scale up/down)
+  6) Reset to stable state (2 replicas each)
+  s) Show current status
+  q) Quit
+```
+
+### Non-interactive mode
+
+You can also run chaos commands directly:
+
+```bash
+# Kill a random pod
+./hack/test-env/chaos.sh --kill
+
+# Kill a random pod from a specific app
+./hack/test-env/chaos.sh --kill app-alpha
+
+# Scale a deployment
+./hack/test-env/chaos.sh --scale app-beta 3
+
+# Reset to stable state
+./hack/test-env/chaos.sh --reset
+
+# Show current status
+./hack/test-env/chaos.sh --status
+
+# Start continuous chaos (kills one pod every 30-60s)
+./hack/test-env/chaos.sh --continuous
+```
+
+## Manual Operations
+
+### Scale deployments
 
 ```bash
 kubectl scale deployment app-alpha --replicas=3
 kubectl scale deployment app-beta --replicas=1
 ```
 
-## Kill Pods Manually
+### Kill pods
 
 ```bash
 kubectl delete pod -l app=app-alpha
@@ -122,11 +170,11 @@ kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/downlo
 
 ## What You'll See
 
-With the test environment running, you'll observe:
+With the test environment running and chaos.sh active, you'll observe:
 
-1. **Pod crashes** - Every 30-120s pods exit and k8s restarts them
-2. **Endpoint removal** - Crashed pods are removed from EndpointSlices
+1. **Pod termination** - chaos.sh kills pods, k8s restarts them
+2. **Endpoint removal** - Killed pods are removed from EndpointSlices
 3. **Endpoint addition** - New pods added once readiness probe passes
-4. **Scaling changes** - If chaos.sh is running, replica counts fluctuate
+4. **Scaling changes** - If using rolling chaos, replica counts fluctuate
 
 This mimics real production churn and helps test that the sidecar correctly tracks endpoint changes.
