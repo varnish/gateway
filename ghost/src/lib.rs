@@ -167,12 +167,9 @@ impl VclBackend<ResponseBody> for GhostBackend {
             }
         }
 
-        // Get body
-        let body = response
-            .bytes()
-            .map_err(|e| VclError::new(format!("ghost: failed to read response body: {}", e)))?;
-
-        Ok(Some(ResponseBody::new(body.to_vec())))
+        // Return streaming response - body is read on demand by Varnish,
+        // avoiding buffering the entire response in memory
+        Ok(Some(ResponseBody::streaming(response)))
     }
 }
 
@@ -192,7 +189,7 @@ fn synth_response(
     beresp.set_header("content-type", "application/json")?;
     beresp.set_header("x-ghost-error", reason)?;
 
-    Ok(ResponseBody::new(body.as_bytes().to_vec()))
+    Ok(ResponseBody::buffered(body.as_bytes().to_vec()))
 }
 
 /// Convert StrOrBytes to String if possible
