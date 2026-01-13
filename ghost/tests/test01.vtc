@@ -1,0 +1,82 @@
+varnishtest "ghost basic routing"
+
+# Backend server for api.example.com
+server s1 {
+    rxreq
+    expect req.http.host == "api.example.com"
+    expect req.http.x-forwarded-host == "api.example.com"
+    txresp -body "backend-api"
+} -start
+
+# Backend server for default
+server s2 {
+    rxreq
+    expect req.http.x-forwarded-host == "unknown.example.com"
+    txresp -body "backend-default"
+} -start
+
+# Write config file
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 1,
+    "vhosts": {
+        "api.example.com": {
+            "backends": [
+                {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+            ]
+        }
+    },
+    "default": {
+        "backends": [
+            {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+        ]
+    }
+}
+EOF
+}
+
+varnish v1 -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        # Check for reload request
+        if (ghost.recv()) {
+            return (synth(200, "Reload"));
+        }
+    }
+
+    sub vcl_backend_fetch {
+        set bereq.backend = router.backend();
+    }
+
+    sub vcl_synth {
+        # For reload responses, use the ghost.recv() return value
+        # (In real usage, you'd capture this in vcl_recv)
+        set resp.http.content-type = "application/json";
+        return (deliver);
+    }
+} -start
+
+# Test 1: Route to api.example.com backend
+client c1 {
+    txreq -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-api"
+} -run
+
+# Test 2: Route to default backend for unknown host
+client c2 {
+    txreq -hdr "Host: unknown.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-default"
+} -run
