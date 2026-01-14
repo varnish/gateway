@@ -1,0 +1,10 @@
+# GatewayClass for Varnish Gateway
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: varnish
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+spec:
+  controllerName: varnish-software.com/gateway
+  description: Varnish-based Gateway implementation with caching support

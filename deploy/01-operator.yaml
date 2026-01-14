@@ -1,0 +1,143 @@
+# Operator ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: varnish-gateway-operator
+  namespace: varnish-gateway-system
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+    app.kubernetes.io/component: operator
+---
+# ClusterRole for the operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: varnish-gateway-operator
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+    app.kubernetes.io/component: operator
+rules:
+  # Gateway API resources
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes/status"]
+    verbs: ["get", "update", "patch"]
+  # Our custom resource
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["gatewayclassparameters"]
+    verbs: ["get", "list", "watch"]
+  # Core resources the operator creates for Gateways
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+# ClusterRoleBinding for the operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: varnish-gateway-operator
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: varnish-gateway-operator
+subjects:
+  - kind: ServiceAccount
+    name: varnish-gateway-operator
+    namespace: varnish-gateway-system
+---
+# Operator Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: varnish-gateway-operator
+  namespace: varnish-gateway-system
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+    app.kubernetes.io/component: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: varnish-gateway
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: varnish-gateway
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: varnish-gateway-operator
+      containers:
+        - name: operator
+          image: registry.digitalocean.com/varnish-gateway/gateway-operator:latest
+          args:
+            - --leader-elect=true
+          env:
+            - name: GATEWAY_CLASS_NAME
+              value: "varnish"
+            - name: GATEWAY_IMAGE
+              value: "registry.digitalocean.com/varnish-gateway/gateway-chaperone:latest"
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 500m
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+      terminationGracePeriodSeconds: 10

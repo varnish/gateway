@@ -1,0 +1,38 @@
+# ClusterRole for chaperone pods to watch EndpointSlices
+# This role is bound to chaperone ServiceAccounts created by the operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: varnish-gateway-chaperone
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+    app.kubernetes.io/component: chaperone
+rules:
+  # Watch EndpointSlices for backend discovery
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Watch Services for port resolution
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding for chaperone in the default namespace
+# Add additional bindings for other namespaces where you deploy Gateways
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: varnish-gateway-chaperone-default
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+    app.kubernetes.io/component: chaperone
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: varnish-gateway-chaperone
+subjects:
+  # Bind to all ServiceAccounts in the default namespace
+  # The operator creates ServiceAccounts named {gateway-name}-chaperone
+  - kind: Group
+    name: system:serviceaccounts:default
+    apiGroup: rbac.authorization.k8s.io
