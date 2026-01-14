@@ -22,17 +22,20 @@ A purpose-built Varnish vmod for Gateway API implementation, written in Rust usi
 - [x] Weighted random backend selection
 - [x] Default backend fallback
 - [x] Hot reload via `/.varnish-ghost/reload`
-- [x] HTTP forwarding via blocking reqwest
+- [x] HTTP forwarding via async reqwest with connection pooling
 - [x] Hop-by-hop header filtering
 - [x] Error responses: 404 (no vhost), 503 (no backends) with JSON bodies
 - [x] Docker build with Varnish 7.6
 - [x] Unit tests for config and routing
+- [x] Background tokio runtime for async HTTP (vmod-reqwest pattern)
+- [x] Connection pooling that survives config reloads
+- [x] Streaming response bodies via channels
 
 **Not yet implemented:**
 - [ ] VTC integration tests (framework ready, tests need real Varnish)
 - [ ] Localhost-only restriction on reload endpoint
 
-**Architecture decision:** Uses synthetic backend pattern (like vmod-reqwest) rather than Varnish directors. The `GhostBackend` makes HTTP requests via reqwest in `get_response()`.
+**Architecture decision:** Uses synthetic backend pattern (like vmod-reqwest) rather than Varnish directors. The `GhostBackend` sends HTTP requests to a background tokio runtime via channels. The async reqwest client handles connection pooling, and responses are streamed back via channels.
 
 **Build requirement:** Docker with Varnish 7.6. varnish-rs 0.5.5 doesn't support Varnish trunk (VDP API changes).
 
@@ -530,8 +533,8 @@ Ghost version is coupled to operator version:
 
 ## Open Questions
 
-1. **Async vs blocking**: Currently using blocking reqwest which ties up a Varnish worker thread during backend fetch. May need async (like vmod-reqwest) for high-throughput scenarios.
+1. ~~**Async vs blocking**~~: **RESOLVED** - Now uses async reqwest with background tokio runtime (like vmod-reqwest pattern). Workers still block waiting for responses, but HTTP I/O is handled asynchronously.
 
-2. **Connection pooling**: Blocking reqwest creates connections per-request. May need persistent connection pool for performance.
+2. ~~**Connection pooling**~~: **RESOLVED** - Async reqwest client with proper connection pooling. Pool survives config reloads (only routing config changes, HTTP client persists).
 
-3. **Body streaming**: Currently buffers entire response body. Large responses may need streaming.
+3. ~~**Body streaming**~~: **RESOLVED** - Response bodies are streamed via tokio channels, not buffered in memory.

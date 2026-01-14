@@ -2,28 +2,41 @@
 //!
 //! A purpose-built Varnish vmod for Kubernetes Gateway API implementation.
 //! Handles backend management, request routing, and configuration hot-reloading.
+//!
+//! ## Connection Pooling
+//!
+//! Ghost uses a background tokio runtime with an async reqwest client for proper
+//! connection pooling. The runtime is created on VCL load and shared across all
+//! backends via `#[shared_per_vcl]`. This means:
+//!
+//! - Connections are reused across requests
+//! - Config reloads don't drop existing connections
+//! - Pool parameters (idle timeout, max connections) are properly managed
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use tokio::sync::mpsc::UnboundedSender;
 
-use varnish::vcl::{Backend, Ctx, HttpHeaders, StrOrBytes, VclBackend, VclError};
+use varnish::vcl::{Backend, Ctx, Event, HttpHeaders, StrOrBytes, VclBackend, VclError};
 
 mod config;
 mod response;
 mod routing;
+pub mod runtime;
 
 use config::Config;
 use response::ResponseBody;
 use routing::MatchResult;
+pub use runtime::BgThread;
+use runtime::HttpRequest;
 
 // Run VTC tests
 varnish::run_vtc_tests!("tests/*.vtc");
 
+/// Todo: Is this really needed?
 /// Headers to filter out when forwarding requests to backends
 const FILTERED_REQUEST_HEADERS: &[&str] = &[
-    "host",
     "connection",
     "keep-alive",
     "proxy-authenticate",
@@ -49,14 +62,13 @@ const FILTERED_RESPONSE_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-/// Global state for the ghost VMOD
+/// Global state for the ghost VMOD (routing config only, HTTP client is in BgThread)
 struct GhostState {
     config_path: PathBuf,
     config: Config,
-    http_client: reqwest::blocking::Client,
 }
 
-/// Global state storage
+/// Global state storage (routing config only)
 static STATE: RwLock<Option<Arc<GhostState>>> = RwLock::new(None);
 
 /// The ghost backend - wraps our routing logic
@@ -66,11 +78,14 @@ pub struct ghost_backend {
 }
 
 /// Our VclBackend implementation that does the actual routing
-struct GhostBackend;
+struct GhostBackend {
+    /// Channel sender to the background runtime for HTTP requests
+    sender: UnboundedSender<HttpRequest>,
+}
 
 impl VclBackend<ResponseBody> for GhostBackend {
     fn get_response(&self, ctx: &mut Ctx) -> Result<Option<ResponseBody>, VclError> {
-        // Get state
+        // Get routing config state
         let state_guard = STATE.read();
         let state = state_guard
             .as_ref()
@@ -119,31 +134,39 @@ impl VclBackend<ResponseBody> for GhostBackend {
         // Build request URL
         let target_url = format!("http://{}:{}{}", target.address, target.port, url);
 
-        // Build request with copied headers
-        let method = get_method(bereq).unwrap_or_else(|| "GET".to_string());
-        let mut request = match method.as_str() {
-            "GET" => state.http_client.get(&target_url),
-            "POST" => state.http_client.post(&target_url),
-            "PUT" => state.http_client.put(&target_url),
-            "DELETE" => state.http_client.delete(&target_url),
-            "HEAD" => state.http_client.head(&target_url),
-            "PATCH" => state.http_client.patch(&target_url),
-            _ => state.http_client.request(
-                reqwest::Method::from_bytes(method.as_bytes())
-                    .map_err(|e| VclError::new(format!("ghost: invalid method: {}", e)))?,
-                &target_url,
-            ),
+        // Parse method
+        let method_str = get_method(bereq).unwrap_or_default();
+        let method: reqwest::Method = method_str
+            .parse()
+            .unwrap_or(reqwest::Method::GET);
+
+        // Collect headers (filtering hop-by-hop)
+        let mut headers = collect_request_headers(bereq);
+        headers.push(("X-Forwarded-Host".to_string(), host.clone()));
+
+        // Drop state guard before blocking
+        drop(state_guard);
+
+        // Create oneshot channel for response
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        // Build request for background runtime
+        let request = HttpRequest {
+            method,
+            url: target_url,
+            headers,
+            response_tx,
         };
 
-        // Copy headers (filtering out hop-by-hop headers)
-        request = copy_request_headers(bereq, request);
+        // Send to background runtime
+        self.sender
+            .send(request)
+            .map_err(|_| VclError::new("ghost: background runtime unavailable".to_string()))?;
 
-        // Set X-Forwarded-Host
-        request = request.header("X-Forwarded-Host", &host);
-
-        // Send request
-        let response = request
-            .send()
+        // Block waiting for response from async runtime
+        let response = response_rx
+            .blocking_recv()
+            .map_err(|_| VclError::new("ghost: request was cancelled".to_string()))?
             .map_err(|e| VclError::new(format!("ghost: backend request failed: {}", e)))?;
 
         // Set response headers on beresp
@@ -152,24 +175,32 @@ impl VclBackend<ResponseBody> for GhostBackend {
             .as_mut()
             .ok_or_else(|| VclError::new("ghost: no beresp available".to_string()))?;
 
-        beresp.set_status(response.status().as_u16());
+        beresp.set_status(response.status);
 
         // Copy response headers (filtering hop-by-hop)
-        for (name, value) in response.headers() {
-            let name_str = name.as_str();
+        for (name, value) in &response.headers {
             if !FILTERED_RESPONSE_HEADERS
                 .iter()
-                .any(|h| h.eq_ignore_ascii_case(name_str))
+                .any(|h| h.eq_ignore_ascii_case(name))
             {
-                if let Ok(v) = value.to_str() {
-                    let _ = beresp.set_header(name_str, v);
-                }
+                let _ = beresp.set_header(name, value);
             }
         }
 
-        // Return streaming response - body is read on demand by Varnish,
-        // avoiding buffering the entire response in memory
-        Ok(Some(ResponseBody::streaming(response)))
+        // Get content-length if available
+        let content_length = response.headers.iter().find_map(|(k, v)| {
+            if k.eq_ignore_ascii_case("content-length") {
+                v.parse().ok()
+            } else {
+                None
+            }
+        });
+
+        // Return streaming response body via channel
+        Ok(Some(ResponseBody::async_streaming(
+            response.body_rx,
+            content_length,
+        )))
     }
 }
 
@@ -220,23 +251,21 @@ fn get_method(http: &HttpHeaders) -> Option<String> {
     http.method().and_then(|s| str_or_bytes_to_string(&s))
 }
 
-/// Copy request headers to reqwest request builder
-fn copy_request_headers(
-    http: &HttpHeaders,
-    mut request: reqwest::blocking::RequestBuilder,
-) -> reqwest::blocking::RequestBuilder {
+/// Collect request headers into a Vec (filtering hop-by-hop headers)
+fn collect_request_headers(http: &HttpHeaders) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
     for (name, value) in http {
         let name_lower = name.to_lowercase();
         if !FILTERED_REQUEST_HEADERS.iter().any(|h| *h == name_lower) {
             if let Some(v) = str_or_bytes_to_string(&value) {
-                request = request.header(name, v);
+                headers.push((name.to_string(), v));
             }
         }
     }
-    request
+    headers
 }
 
-/// Reload configuration from disk
+/// Reload configuration from disk (HTTP client is in BgThread, not recreated here)
 fn reload_config() -> Result<(), String> {
     let state_guard = STATE.read();
     let current_state = state_guard.as_ref().ok_or("ghost not initialized")?;
@@ -246,17 +275,7 @@ fn reload_config() -> Result<(), String> {
 
     let config = config::load(&config_path)?;
 
-    let http_client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("failed to create HTTP client: {}", e))?;
-
-    let new_state = GhostState {
-        config_path,
-        config,
-        http_client,
-    };
+    let new_state = GhostState { config_path, config };
 
     let mut guard = STATE.write();
     *guard = Some(Arc::new(new_state));
@@ -364,6 +383,32 @@ mod ghost {
     use super::*;
     use varnish::ffi::VCL_BACKEND;
 
+    /// VCL event handler - creates background runtime on VCL load.
+    ///
+    /// This is called automatically by Varnish when the VCL is loaded or discarded.
+    /// It creates the background tokio runtime with the async HTTP client for
+    /// connection pooling. The runtime is shared across all ghost backends in
+    /// the VCL via `#[shared_per_vcl]`.
+    #[event]
+    pub fn event(
+        #[shared_per_vcl] bg_thread: &mut Option<Box<BgThread>>,
+        event: Event,
+    ) {
+        if let Event::Load = event {
+            match BgThread::new() {
+                Ok(bgt) => {
+                    *bg_thread = Some(Box::new(bgt));
+                }
+                Err(e) => {
+                    // Log error but don't crash - the vmod will fail gracefully
+                    // when backends are used without initialization
+                    eprintln!("ghost: failed to initialize background runtime: {}", e);
+                }
+            }
+        }
+        // BgThread is automatically dropped when VCL is discarded
+    }
+
     /// Initialize ghost with a configuration file path.
     ///
     /// This function must be called in `vcl_init` before creating any ghost backends.
@@ -389,19 +434,7 @@ mod ghost {
         let config =
             config::load(&config_path).map_err(|e| VclError::new(format!("ghost.init: {}", e)))?;
 
-        let http_client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|e| {
-                VclError::new(format!("ghost.init: failed to create HTTP client: {}", e))
-            })?;
-
-        let state = GhostState {
-            config_path,
-            config,
-            http_client,
-        };
+        let state = GhostState { config_path, config };
 
         let mut guard = STATE.write();
         *guard = Some(Arc::new(state));
@@ -485,13 +518,19 @@ mod ghost {
     impl ghost_backend {
         /// Create a new ghost backend instance.
         ///
-        /// Must be called after `ghost.init()` has been called.
+        /// Must be called after `ghost.init()` has been called. The background
+        /// runtime (created automatically on VCL load) provides connection pooling.
         ///
         /// # Errors
         ///
-        /// Returns an error if `ghost.init()` has not been called first.
-        pub fn new(ctx: &mut Ctx, #[vcl_name] name: &str) -> Result<Self, VclError> {
-            // Verify state is initialized
+        /// Returns an error if `ghost.init()` has not been called first, or if
+        /// the background runtime failed to initialize.
+        pub fn new(
+            ctx: &mut Ctx,
+            #[vcl_name] name: &str,
+            #[shared_per_vcl] bg_thread: &mut Option<Box<BgThread>>,
+        ) -> Result<Self, VclError> {
+            // Verify routing config is initialized
             {
                 let state_guard = STATE.read();
                 if state_guard.is_none() {
@@ -501,7 +540,20 @@ mod ghost {
                 }
             }
 
-            let backend = Backend::new(ctx, "ghost", name, GhostBackend, false)?;
+            // Verify background runtime is initialized
+            let bg = bg_thread.as_ref().ok_or_else(|| {
+                VclError::new("ghost.backend: background runtime not initialized".to_string())
+            })?;
+
+            let backend = Backend::new(
+                ctx,
+                "ghost",
+                name,
+                GhostBackend {
+                    sender: bg.sender.clone(),
+                },
+                false,
+            )?;
 
             Ok(ghost_backend { backend })
         }
@@ -513,6 +565,12 @@ mod ghost {
         /// 2. Select a backend using weighted random selection
         /// 3. Forward the request to the selected backend
         /// 4. Return the response (or a synthetic 404/503 on error)
+        ///
+        /// # Safety
+        ///
+        /// This function returns a raw VCL_BACKEND pointer that must only be used
+        /// within VCL backend fetch context. The pointer is valid for the lifetime
+        /// of the ghost_backend object.
         ///
         /// # Example
         ///

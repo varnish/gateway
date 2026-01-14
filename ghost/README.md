@@ -191,11 +191,13 @@ set bereq.backend = router.backend();
 
 Create a new ghost backend instance.
 
-Must be called after `ghost.init()` has been called.
+Must be called after `ghost.init()` has been called. The background
+runtime (created automatically on VCL load) provides connection pooling.
 
 ##### Errors
 
-Returns an error if `ghost.init()` has not been called first.
+Returns an error if `ghost.init()` has not been called first, or if
+the background runtime failed to initialize.
 
 #### Method `BACKEND <object>.backend()`
 
@@ -206,6 +208,12 @@ When this backend is used, ghost will:
 2. Select a backend using weighted random selection
 3. Forward the request to the selected backend
 4. Return the response (or a synthetic 404/503 on error)
+
+##### Safety
+
+This function returns a raw VCL_BACKEND pointer that must only be used
+within VCL backend fetch context. The pointer is valid for the lifetime
+of the ghost_backend object.
 
 ##### Example
 
