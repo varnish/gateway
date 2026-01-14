@@ -5,9 +5,7 @@
 Kubernetes Gateway API implementation using Varnish. Three components:
 - **operator**: watches Gateway API resources, generates ghost.json config, manages deployments
 - **chaperone**: handles endpoint discovery and triggers ghost reload
-- **ghost**: Rust VMOD that handles all routing logic internally (replaces nodes/udo/activedns vmods)
-
-See PLAN2.md for full architecture (supersedes PLAN.md).
+- **ghost**: Rust VMOD that handles all routing logic internally
 
 ## Progress
 
