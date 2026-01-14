@@ -20,17 +20,64 @@ doctl kubernetes cluster registry add varnish-gateway-dev
 # Authenticate docker to the registry
 doctl registry login
 
-# Build and push images (cross-compile for x86 cluster from ARM Mac)
-docker build --platform linux/amd64 -t registry.digitalocean.com/varnish-gateway/operator:latest -f Dockerfile.operator .
-docker build --platform linux/amd64 -t registry.digitalocean.com/varnish-gateway/chaperone:latest -f Dockerfile.chaperone .
-docker push registry.digitalocean.com/varnish-gateway/operator:latest
-docker push registry.digitalocean.com/varnish-gateway/chaperone:latest
+# Build and push using Makefile
+make docker-push
+
+# Or build multi-arch (amd64 + arm64)
+make docker-buildx
 ```
+
+Images:
+- `registry.digitalocean.com/varnish-gateway/gateway-operator`
+- `registry.digitalocean.com/varnish-gateway/gateway-chaperone`
 
 ## Install Gateway API CRDs
 
 ```bash
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+```
+
+## Deploy the Operator
+
+### Set up Image Pull Secrets
+
+The DigitalOcean registry requires authentication. Create secrets in the namespaces where pods will run:
+
+```bash
+# Create secret in operator namespace
+doctl registry kubernetes-manifest --name regcred | \
+  sed 's/namespace: kube-system/namespace: varnish-gateway-system/' | \
+  kubectl apply -f -
+
+# Create secret in default namespace (for chaperone pods)
+doctl registry kubernetes-manifest --name regcred | \
+  sed 's/namespace: kube-system/namespace: default/' | \
+  kubectl apply -f -
+```
+
+### Deploy
+
+```bash
+kubectl apply -f deploy/
+```
+
+This creates:
+- `varnish-gateway-system` namespace with the operator
+- `varnish` GatewayClass
+- RBAC for operator and chaperone pods
+- Sample Gateway and HTTPRoutes (in default namespace)
+
+### Verify
+
+```bash
+# Check operator
+kubectl get pods -n varnish-gateway-system
+
+# Check gateway status
+kubectl get gateway,httproute
+
+# Check chaperone pod (created by operator)
+kubectl get pods -l app.kubernetes.io/managed-by=varnish-gateway-operator
 ```
 
 ## Deploy Test Applications
@@ -129,6 +176,25 @@ kubectl scale deployment app-beta --replicas=1
 kubectl delete pod -l app=app-alpha
 ```
 
+## Test the Gateway
+
+Once deployed, test routing through the gateway:
+
+```bash
+# Get the gateway service IP
+kubectl get svc varnish-gateway
+
+# Port-forward to test locally
+kubectl port-forward svc/varnish-gateway 8080:80 &
+
+# Test routing (uses Host header to route)
+curl -H "Host: alpha.example.com" localhost:8080
+# {"app": "alpha", ...}
+
+curl -H "Host: beta.example.com" localhost:8080
+# {"app": "beta", ...}
+```
+
 ## Watch Kubernetes Events
 
 ```bash
@@ -156,11 +222,20 @@ Remove test deployments:
 kubectl delete -f hack/test-env/deployments.yaml
 ```
 
+Remove gateway operator:
+
+```bash
+kubectl delete -f deploy/
+```
+
 ## Clean Up Everything
 
 Remove all resources including Gateway API CRDs:
 
 ```bash
+# Delete gateway operator and resources
+kubectl delete -f deploy/
+
 # Delete test deployments
 kubectl delete -f hack/test-env/deployments.yaml
 

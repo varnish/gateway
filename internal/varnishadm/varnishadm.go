@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +29,8 @@ type Server struct {
 	bannerReceived bool   // Tracks if banner has been read for this connection
 	environment    string // Stores the environment line (e.g., "Darwin,24.6.0,arm64,-jnone,-smse4,-sdefault,-hcritbit")
 	version        string // Stores the Varnish version (e.g., "varnish-7.7.3")
+	connected      chan struct{}
+	connectedOnce  sync.Once
 }
 
 // VarnishResponse is a type the maps the response
@@ -69,11 +72,18 @@ const (
 
 func New(port uint16, secret string, logger *slog.Logger) *Server {
 	return &Server{
-		Port:   port,
-		Secret: secret,
-		logger: logger,
-		reqCh:  make(chan varnishRequest, 1),
+		Port:      port,
+		Secret:    secret,
+		logger:    logger,
+		reqCh:     make(chan varnishRequest, 1),
+		connected: make(chan struct{}),
 	}
+}
+
+// Connected returns a channel that is closed when varnishd has connected and authenticated.
+// This can be used to wait for the admin connection to be ready before sending commands.
+func (v *Server) Connected() <-chan struct{} {
+	return v.connected
 }
 
 // Run runs the server and waits for connections from varnishd - blocks
@@ -132,6 +142,11 @@ func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
 	}
 
 	v.logger.Info("Varnish connected and authenticated", "version", v.version, "remote_addr", tcpConn.RemoteAddr())
+
+	// Signal that connection is established
+	v.connectedOnce.Do(func() {
+		close(v.connected)
+	})
 
 	for {
 		select {

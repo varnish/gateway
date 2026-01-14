@@ -29,8 +29,8 @@ func New(workDir string, logger *slog.Logger, customVarnishDir string) *Manager 
 	}
 }
 
-// PrepareWorkspace sets up the varnish directory, secret file, and license file
-func (m *Manager) PrepareWorkspace(licenseText string) error {
+// PrepareWorkspace sets up the varnish directory and secret file
+func (m *Manager) PrepareWorkspace() error {
 	if m.varnishDir != "" {
 		// Create varnish directory with permissions that allow Varnish to read after dropping privileges
 		if err := os.MkdirAll(m.varnishDir, 0755); err != nil {
@@ -48,11 +48,6 @@ func (m *Manager) PrepareWorkspace(licenseText string) error {
 	// Generate secret file for varnishadm authentication
 	if err := m.generateSecretFile(); err != nil {
 		return fmt.Errorf("failed to generate secret file: %w", err)
-	}
-
-	// Write Varnish Enterprise license file if present
-	if err := m.writeLicenseFile(licenseText); err != nil {
-		return fmt.Errorf("failed to write license file: %w", err)
 	}
 
 	return nil
@@ -76,21 +71,6 @@ func (m *Manager) generateSecretFile() error {
 	}
 
 	m.logger.Debug("Generated varnishadm secret file", "path", secretPath)
-	return nil
-}
-
-// writeLicenseFile writes the Varnish Enterprise license to disk if present
-func (m *Manager) writeLicenseFile(licenseText string) error {
-	if licenseText == "" {
-		m.logger.Debug("No license text provided, skipping license file creation")
-		return nil
-	}
-	licensePath := filepath.Join(m.workDir, "orca.lic")
-	if err := os.WriteFile(licensePath, []byte(licenseText), 0644); err != nil {
-		return fmt.Errorf("failed to write license file: %w", err)
-	}
-
-	m.logger.Debug("Wrote Varnish Enterprise license file", "path", licensePath)
 	return nil
 }
 
@@ -163,9 +143,4 @@ func (m *Manager) GetVarnishDir() string {
 // GetSecretPath returns the path to the secret file
 func (m *Manager) GetSecretPath() string {
 	return filepath.Join(m.workDir, "secret")
-}
-
-// GetLicensePath returns the path to the license file
-func (m *Manager) GetLicensePath() string {
-	return filepath.Join(m.workDir, "orca.lic")
 }

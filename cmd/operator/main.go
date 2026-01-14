@@ -48,6 +48,7 @@ func main() {
 	cfg := controller.Config{
 		GatewayClassName: getEnvOrDefault("GATEWAY_CLASS_NAME", "varnish"),
 		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/varnish-gateway:latest"),
+		ImagePullSecrets: getEnvOrDefault("IMAGE_PULL_SECRETS", ""),
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{

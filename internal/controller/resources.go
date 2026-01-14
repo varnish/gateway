@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -96,6 +97,17 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
+	// Build image pull secrets from config
+	var imagePullSecrets []corev1.LocalObjectReference
+	if r.Config.ImagePullSecrets != "" {
+		for _, name := range strings.Split(r.Config.ImagePullSecrets, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: name})
+			}
+		}
+	}
+
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
@@ -117,6 +129,7 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: fmt.Sprintf("%s-chaperone", gateway.Name),
+					ImagePullSecrets:   imagePullSecrets,
 					Containers: []corev1.Container{
 						r.buildGatewayContainer(gateway),
 					},

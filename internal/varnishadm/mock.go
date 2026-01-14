@@ -17,6 +17,9 @@ type MockVarnishadm struct {
 	running bool
 	mu      sync.RWMutex
 
+	// connected is closed immediately since mock is always "connected"
+	connected chan struct{}
+
 	// responses maps commands to predefined responses
 	responses map[string]VarnishResponse
 
@@ -34,10 +37,14 @@ type MockVarnishadm struct {
 
 // NewMock creates a new mock varnishadm instance
 func NewMock(port int, secret string, logger *slog.Logger) *MockVarnishadm {
+	connected := make(chan struct{})
+	close(connected) // Mock is always "connected"
+
 	mock := &MockVarnishadm{
 		Port:              port,
 		Secret:            secret,
 		logger:            logger,
+		connected:         connected,
 		responses:         make(map[string]VarnishResponse),
 		tlsCertsCommitted: make(map[string]TLSCertEntry),
 		tlsCertsStaged:    make(map[string]TLSCertEntry),
@@ -47,6 +54,12 @@ func NewMock(port int, secret string, logger *slog.Logger) *MockVarnishadm {
 	mock.setDefaultResponses()
 
 	return mock
+}
+
+// Connected returns a channel that is closed when varnishd has connected.
+// For the mock, this is always immediately closed since the mock is always "connected".
+func (m *MockVarnishadm) Connected() <-chan struct{} {
+	return m.connected
 }
 
 // setDefaultResponses sets up common varnish command responses
@@ -59,6 +72,16 @@ func (m *MockVarnishadm) setDefaultResponses() {
 	m.responses["status"] = VarnishResponse{
 		statusCode: ClisOk,
 		payload:    "Child in state running",
+	}
+
+	m.responses["start"] = VarnishResponse{
+		statusCode: ClisOk,
+		payload:    "Child started",
+	}
+
+	m.responses["stop"] = VarnishResponse{
+		statusCode: ClisOk,
+		payload:    "Child stopped",
 	}
 
 	m.responses["banner"] = VarnishResponse{

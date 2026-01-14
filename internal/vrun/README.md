@@ -13,7 +13,7 @@ Manages varnishd process lifecycle.
 logger := slog.Default()
 mgr := vrun.New("/var/run/varnish", logger, "/var/lib/varnish/instance")
 
-if err := mgr.PrepareWorkspace(""); err != nil {
+if err := mgr.PrepareWorkspace(); err != nil {
     log.Fatal(err)
 }
 
@@ -56,4 +56,3 @@ if err := mgr.Wait(); err != nil {
 - `Wait()` blocks until varnishd exits; use context cancellation to stop the process
 - VCL is not loaded at startup (`-f ""`); load via admin socket after start
 - Secret file is written to `WorkDir/secret`
-- License file (Varnish Enterprise) is written to `WorkDir/orca.lic` if provided

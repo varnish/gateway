@@ -6,6 +6,8 @@ import "context"
 type VarnishadmInterface interface {
 	// Run starts the varnishadm server and blocks until context is cancelled
 	Run(ctx context.Context) error
+	// Connected returns a channel that is closed when varnishd has connected and authenticated
+	Connected() <-chan struct{}
 	// Exec executes a command and returns the response
 	Exec(cmd string) (VarnishResponse, error)
 

@@ -37,7 +37,6 @@ type Config struct {
 	VarnishHTTPAddr string   // varnish HTTP address for ghost reload (e.g., "localhost:80")
 	VarnishListen   []string // -a arguments for varnishd
 	VarnishStorage  []string // -s arguments for varnishd
-	LicenseText     string   // Varnish Enterprise license (optional)
 
 	// Ghost configuration
 	RoutingConfigPath string // path to routing.json from operator
@@ -66,7 +65,6 @@ func loadConfig() (*Config, error) {
 		VarnishHTTPAddr:   getEnvOrDefault("VARNISH_HTTP_ADDR", "localhost:80"),
 		VarnishListen:     parseList(getEnvOrDefault("VARNISH_LISTEN", ":80,http")),
 		VarnishStorage:    parseList(getEnvOrDefault("VARNISH_STORAGE", "malloc,256m")),
-		LicenseText:       os.Getenv("VARNISH_LICENSE"), // optional
 		RoutingConfigPath: getEnvOrDefault("ROUTING_CONFIG_PATH", "/etc/varnish/routing.json"),
 		GhostConfigPath:   getEnvOrDefault("GHOST_CONFIG_PATH", "/var/run/varnish/ghost.json"),
 		VCLPath:           getEnvOrDefault("VCL_PATH", "/var/run/varnish/main.vcl"),
@@ -182,8 +180,8 @@ func run() error {
 	logger := slog.Default()
 	varnishMgr := vrun.New(cfg.WorkDir, logger.With("component", "vrun"), cfg.VarnishDir)
 
-	// Prepare workspace (creates secret file, writes license)
-	if err := varnishMgr.PrepareWorkspace(cfg.LicenseText); err != nil {
+	// Prepare workspace (creates secret file)
+	if err := varnishMgr.PrepareWorkspace(); err != nil {
 		return fmt.Errorf("varnishMgr.PrepareWorkspace: %w", err)
 	}
 
@@ -214,12 +212,11 @@ func run() error {
 
 	// Build varnishd arguments
 	varnishCfg := &vrun.Config{
-		WorkDir:     cfg.WorkDir,
-		AdminPort:   cfg.AdminPort,
-		VarnishDir:  cfg.VarnishDir,
-		LicensePath: varnishMgr.GetLicensePath(),
-		Listen:      cfg.VarnishListen,
-		Storage:     cfg.VarnishStorage,
+		WorkDir:    cfg.WorkDir,
+		AdminPort:  cfg.AdminPort,
+		VarnishDir: cfg.VarnishDir,
+		Listen:     cfg.VarnishListen,
+		Storage:    cfg.VarnishStorage,
 	}
 	varnishArgs := vrun.BuildArgs(varnishCfg)
 
@@ -277,7 +274,7 @@ func run() error {
 		}
 	}()
 
-	// Start Varnish
+	// Start Varnish (manager process only, no VCL loaded yet)
 	slog.Info("starting Varnish", "args", varnishArgs)
 	readyCh, err := varnishMgr.Start(ctx, "", varnishArgs)
 	if err != nil {
@@ -286,24 +283,52 @@ func run() error {
 		return fmt.Errorf("varnishMgr.Start: %w", err)
 	}
 
-	// Wait for Varnish to signal readiness
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		select {
-		case <-readyCh:
-			slog.Info("Varnish is ready to receive traffic")
-		case <-ctx.Done():
-			return
-		}
-	}()
-
 	// Wait for Varnish process to exit
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		if err := varnishMgr.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 			errCh <- fmt.Errorf("varnishMgr.Wait: %w", err)
+		}
+	}()
+
+	// Startup sequence: wait for varnishadm connection, load VCL, start child
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		// Step 1: Wait for varnishadm connection
+		slog.Info("waiting for varnishadm connection")
+		select {
+		case <-vadm.Connected():
+			slog.Info("varnishadm connected")
+		case <-ctx.Done():
+			return
+		}
+
+		// Step 2: Load initial VCL
+		slog.Info("loading initial VCL", "path", cfg.VCLPath)
+		if err := vclReloader.Reload(); err != nil {
+			slog.Error("initial VCL load failed", "error", err)
+			errCh <- fmt.Errorf("initial VCL load: %w", err)
+			return
+		}
+		slog.Info("initial VCL loaded")
+
+		// Step 3: Start the child process
+		slog.Info("starting Varnish child process")
+		if _, err := vadm.Start(); err != nil {
+			slog.Error("failed to start Varnish child", "error", err)
+			errCh <- fmt.Errorf("vadm.Start: %w", err)
+			return
+		}
+
+		// Step 4: Wait for child to signal readiness
+		select {
+		case <-readyCh:
+			slog.Info("Varnish is ready to receive traffic")
+		case <-ctx.Done():
+			return
 		}
 	}()
 

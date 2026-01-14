@@ -39,7 +39,7 @@ func TestPrepareWorkspace(t *testing.T) {
 
 	mgr := New(workDir, logger, varnishDir)
 
-	err := mgr.PrepareWorkspace("")
+	err := mgr.PrepareWorkspace()
 	if err != nil {
 		t.Fatalf("PrepareWorkspace failed: %v", err)
 	}
@@ -58,29 +58,6 @@ func TestPrepareWorkspace(t *testing.T) {
 	// Check secret is set
 	if mgr.secret == "" {
 		t.Error("Secret was not generated")
-	}
-}
-
-func TestPrepareWorkspaceWithLicense(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	workDir := t.TempDir()
-
-	mgr := New(workDir, logger, "")
-
-	licenseText := "TEST LICENSE"
-	err := mgr.PrepareWorkspace(licenseText)
-	if err != nil {
-		t.Fatalf("PrepareWorkspace failed: %v", err)
-	}
-
-	// Check license file exists and has correct content
-	licensePath := filepath.Join(workDir, "orca.lic")
-	content, err := os.ReadFile(licensePath)
-	if err != nil {
-		t.Error("License file was not created")
-	}
-	if string(content) != licenseText {
-		t.Errorf("License content mismatch: expected %s, got %s", licenseText, string(content))
 	}
 }
 
@@ -136,11 +113,6 @@ func TestBuildArgs(t *testing.T) {
 	}
 }
 
-// TestBuildArgsWithLicense is removed because it requires a valid cryptographically signed
-// license, which is complex to create for testing. The license flag functionality is simple:
-// when cfg.License.Text is non-empty, BuildArgs adds "-L /path/to/license.lic" to args.
-// This is adequately covered by integration tests and real usage.
-
 func TestGetParamName(t *testing.T) {
 	// Create test structs with yaml tags
 	type testStruct struct {
@@ -194,7 +166,7 @@ func TestIntegrationStartVarnish(t *testing.T) {
 
 	mgr := New(workDir, logger, varnishDir)
 
-	if err := mgr.PrepareWorkspace(""); err != nil {
+	if err := mgr.PrepareWorkspace(); err != nil {
 		t.Fatalf("PrepareWorkspace failed: %v", err)
 	}
 
@@ -227,26 +199,65 @@ func TestIntegrationStartVarnish(t *testing.T) {
 	}
 	args := BuildArgs(cfg)
 
-	// Start varnishd (non-blocking)
+	// Start varnishd (non-blocking) - starts without VCL
 	ready, err := mgr.Start(ctx, "", args)
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	// Wait for varnishd to be ready
+	// Wait for varnishadm connection
 	select {
-	case <-ready:
-		t.Log("Varnish is ready")
+	case <-admServer.Connected():
+		t.Log("Varnishadm connected")
 	case <-time.After(10 * time.Second):
 		cancel()
-		t.Fatal("Timeout waiting for varnish to be ready")
+		t.Fatal("Timeout waiting for varnishadm connection")
 	}
 
-	// Give varnishadm server time to complete authentication
-	time.Sleep(100 * time.Millisecond)
+	// Create a minimal VCL file
+	vclPath := filepath.Join(workDir, "test.vcl")
+	vclContent := `vcl 4.1;
+backend default none;
+`
+	if err := os.WriteFile(vclPath, []byte(vclContent), 0644); err != nil {
+		cancel()
+		t.Fatalf("Failed to write VCL file: %v", err)
+	}
+
+	// Load and use the VCL
+	resp, err := admServer.VCLLoad("boot", vclPath)
+	if err != nil {
+		cancel()
+		t.Fatalf("Failed to load VCL: %v", err)
+	}
+	t.Logf("VCL load response: %s", resp.Payload())
+
+	resp, err = admServer.VCLUse("boot")
+	if err != nil {
+		cancel()
+		t.Fatalf("Failed to use VCL: %v", err)
+	}
+	t.Logf("VCL use response: %s", resp.Payload())
+
+	// Start the child process
+	resp, err = admServer.Start()
+	if err != nil {
+		cancel()
+		t.Fatalf("Failed to start child: %v", err)
+	}
+	t.Logf("Start response: %s", resp.Payload())
+
+	// Wait for varnishd child to be ready
+	select {
+	case <-ready:
+		t.Log("Varnish child is ready")
+	case <-time.After(10 * time.Second):
+		cancel()
+		t.Fatal("Timeout waiting for varnish child to be ready")
+	}
 
 	// Verify varnishd is responding via admin interface
-	resp, err := admServer.Status()
+	resp, err = admServer.Status()
 	if err != nil {
 		cancel()
 		t.Fatalf("Failed to get status: %v", err)

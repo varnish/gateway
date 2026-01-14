@@ -29,7 +29,7 @@ help:
 	@echo "  make docker-chaperone Build chaperone image"
 	@echo "  make docker-varnish   Build Varnish+Ghost image"
 	@echo "  make docker-push      Build and push single-arch images"
-	@echo "  make docker-buildx    Build and push multi-arch images (amd64+arm64)"
+	@echo "  make docker-buildx    Build and push images via buildx (amd64)"
 	@echo "  make docker-buildx-setup  Create buildx builder for multi-arch (run once)"
 	@echo ""
 	@echo "Other:"
@@ -125,8 +125,8 @@ docker-push: docker
 	docker push $(VARNISH_IMAGE):$(VERSION)
 	docker push $(VARNISH_IMAGE):latest
 
-# Multi-arch build and push (amd64 + arm64)
-PLATFORMS := linux/amd64,linux/arm64
+# Multi-arch build and push (amd64 only for now)
+PLATFORMS := linux/amd64
 BUILDX_BUILDER := varnish-gateway
 
 docker-buildx-setup:

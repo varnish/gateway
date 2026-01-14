@@ -14,8 +14,7 @@ type Config struct {
 	AdminPort int    // -M localhost:<port>
 
 	// Optional
-	VarnishDir  string // -n argument, empty for default
-	LicensePath string // -L argument, empty to skip
+	VarnishDir string // -n argument, empty for default
 
 	// Generic - user provides raw argument values
 	Listen  []string          // -a values, e.g. ":8080,http", ":443,https", "/path.sock,http"
@@ -26,10 +25,6 @@ type Config struct {
 // BuildArgs constructs varnishd command line arguments from Config.
 func BuildArgs(cfg *Config) []string {
 	args := make([]string, 0)
-
-	if cfg.LicensePath != "" {
-		args = append(args, "-L", cfg.LicensePath)
-	}
 
 	secretPath := filepath.Join(cfg.WorkDir, "secret")
 	args = append(args, "-S", secretPath)
