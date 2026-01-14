@@ -41,8 +41,9 @@ const (
 
 // Config holds controller configuration from environment.
 type Config struct {
-	GatewayClassName string // Which GatewayClass this operator manages
-	GatewayImage     string // Combined varnish+ghost+chaperone image
+	GatewayClassName  string // Which GatewayClass this operator manages
+	GatewayImage      string // Combined varnish+ghost+chaperone image
+	ImagePullSecrets  string // Comma-separated list of image pull secret names
 }
 
 // GatewayReconciler reconciles Gateway objects.
@@ -173,8 +174,12 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 	}
 
 	// Resource exists - update if needed
-	// For simplicity, we update all resources every reconcile
-	// A more sophisticated approach would compare specs
+	// Skip ConfigMap updates - HTTPRoute controller manages VCL and routing.json content
+	if _, isConfigMap := desired.(*corev1.ConfigMap); isConfigMap {
+		return nil
+	}
+
+	// For other resources, update every reconcile
 	desired.SetResourceVersion(existing.GetResourceVersion())
 	if err := r.Update(ctx, desired); err != nil {
 		return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
