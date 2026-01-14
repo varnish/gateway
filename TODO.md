@@ -1,24 +1,50 @@
 # TODO
 
-## HTTPRoute Features
+## Phase 1: Complete
+
+See CLAUDE.md for current status.
+
+## Phase 2: Path Matching
+
+- Extend ghost.json generator to include path rules
+- Parse HTTPRoute path matches (exact, prefix, regex)
+- Order routes by specificity
+
+## Phase 3: Advanced Request Matching
 
 - Header matching (`rule.Matches[].Headers`)
 - Method matching (`rule.Matches[].Method`)
 - Query parameter matching (`rule.Matches[].QueryParams`)
-- Traffic splitting (weighted backends)
-- URL rewriting filters
-- Request/response header modification filters
 
-## Gateway Features
+## Phase 4: Traffic Management
 
-- Listener hostname filtering (routes should filter by listener)
-- sectionName matching (`parentRef.SectionName`)
-- Cross-namespace routes (ReferenceGrant validation)
+- Traffic splitting (weighted backendRefs)
+- RequestMirror filter
 
-## TLS
+## Phase 5: Request/Response Modification
+
+- RequestHeaderModifier filter
+- ResponseHeaderModifier filter
+- URLRewrite filter
+- RequestRedirect filter
+- Add `ghost.deliver()` call to VCL preamble
+
+## Phase 6: TLS
 
 - Listener TLS termination (watch `certificateRefs` Secrets)
 - Certificate hot-reload on Secret changes
-- BackendTLSPolicy support (upstream TLS to backends)
+- BackendTLSPolicy support (upstream TLS)
 
 Note: In k8s, cert-manager handles ACME. We just consume `kubernetes.io/tls` Secrets.
+
+## Gateway Features
+
+- Listener hostname filtering
+- sectionName matching (`parentRef.SectionName`)
+- Cross-namespace routes (ReferenceGrant validation)
+
+## Open Questions
+
+- Cross-namespace services: Chaperone needs RBAC to watch EndpointSlices across namespaces
+- Config size limits: ghost.json in ConfigMap has 1MB limit
+- Reload rate limiting: Add debouncing for rapid HTTPRoute changes?

@@ -1,76 +1,126 @@
 # Varnish Gateway Operator
 
-Kubernetes Gateway API implementation using Varnish. The system consists of two binaries: the **operator** runs cluster-wide, watches Gateway API resources (Gateway, HTTPRoute), generates VCL routing logic, and manages Varnish deployments. The **chaperone** runs alongside each Varnish instance handling runtime concerns: endpoint discovery via Kubernetes EndpointSlices and VCL hot-reloading via varnishadm. This split exists because the operator works at the configuration level (what should exist) while the chaperone works at the runtime level (what's happening now). Backend IPs change frequently as pods scale; this is handled by the chaperone without requiring VCL recompilation.
+Kubernetes Gateway API implementation using Varnish.
 
-## Chaperone
+## Architecture
 
-The chaperone watches `services.json` (written by the operator) and Kubernetes EndpointSlices, generating `backends.conf` for the Varnish nodes vmod. It also watches `main.vcl` and hot-reloads VCL into Varnish when it changes.
-
-### Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NAMESPACE` | `default` | Kubernetes namespace to watch |
-| `VARNISH_ADMIN_ADDR` | `localhost:6082` | Address for varnishadm listener |
-| `VARNISH_SECRET_PATH` | `/etc/varnish/secret` | Path to Varnish admin secret |
-| `SERVICES_FILE_PATH` | `/var/run/varnish/services.json` | Input: services to watch |
-| `BACKENDS_FILE_PATH` | `/var/run/varnish/backends.conf` | Output: generated backends |
-| `VCL_PATH` | `/var/run/varnish/main.vcl` | VCL file to watch for reloads |
-| `HEALTH_ADDR` | `:8080` | Health endpoint address |
-
-### Running Locally (Demo Mode)
-
-Requires a local Kubernetes cluster (Rancher Desktop, minikube, etc.) with some services running.
-
-```bash
-# Build
-go build ./cmd/chaperone
-
-# Create test fixtures
-mkdir -p /tmp/varnish-chaperone-test
-echo "testsecret" > /tmp/varnish-chaperone-test/secret
-touch /tmp/varnish-chaperone-test/main.vcl
-
-# Create services.json with services to watch (must exist in your cluster)
-cat > /tmp/varnish-chaperone-test/services.json <<EOF
-{
-  "services": [
-    {"name": "app-alpha", "port": 8080},
-    {"name": "app-beta", "port": 8080}
-  ]
-}
-EOF
-
-# Run (uses ~/.kube/config when outside cluster)
-NAMESPACE=default \
-VARNISH_SECRET_PATH=/tmp/varnish-chaperone-test/secret \
-SERVICES_FILE_PATH=/tmp/varnish-chaperone-test/services.json \
-BACKENDS_FILE_PATH=/tmp/varnish-chaperone-test/backends.conf \
-VCL_PATH=/tmp/varnish-chaperone-test/main.vcl \
-./chaperone
-
-# Check the generated backends.conf
-cat /tmp/varnish-chaperone-test/backends.conf
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Kubernetes Cluster                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│   ┌─────────────┐         watches          ┌──────────────────┐ │
+│   │  Operator   │ ◄────────────────────────│  Gateway API     │ │
+│   │             │                          │  Resources       │ │
+│   └──────┬──────┘                          │  - Gateway       │ │
+│          │                                  │  - HTTPRoute     │ │
+│          │ creates/updates                  │  - GatewayClass  │ │
+│          ▼                                  └──────────────────┘ │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │                    Varnish Pod                           │   │
+│   │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │   │
+│   │  │  Varnish    │    │  Chaperone  │    │  ConfigMaps │  │   │
+│   │  │  + ghost    │◄───│             │◄───│  - main.vcl │  │   │
+│   │  │             │    │             │    │             │  │   │
+│   │  └─────────────┘    └──────┬──────┘    └─────────────┘  │   │
+│   │                            │                             │   │
+│   │                            │ watches                     │   │
+│   │                            ▼                             │   │
+│   │                     EndpointSlices                       │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                                                                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Generated Files
+## Components
 
-**backends.conf** (INI format for nodes vmod):
-```ini
-[app-alpha]
-pod_10_42_0_75 = 10.42.0.75:8080
-pod_10_42_0_76 = 10.42.0.76:8080
+**Operator** - Cluster-wide deployment. Watches Gateway API resources and:
+- Creates Varnish pods with ghost VMOD + chaperone
+- Generates VCL preamble + user VCL (concatenated)
+- Writes routing rules to `routing.json` (via ConfigMap)
 
-[app-beta]
-pod_10_42_0_77 = 10.42.0.77:8080
+**Chaperone** - Runs alongside each Varnish instance:
+- Watches EndpointSlices, writes backend IPs to `ghost.json`
+- Triggers ghost reload via HTTP (`/.varnish-ghost/reload`)
+- Hot-reloads VCL via varnishadm when main.vcl changes
+
+**Ghost VMOD** - Rust-based routing inside Varnish:
+- Reads `ghost.json` at init and on reload
+- Matches requests by hostname (exact + wildcard)
+- Weighted backend selection
+- Async HTTP client with connection pooling
+
+## Reload Flow
+
+```
+HTTPRoute changes
+       │
+       ▼
+┌─────────────┐
+│  Operator   │ ──► regenerates routing.json in ConfigMap
+└─────────────┘
+       │
+       │ ConfigMap update propagates to pod
+       ▼
+┌─────────────┐
+│  Chaperone  │ ──► merges routing.json + EndpointSlices → ghost.json
+└─────────────┘
+       │
+       │ HTTP request to localhost
+       ▼
+┌─────────────┐
+│   Varnish   │
+│  + ghost    │ ──► ghost.recv() handles reload request
+└─────────────┘
+       │
+       │ ghost reloads config atomically
+       ▼
+   New routing active
 ```
 
-**services.json** (input from operator):
+Two separate reload paths:
+- **VCL changes** (user VCL updates): varnishadm hot-reload
+- **Backend/routing changes**: ghost HTTP reload
+
+## Configuration Files
+
+**routing.json** (operator → ConfigMap):
 ```json
 {
-  "services": [
-    {"name": "app-alpha", "port": 8080},
-    {"name": "app-beta", "port": 8080}
-  ]
+  "version": 1,
+  "vhosts": {
+    "api.example.com": {
+      "service": "api-service",
+      "namespace": "default",
+      "port": 8080
+    }
+  }
 }
 ```
+
+**ghost.json** (chaperone → ghost VMOD):
+```json
+{
+  "version": 1,
+  "vhosts": {
+    "api.example.com": {
+      "backends": [
+        {"address": "10.0.0.1", "port": 8080, "weight": 100},
+        {"address": "10.0.0.2", "port": 8080, "weight": 100}
+      ]
+    }
+  }
+}
+```
+
+## Quick Start
+
+```bash
+# Install Gateway API CRDs
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+
+# Deploy the operator
+kubectl apply -f deploy/
+```
+
+See CLAUDE.md for development setup and detailed documentation.
