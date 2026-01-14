@@ -1,83 +1,129 @@
 VERSION := $(shell cat .version)
 REGISTRY ?= registry.digitalocean.com/varnish-gateway
 OPERATOR_IMAGE := $(REGISTRY)/gateway-operator
-SIDECAR_IMAGE := $(REGISTRY)/gateway-sidecar
+CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
+VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 
-.PHONY: help test build build-linux docker docker-operator docker-sidecar docker-buildx docker-buildx-setup clean vendor
+.PHONY: help test build build-linux docker clean vendor
+.PHONY: build-go test-go build-ghost test-ghost
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
 	@echo ""
-	@echo "  make test             Run tests"
-	@echo "  make build            Build binaries for current platform (dist/)"
-	@echo "  make build-linux      Build Linux binaries for amd64 and arm64"
-	@echo "  make build-linux-amd64  Build Linux amd64 binaries"
-	@echo "  make build-linux-arm64  Build Linux arm64 binaries"
-	@echo "  make docker           Build Docker images for current arch"
+	@echo "Go targets:"
+	@echo "  make build-go         Build Go binaries for current platform"
+	@echo "  make test-go          Run Go tests"
+	@echo "  make build-linux      Build Linux Go binaries for amd64 and arm64"
+	@echo ""
+	@echo "Rust targets:"
+	@echo "  make build-ghost      Build Ghost VMOD (requires Rust toolchain)"
+	@echo "  make test-ghost       Run Ghost tests"
+	@echo ""
+	@echo "Combined targets:"
+	@echo "  make build            Build all (Go + Ghost)"
+	@echo "  make test             Run all tests"
+	@echo ""
+	@echo "Docker targets:"
+	@echo "  make docker           Build all Docker images for current arch"
+	@echo "  make docker-operator  Build operator image"
+	@echo "  make docker-chaperone Build chaperone image"
+	@echo "  make docker-varnish   Build Varnish+Ghost image"
 	@echo "  make docker-push      Build and push single-arch images"
 	@echo "  make docker-buildx    Build and push multi-arch images (amd64+arm64)"
 	@echo "  make docker-buildx-setup  Create buildx builder for multi-arch (run once)"
-	@echo "  make vendor           Update vendor directory"
+	@echo ""
+	@echo "Other:"
+	@echo "  make vendor           Update Go vendor directory"
 	@echo "  make clean            Remove build artifacts"
 	@echo ""
 	@echo "Configuration:"
 	@echo "  VERSION=$(VERSION)"
 	@echo "  REGISTRY=$(REGISTRY)"
 
-test:
-	go test ./...
+# ============================================================================
+# Combined targets
+# ============================================================================
 
-# Build for current platform
-build: dist/operator dist/sidecar
+build: build-go build-ghost
+
+test: test-go test-ghost
+
+# ============================================================================
+# Go targets
+# ============================================================================
+
+build-go: dist/operator dist/chaperone
+
+test-go:
+	go test ./...
 
 dist/operator:
 	@mkdir -p dist
 	go build -mod=vendor -o dist/operator ./cmd/operator
 
-dist/sidecar:
+dist/chaperone:
 	@mkdir -p dist
-	go build -mod=vendor -o dist/sidecar ./cmd/sidecar
+	go build -mod=vendor -o dist/chaperone ./cmd/chaperone
 
 # Build Linux binaries for both architectures
 build-linux: build-linux-amd64 build-linux-arm64
 
-build-linux-amd64: dist/operator-linux-amd64 dist/sidecar-linux-amd64
+build-linux-amd64: dist/operator-linux-amd64 dist/chaperone-linux-amd64
 
 dist/operator-linux-amd64:
 	@mkdir -p dist
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=vendor -o dist/operator-linux-amd64 ./cmd/operator
 
-dist/sidecar-linux-amd64:
+dist/chaperone-linux-amd64:
 	@mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=vendor -o dist/sidecar-linux-amd64 ./cmd/sidecar
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=vendor -o dist/chaperone-linux-amd64 ./cmd/chaperone
 
-build-linux-arm64: dist/operator-linux-arm64 dist/sidecar-linux-arm64
+build-linux-arm64: dist/operator-linux-arm64 dist/chaperone-linux-arm64
 
 dist/operator-linux-arm64:
 	@mkdir -p dist
 	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=vendor -o dist/operator-linux-arm64 ./cmd/operator
 
-dist/sidecar-linux-arm64:
+dist/chaperone-linux-arm64:
 	@mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=vendor -o dist/sidecar-linux-arm64 ./cmd/sidecar
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -mod=vendor -o dist/chaperone-linux-arm64 ./cmd/chaperone
 
+# ============================================================================
+# Rust/Ghost targets
+# ============================================================================
+
+build-ghost:
+	cd ghost && cargo build --release
+
+test-ghost:
+	cd ghost && cargo test
+
+# ============================================================================
 # Docker images
-docker: docker-operator docker-sidecar
+# ============================================================================
+
+docker: docker-operator docker-chaperone docker-varnish
 
 docker-operator:
-	docker build -t $(OPERATOR_IMAGE):$(VERSION) -f Dockerfile.operator .
+	docker build -t $(OPERATOR_IMAGE):$(VERSION) -f docker/operator.Dockerfile .
 	docker tag $(OPERATOR_IMAGE):$(VERSION) $(OPERATOR_IMAGE):latest
 
-docker-sidecar:
-	docker build -t $(SIDECAR_IMAGE):$(VERSION) -f Dockerfile.sidecar .
-	docker tag $(SIDECAR_IMAGE):$(VERSION) $(SIDECAR_IMAGE):latest
+docker-chaperone:
+	docker build -t $(CHAPERONE_IMAGE):$(VERSION) -f docker/chaperone.Dockerfile .
+	docker tag $(CHAPERONE_IMAGE):$(VERSION) $(CHAPERONE_IMAGE):latest
+
+docker-varnish:
+	docker build -t $(VARNISH_IMAGE):$(VERSION) -f docker/varnish.Dockerfile .
+	docker tag $(VARNISH_IMAGE):$(VERSION) $(VARNISH_IMAGE):latest
 
 # Push images (single arch)
 docker-push: docker
 	docker push $(OPERATOR_IMAGE):$(VERSION)
 	docker push $(OPERATOR_IMAGE):latest
-	docker push $(SIDECAR_IMAGE):$(VERSION)
-	docker push $(SIDECAR_IMAGE):latest
+	docker push $(CHAPERONE_IMAGE):$(VERSION)
+	docker push $(CHAPERONE_IMAGE):latest
+	docker push $(VARNISH_IMAGE):$(VERSION)
+	docker push $(VARNISH_IMAGE):latest
 
 # Multi-arch build and push (amd64 + arm64)
 PLATFORMS := linux/amd64,linux/arm64
@@ -87,24 +133,33 @@ docker-buildx-setup:
 	docker buildx create --name $(BUILDX_BUILDER) --use || docker buildx use $(BUILDX_BUILDER)
 	docker buildx inspect --bootstrap
 
-docker-buildx: docker-buildx-operator docker-buildx-sidecar
+docker-buildx: docker-buildx-operator docker-buildx-chaperone docker-buildx-varnish
 
 docker-buildx-operator:
 	docker buildx build --platform $(PLATFORMS) \
 		-t $(OPERATOR_IMAGE):$(VERSION) \
 		-t $(OPERATOR_IMAGE):latest \
-		-f Dockerfile.operator --push .
+		-f docker/operator.Dockerfile --push .
 
-docker-buildx-sidecar:
+docker-buildx-chaperone:
 	docker buildx build --platform $(PLATFORMS) \
-		-t $(SIDECAR_IMAGE):$(VERSION) \
-		-t $(SIDECAR_IMAGE):latest \
-		-f Dockerfile.sidecar --push .
+		-t $(CHAPERONE_IMAGE):$(VERSION) \
+		-t $(CHAPERONE_IMAGE):latest \
+		-f docker/chaperone.Dockerfile --push .
 
-# Vendor dependencies
+docker-buildx-varnish:
+	docker buildx build --platform $(PLATFORMS) \
+		-t $(VARNISH_IMAGE):$(VERSION) \
+		-t $(VARNISH_IMAGE):latest \
+		-f docker/varnish.Dockerfile --push .
+
+# ============================================================================
+# Maintenance
+# ============================================================================
+
 vendor:
 	go mod vendor
 
-# Clean build artifacts
 clean:
 	rm -rf dist/
+	cd ghost && cargo clean

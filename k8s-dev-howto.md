@@ -22,9 +22,9 @@ doctl registry login
 
 # Build and push images (cross-compile for x86 cluster from ARM Mac)
 docker build --platform linux/amd64 -t registry.digitalocean.com/varnish-gateway/operator:latest -f Dockerfile.operator .
-docker build --platform linux/amd64 -t registry.digitalocean.com/varnish-gateway/sidecar:latest -f Dockerfile.sidecar .
+docker build --platform linux/amd64 -t registry.digitalocean.com/varnish-gateway/chaperone:latest -f Dockerfile.chaperone .
 docker push registry.digitalocean.com/varnish-gateway/operator:latest
-docker push registry.digitalocean.com/varnish-gateway/sidecar:latest
+docker push registry.digitalocean.com/varnish-gateway/chaperone:latest
 ```
 
 ## Install Gateway API CRDs
@@ -177,4 +177,4 @@ With the test environment running and chaos.sh active, you'll observe:
 3. **Endpoint addition** - New pods added once readiness probe passes
 4. **Scaling changes** - If using rolling chaos, replica counts fluctuate
 
-This mimics real production churn and helps test that the sidecar correctly tracks endpoint changes.
+This mimics real production churn and helps test that the chaperone correctly tracks endpoint changes.

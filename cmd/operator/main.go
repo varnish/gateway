@@ -46,9 +46,8 @@ func main() {
 
 	// Load config from environment
 	cfg := controller.Config{
-		GatewayClassName:    getEnvOrDefault("GATEWAY_CLASS_NAME", "varnish"),
-		DefaultVarnishImage: getEnvOrDefault("DEFAULT_VARNISH_IMAGE", "quay.io/varnish-software/varnish-plus:7.6"),
-		SidecarImage:        getEnvOrDefault("SIDECAR_IMAGE", "ghcr.io/varnish/gateway-sidecar:latest"),
+		GatewayClassName: getEnvOrDefault("GATEWAY_CLASS_NAME", "varnish"),
+		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/varnish-gateway:latest"),
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
@@ -100,8 +99,7 @@ func main() {
 	logger.Info("starting operator",
 		"version", strings.TrimSpace(version),
 		"gatewayClassName", cfg.GatewayClassName,
-		"varnishImage", cfg.DefaultVarnishImage,
-		"sidecarImage", cfg.SidecarImage)
+		"gatewayImage", cfg.GatewayImage)
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		logger.Error("manager exited with error", "error", err)

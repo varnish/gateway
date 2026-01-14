@@ -27,9 +27,8 @@ func newHTTPRouteTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) 
 		Client: fakeClient,
 		Scheme: scheme,
 		Config: Config{
-			GatewayClassName:    "varnish",
-			DefaultVarnishImage: "quay.io/varnish-software/varnish-plus:7.6",
-			SidecarImage:        "ghcr.io/varnish/gateway-sidecar:latest",
+			GatewayClassName: "varnish",
+			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
 		},
 		Logger: slog.Default(),
 	}
@@ -58,7 +57,7 @@ func TestReconcile_ValidRoute(t *testing.T) {
 		},
 		Data: map[string]string{
 			"main.vcl":      "vcl 4.1;",
-			"services.json": `{"services": []}`,
+			"routing.json": `{"version": 1, "vhosts": {}}`,
 		},
 	}
 
@@ -119,10 +118,10 @@ func TestReconcile_ValidRoute(t *testing.T) {
 		t.Error("expected main.vcl to be non-empty")
 	}
 
-	// Check services.json
-	servicesJSON := updatedCM.Data["services.json"]
-	if servicesJSON == "" {
-		t.Error("expected services.json to be non-empty")
+	// Check routing.json
+	routingJSON := updatedCM.Data["routing.json"]
+	if routingJSON == "" {
+		t.Error("expected routing.json to be non-empty")
 	}
 
 	// Verify HTTPRoute status was updated
@@ -306,7 +305,7 @@ func TestReconcile_MultipleRoutesToGateway(t *testing.T) {
 		},
 		Data: map[string]string{
 			"main.vcl":      "vcl 4.1;",
-			"services.json": `{"services": []}`,
+			"routing.json": `{"version": 1, "vhosts": {}}`,
 		},
 	}
 
@@ -393,10 +392,10 @@ func TestReconcile_MultipleRoutesToGateway(t *testing.T) {
 		t.Error("expected main.vcl to be non-empty")
 	}
 
-	// services.json should contain both services
-	servicesJSON := updatedCM.Data["services.json"]
-	if servicesJSON == "" {
-		t.Error("expected services.json to be non-empty")
+	// routing.json should contain both backends
+	routingJSON := updatedCM.Data["routing.json"]
+	if routingJSON == "" {
+		t.Error("expected routing.json to be non-empty")
 	}
 }
 

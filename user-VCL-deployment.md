@@ -57,11 +57,11 @@ spec:
    └── ConfigMap "my-gateway-vcl" (owned by Gateway) updated
    └── Contains: main.vcl = concatenated VCL
 
-5. Sidecar (running in Varnish pod, watches mounted ConfigMap volume)
+5. Chaperone (running in Varnish pod, watches mounted ConfigMap volume)
    └── fsnotify detects file change on /var/run/varnish/main.vcl
    └── Reads new VCL content
 
-6. Sidecar calls varnishadm
+6. Chaperone calls varnishadm
    └── vcl.load vcl_20240115_143022 /var/run/varnish/main.vcl
    └── If success: vcl.use vcl_20240115_143022
    └── If failure: log error, keep old VCL, expose metric
@@ -98,9 +98,9 @@ spec:
 | `my-vcl` | User | User's VCL |
 | `my-gateway-vcl` | Operator | Merged output (generated + user) |
 
-### Sidecar Volume Mount
+### Chaperone Volume Mount
 
-The sidecar mounts the **output** ConfigMap, not the user's input:
+The chaperone mounts the **output** ConfigMap, not the user's input:
 
 ```yaml
 volumes:
@@ -114,7 +114,7 @@ volumes:
 | Failure Point | Behavior |
 |---------------|----------|
 | Parse error in user VCL | Controller sets VarnishConfig status to error, does not update output ConfigMap |
-| Varnish compile error | Sidecar logs error, keeps running old VCL, exposes `varnish_vcl_load_errors_total` metric |
+| Varnish compile error | Chaperone logs error, keeps running old VCL, exposes `varnish_vcl_load_errors_total` metric |
 
 ### VCL Merging
 

@@ -41,9 +41,8 @@ const (
 
 // Config holds controller configuration from environment.
 type Config struct {
-	GatewayClassName    string // Which GatewayClass this operator manages
-	DefaultVarnishImage string // Default varnish container image
-	SidecarImage        string // Sidecar container image
+	GatewayClassName string // Which GatewayClass this operator manages
+	GatewayImage     string // Combined varnish+ghost+chaperone image
 }
 
 // GatewayReconciler reconciles Gateway objects.

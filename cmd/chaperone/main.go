@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,9 +14,10 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/varnish/gateway/internal/backends"
+	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/varnishadm"
 	"github.com/varnish/gateway/internal/vcl"
+	"github.com/varnish/gateway/internal/vrun"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -26,24 +26,50 @@ import (
 //go:embed .version
 var version string
 
-// Config holds the sidecar configuration from environment variables
+// Config holds the chaperone configuration from environment variables
 type Config struct {
-	VarnishAdminAddr  string // listen address for varnishadm (e.g., "localhost:6082")
-	VarnishSecretPath string // path to varnish admin secret file
-	BackendsFilePath  string // where to write backends.conf
-	VCLPath           string // path to watch for VCL changes
-	ServicesFilePath  string // path to services.json
-	Namespace         string // kubernetes namespace to watch
-	HealthAddr        string // address for health endpoint
+	// Varnish process management
+	WorkDir    string // working directory for secrets, etc.
+	VarnishDir string // varnish working directory (-n flag)
+	AdminPort  int    // varnishadm port
+
+	// Varnish runtime configuration
+	VarnishHTTPAddr string   // varnish HTTP address for ghost reload (e.g., "localhost:80")
+	VarnishListen   []string // -a arguments for varnishd
+	VarnishStorage  []string // -s arguments for varnishd
+	LicenseText     string   // Varnish Enterprise license (optional)
+
+	// Ghost configuration
+	RoutingConfigPath string // path to routing.json from operator
+	GhostConfigPath   string // path to write ghost.json
+
+	// VCL configuration
+	VCLPath string // path to watch for VCL changes
+
+	// Kubernetes
+	Namespace string // kubernetes namespace to watch
+
+	// Health endpoint
+	HealthAddr string // address for health endpoint
 }
 
 func loadConfig() (*Config, error) {
+	adminPort, err := strconv.Atoi(getEnvOrDefault("VARNISH_ADMIN_PORT", "6082"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid VARNISH_ADMIN_PORT: %w", err)
+	}
+
 	cfg := &Config{
-		VarnishAdminAddr:  getEnvOrDefault("VARNISH_ADMIN_ADDR", "localhost:6082"),
-		VarnishSecretPath: getEnvOrDefault("VARNISH_SECRET_PATH", "/etc/varnish/secret"),
-		BackendsFilePath:  getEnvOrDefault("BACKENDS_FILE_PATH", "/var/run/varnish/backends.conf"),
+		WorkDir:           getEnvOrDefault("WORK_DIR", "/var/run/varnish"),
+		VarnishDir:        getEnvOrDefault("VARNISH_DIR", ""), // empty means use varnish default
+		AdminPort:         adminPort,
+		VarnishHTTPAddr:   getEnvOrDefault("VARNISH_HTTP_ADDR", "localhost:80"),
+		VarnishListen:     parseList(getEnvOrDefault("VARNISH_LISTEN", ":80,http")),
+		VarnishStorage:    parseList(getEnvOrDefault("VARNISH_STORAGE", "malloc,256m")),
+		LicenseText:       os.Getenv("VARNISH_LICENSE"), // optional
+		RoutingConfigPath: getEnvOrDefault("ROUTING_CONFIG_PATH", "/etc/varnish/routing.json"),
+		GhostConfigPath:   getEnvOrDefault("GHOST_CONFIG_PATH", "/var/run/varnish/ghost.json"),
 		VCLPath:           getEnvOrDefault("VCL_PATH", "/var/run/varnish/main.vcl"),
-		ServicesFilePath:  getEnvOrDefault("SERVICES_FILE_PATH", "/var/run/varnish/services.json"),
 		Namespace:         getEnvOrDefault("NAMESPACE", "default"),
 		HealthAddr:        getEnvOrDefault("HEALTH_ADDR", ":8080"),
 	}
@@ -58,25 +84,24 @@ func getEnvOrDefault(key, defaultVal string) string {
 	return defaultVal
 }
 
-// parseAdminPort extracts the port number from an address string like "localhost:6082"
-func parseAdminPort(addr string) (uint16, error) {
-	_, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return 0, fmt.Errorf("net.SplitHostPort(%s): %w", addr, err)
+// parseList parses a comma-separated list, trimming whitespace
+func parseList(s string) []string {
+	if s == "" {
+		return nil
 	}
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return 0, fmt.Errorf("strconv.ParseUint(%s): %w", portStr, err)
+	parts := strings.Split(s, ",")
+	// For varnish args like ":80,http" we need to handle this specially
+	// Actually, the format is space-separated for multiple -a args
+	// Let's use semicolon as separator for multiple args
+	parts = strings.Split(s, ";")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
 	}
-	return uint16(port), nil
-}
-
-func readSecret(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("os.ReadFile(%s): %w", path, err)
-	}
-	return strings.TrimSpace(string(data)), nil
+	return result
 }
 
 const useJSONLogging = false // set to true for production/k8s
@@ -97,13 +122,13 @@ func configureLogger() {
 func main() {
 	configureLogger()
 	if err := run(); err != nil {
-		slog.Error("sidecar failed", "error", err)
+		slog.Error("chaperone failed", "error", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	slog.Info("sidecar starting", "version", strings.TrimSpace(version))
+	slog.Info("chaperone starting", "version", strings.TrimSpace(version))
 
 	// Load configuration from environment
 	cfg, err := loadConfig()
@@ -112,25 +137,15 @@ func run() error {
 	}
 
 	slog.Info("configuration loaded",
-		"varnishAdminAddr", cfg.VarnishAdminAddr,
-		"varnishSecretPath", cfg.VarnishSecretPath,
-		"backendsFilePath", cfg.BackendsFilePath,
+		"workDir", cfg.WorkDir,
+		"varnishDir", cfg.VarnishDir,
+		"adminPort", cfg.AdminPort,
+		"varnishHTTPAddr", cfg.VarnishHTTPAddr,
+		"routingConfigPath", cfg.RoutingConfigPath,
+		"ghostConfigPath", cfg.GhostConfigPath,
 		"vclPath", cfg.VCLPath,
-		"servicesFilePath", cfg.ServicesFilePath,
 		"namespace", cfg.Namespace,
 	)
-
-	// Read varnish admin secret
-	secret, err := readSecret(cfg.VarnishSecretPath)
-	if err != nil {
-		return fmt.Errorf("readSecret: %w", err)
-	}
-
-	// Parse admin port from address
-	adminPort, err := parseAdminPort(cfg.VarnishAdminAddr)
-	if err != nil {
-		return fmt.Errorf("parseAdminPort: %w", err)
-	}
 
 	// Create Kubernetes client - try in-cluster first, fall back to kubeconfig
 	k8sConfig, err := rest.InClusterConfig()
@@ -163,19 +178,30 @@ func run() error {
 		cancel()
 	}()
 
-	// Create components
+	// Create vrun manager to prepare workspace and start Varnish
 	logger := slog.Default()
+	varnishMgr := vrun.New(cfg.WorkDir, logger.With("component", "vrun"), cfg.VarnishDir)
 
+	// Prepare workspace (creates secret file, writes license)
+	if err := varnishMgr.PrepareWorkspace(cfg.LicenseText); err != nil {
+		return fmt.Errorf("varnishMgr.PrepareWorkspace: %w", err)
+	}
+
+	// Get the generated secret for varnishadm
+	secret := varnishMgr.GetSecret()
+
+	// Create components
 	// 1. varnishadm server - listens for connections from Varnish
-	vadm := varnishadm.New(adminPort, secret, logger.With("component", "varnishadm"))
+	vadm := varnishadm.New(uint16(cfg.AdminPort), secret, logger.With("component", "varnishadm"))
 
-	// 2. backends watcher - watches services.json and EndpointSlices
-	backendsWatcher := backends.NewWatcher(
+	// 2. ghost watcher - watches routing config and EndpointSlices
+	ghostWatcher := ghost.NewWatcher(
 		k8sClient,
-		cfg.ServicesFilePath,
-		cfg.BackendsFilePath,
+		cfg.RoutingConfigPath,
+		cfg.GhostConfigPath,
+		cfg.VarnishHTTPAddr,
 		cfg.Namespace,
-		logger.With("component", "backends"),
+		logger.With("component", "ghost"),
 	)
 
 	// 3. VCL reloader - watches main.vcl and hot-reloads via varnishadm
@@ -186,9 +212,20 @@ func run() error {
 		logger.With("component", "vcl"),
 	)
 
+	// Build varnishd arguments
+	varnishCfg := &vrun.Config{
+		WorkDir:     cfg.WorkDir,
+		AdminPort:   cfg.AdminPort,
+		VarnishDir:  cfg.VarnishDir,
+		LicensePath: varnishMgr.GetLicensePath(),
+		Listen:      cfg.VarnishListen,
+		Storage:     cfg.VarnishStorage,
+	}
+	varnishArgs := vrun.BuildArgs(varnishCfg)
+
 	// Start all components concurrently
 	var wg sync.WaitGroup
-	errCh := make(chan error, 4) // buffer for all components + health server
+	errCh := make(chan error, 5) // buffer for all components
 
 	// Start varnishadm server
 	wg.Add(1)
@@ -199,12 +236,12 @@ func run() error {
 		}
 	}()
 
-	// Start backends watcher
+	// Start ghost watcher
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := backendsWatcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("backendsWatcher.Run: %w", err)
+		if err := ghostWatcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("ghostWatcher.Run: %w", err)
 		}
 	}()
 
@@ -240,8 +277,39 @@ func run() error {
 		}
 	}()
 
-	slog.Info("sidecar started, waiting for Varnish to connect",
-		"adminPort", adminPort,
+	// Start Varnish
+	slog.Info("starting Varnish", "args", varnishArgs)
+	readyCh, err := varnishMgr.Start(ctx, "", varnishArgs)
+	if err != nil {
+		cancel()
+		wg.Wait()
+		return fmt.Errorf("varnishMgr.Start: %w", err)
+	}
+
+	// Wait for Varnish to signal readiness
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-readyCh:
+			slog.Info("Varnish is ready to receive traffic")
+		case <-ctx.Done():
+			return
+		}
+	}()
+
+	// Wait for Varnish process to exit
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := varnishMgr.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("varnishMgr.Wait: %w", err)
+		}
+	}()
+
+	slog.Info("chaperone started",
+		"adminPort", cfg.AdminPort,
+		"varnishHTTPAddr", cfg.VarnishHTTPAddr,
 	)
 
 	// Wait for first error or context cancellation

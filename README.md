@@ -1,10 +1,10 @@
 # Varnish Gateway Operator
 
-Kubernetes Gateway API implementation using Varnish. The system consists of two binaries: the **operator** runs cluster-wide, watches Gateway API resources (Gateway, HTTPRoute), generates VCL routing logic, and manages Varnish deployments. The **sidecar** runs alongside each Varnish instance handling runtime concerns: endpoint discovery via Kubernetes EndpointSlices and VCL hot-reloading via varnishadm. This split exists because the operator works at the configuration level (what should exist) while the sidecar works at the runtime level (what's happening now). Backend IPs change frequently as pods scale; this is handled by the sidecar without requiring VCL recompilation.
+Kubernetes Gateway API implementation using Varnish. The system consists of two binaries: the **operator** runs cluster-wide, watches Gateway API resources (Gateway, HTTPRoute), generates VCL routing logic, and manages Varnish deployments. The **chaperone** runs alongside each Varnish instance handling runtime concerns: endpoint discovery via Kubernetes EndpointSlices and VCL hot-reloading via varnishadm. This split exists because the operator works at the configuration level (what should exist) while the chaperone works at the runtime level (what's happening now). Backend IPs change frequently as pods scale; this is handled by the chaperone without requiring VCL recompilation.
 
-## Sidecar
+## Chaperone
 
-The sidecar watches `services.json` (written by the operator) and Kubernetes EndpointSlices, generating `backends.conf` for the Varnish nodes vmod. It also watches `main.vcl` and hot-reloads VCL into Varnish when it changes.
+The chaperone watches `services.json` (written by the operator) and Kubernetes EndpointSlices, generating `backends.conf` for the Varnish nodes vmod. It also watches `main.vcl` and hot-reloads VCL into Varnish when it changes.
 
 ### Configuration
 
@@ -24,15 +24,15 @@ Requires a local Kubernetes cluster (Rancher Desktop, minikube, etc.) with some 
 
 ```bash
 # Build
-go build ./cmd/sidecar
+go build ./cmd/chaperone
 
 # Create test fixtures
-mkdir -p /tmp/varnish-sidecar-test
-echo "testsecret" > /tmp/varnish-sidecar-test/secret
-touch /tmp/varnish-sidecar-test/main.vcl
+mkdir -p /tmp/varnish-chaperone-test
+echo "testsecret" > /tmp/varnish-chaperone-test/secret
+touch /tmp/varnish-chaperone-test/main.vcl
 
 # Create services.json with services to watch (must exist in your cluster)
-cat > /tmp/varnish-sidecar-test/services.json <<EOF
+cat > /tmp/varnish-chaperone-test/services.json <<EOF
 {
   "services": [
     {"name": "app-alpha", "port": 8080},
@@ -43,14 +43,14 @@ EOF
 
 # Run (uses ~/.kube/config when outside cluster)
 NAMESPACE=default \
-VARNISH_SECRET_PATH=/tmp/varnish-sidecar-test/secret \
-SERVICES_FILE_PATH=/tmp/varnish-sidecar-test/services.json \
-BACKENDS_FILE_PATH=/tmp/varnish-sidecar-test/backends.conf \
-VCL_PATH=/tmp/varnish-sidecar-test/main.vcl \
-./sidecar
+VARNISH_SECRET_PATH=/tmp/varnish-chaperone-test/secret \
+SERVICES_FILE_PATH=/tmp/varnish-chaperone-test/services.json \
+BACKENDS_FILE_PATH=/tmp/varnish-chaperone-test/backends.conf \
+VCL_PATH=/tmp/varnish-chaperone-test/main.vcl \
+./chaperone
 
 # Check the generated backends.conf
-cat /tmp/varnish-sidecar-test/backends.conf
+cat /tmp/varnish-chaperone-test/backends.conf
 ```
 
 ### Generated Files

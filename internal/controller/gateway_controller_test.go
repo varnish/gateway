@@ -37,9 +37,8 @@ func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayR
 		Client: fakeClient,
 		Scheme: scheme,
 		Config: Config{
-			GatewayClassName:    "varnish",
-			DefaultVarnishImage: "quay.io/varnish-software/varnish-plus:7.6",
-			SidecarImage:        "ghcr.io/varnish/gateway-sidecar:latest",
+			GatewayClassName: "varnish",
+			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
 		},
 		Logger: slog.Default(),
 	}
@@ -73,9 +72,8 @@ func TestBuildLabels(t *testing.T) {
 func TestBuildDeployment(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
-			GatewayClassName:    "varnish",
-			DefaultVarnishImage: "varnish:7.6",
-			SidecarImage:        "sidecar:latest",
+			GatewayClassName: "varnish",
+			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
 		},
 	}
 
@@ -100,35 +98,33 @@ func TestBuildDeployment(t *testing.T) {
 	if deployment.Namespace != "default" {
 		t.Errorf("expected deployment namespace %q, got %q", "default", deployment.Namespace)
 	}
-	if len(deployment.Spec.Template.Spec.Containers) != 2 {
-		t.Errorf("expected 2 containers, got %d", len(deployment.Spec.Template.Spec.Containers))
+
+	// Single combined container model
+	if len(deployment.Spec.Template.Spec.Containers) != 1 {
+		t.Errorf("expected 1 container, got %d", len(deployment.Spec.Template.Spec.Containers))
 	}
 
-	// Verify container images
-	containers := deployment.Spec.Template.Spec.Containers
-	var varnishFound, sidecarFound bool
-	for _, c := range containers {
-		if c.Name == "varnish" && c.Image == "varnish:7.6" {
-			varnishFound = true
-		}
-		if c.Name == "sidecar" && c.Image == "sidecar:latest" {
-			sidecarFound = true
-		}
+	// Verify container
+	container := deployment.Spec.Template.Spec.Containers[0]
+	if container.Name != "varnish-gateway" {
+		t.Errorf("expected container name %q, got %q", "varnish-gateway", container.Name)
 	}
-	if !varnishFound {
-		t.Error("varnish container not found or wrong image")
+	if container.Image != "ghcr.io/varnish/varnish-gateway:latest" {
+		t.Errorf("expected image %q, got %q", "ghcr.io/varnish/varnish-gateway:latest", container.Image)
 	}
-	if !sidecarFound {
-		t.Error("sidecar container not found or wrong image")
+
+	// Verify ports (HTTP and health)
+	if len(container.Ports) != 2 {
+		t.Errorf("expected 2 ports, got %d", len(container.Ports))
 	}
 
 	// Verify volumes
-	if len(deployment.Spec.Template.Spec.Volumes) != 3 {
-		t.Errorf("expected 3 volumes, got %d", len(deployment.Spec.Template.Spec.Volumes))
+	if len(deployment.Spec.Template.Spec.Volumes) != 2 {
+		t.Errorf("expected 2 volumes, got %d", len(deployment.Spec.Template.Spec.Volumes))
 	}
 
 	// Verify service account
-	expectedSA := "test-gateway-sidecar"
+	expectedSA := "test-gateway-chaperone"
 	if deployment.Spec.Template.Spec.ServiceAccountName != expectedSA {
 		t.Errorf("expected service account %q, got %q", expectedSA, deployment.Spec.Template.Spec.ServiceAccountName)
 	}
@@ -224,8 +220,8 @@ func TestBuildVCLConfigMap(t *testing.T) {
 	if _, ok := cm.Data["main.vcl"]; !ok {
 		t.Error("expected main.vcl in configmap data")
 	}
-	if _, ok := cm.Data["services.json"]; !ok {
-		t.Error("expected services.json in configmap data")
+	if _, ok := cm.Data["routing.json"]; !ok {
+		t.Error("expected routing.json in configmap data")
 	}
 
 	// Verify VCL contains expected content
@@ -276,8 +272,8 @@ func TestBuildServiceAccount(t *testing.T) {
 
 	sa := r.buildServiceAccount(gateway)
 
-	if sa.Name != "test-gateway-sidecar" {
-		t.Errorf("expected service account name %q, got %q", "test-gateway-sidecar", sa.Name)
+	if sa.Name != "test-gateway-chaperone" {
+		t.Errorf("expected service account name %q, got %q", "test-gateway-chaperone", sa.Name)
 	}
 	if sa.Namespace != "default" {
 		t.Errorf("expected service account namespace %q, got %q", "default", sa.Namespace)
@@ -399,7 +395,7 @@ func TestReconcile_CreatesResources(t *testing.T) {
 	// Verify ServiceAccount was created
 	var sa corev1.ServiceAccount
 	err = r.Get(context.Background(),
-		types.NamespacedName{Name: "test-gateway-sidecar", Namespace: "default"},
+		types.NamespacedName{Name: "test-gateway-chaperone", Namespace: "default"},
 		&sa)
 	if err != nil {
 		t.Errorf("expected service account to be created: %v", err)

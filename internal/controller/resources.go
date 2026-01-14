@@ -16,24 +16,23 @@ import (
 
 const (
 	// Volume names
-	volumeVCLConfig     = "vcl-config"
-	volumeVarnishRun    = "varnish-run"
-	volumeVarnishSecret = "varnish-secret"
+	volumeVCLConfig  = "vcl-config"
+	volumeVarnishRun = "varnish-run"
 
 	// Default port for Varnish HTTP
 	varnishHTTPPort = 8080
 
-	// Sidecar health port
-	sidecarHealthPort = 8081
+	// Chaperone health port
+	chaperoneHealthPort = 8081
 )
 
-// buildVCLConfigMap creates the ConfigMap containing VCL and services.json.
+// buildVCLConfigMap creates the ConfigMap containing VCL and routing.json.
 func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway) *corev1.ConfigMap {
 	// Generate initial VCL with no routes (valid but empty routing)
 	initialVCL := vcl.Generate(nil, vcl.GeneratorConfig{})
 
-	// Empty services initially
-	servicesJSON := `{"services": []}`
+	// Empty routing config initially
+	routingJSON := `{"version": 1, "vhosts": {}}`
 
 	return &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
@@ -46,8 +45,8 @@ func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway) *corev
 			Labels:    r.buildLabels(gateway),
 		},
 		Data: map[string]string{
-			"main.vcl":      initialVCL,
-			"services.json": servicesJSON,
+			"main.vcl":     initialVCL,
+			"routing.json": routingJSON,
 		},
 	}
 }
@@ -76,7 +75,7 @@ func (r *GatewayReconciler) buildAdminSecret(gateway *gatewayv1.Gateway) *corev1
 	}
 }
 
-// buildServiceAccount creates the ServiceAccount for the sidecar.
+// buildServiceAccount creates the ServiceAccount for the chaperone.
 func (r *GatewayReconciler) buildServiceAccount(gateway *gatewayv1.Gateway) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{
@@ -84,14 +83,15 @@ func (r *GatewayReconciler) buildServiceAccount(gateway *gatewayv1.Gateway) *cor
 			Kind:       "ServiceAccount",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-sidecar", gateway.Name),
+			Name:      fmt.Sprintf("%s-chaperone", gateway.Name),
 			Namespace: gateway.Namespace,
 			Labels:    r.buildLabels(gateway),
 		},
 	}
 }
 
-// buildDeployment creates the Deployment containing Varnish and sidecar containers.
+// buildDeployment creates the Deployment containing the combined varnish-gateway container.
+// The container runs chaperone which manages the varnishd process internally.
 func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
@@ -116,10 +116,9 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: fmt.Sprintf("%s-sidecar", gateway.Name),
+					ServiceAccountName: fmt.Sprintf("%s-chaperone", gateway.Name),
 					Containers: []corev1.Container{
-						r.buildVarnishContainer(gateway),
-						r.buildSidecarContainer(gateway),
+						r.buildGatewayContainer(gateway),
 					},
 					Volumes: []corev1.Volume{
 						{
@@ -138,14 +137,6 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
 						},
-						{
-							Name: volumeVarnishSecret,
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: fmt.Sprintf("%s-secret", gateway.Name),
-								},
-							},
-						},
 					},
 				},
 			},
@@ -153,60 +144,12 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 	}
 }
 
-// buildVarnishContainer creates the Varnish container specification.
-func (r *GatewayReconciler) buildVarnishContainer(gateway *gatewayv1.Gateway) corev1.Container {
+// buildGatewayContainer creates the combined varnish-gateway container specification.
+// This container runs chaperone which manages varnishd internally.
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway) corev1.Container {
 	return corev1.Container{
-		Name:  "varnish",
-		Image: r.Config.DefaultVarnishImage,
-		Args: []string{
-			"-F",
-			"-f", "/etc/varnish/main.vcl",
-			"-a", fmt.Sprintf(":%d", varnishHTTPPort),
-			"-M", "localhost:6082", // Reverse CLI mode
-			"-S", "/etc/varnish/secret",
-			"-s", "malloc,256m",
-		},
-		Ports: []corev1.ContainerPort{
-			{
-				Name:          "http",
-				ContainerPort: int32(varnishHTTPPort),
-				Protocol:      corev1.ProtocolTCP,
-			},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      volumeVCLConfig,
-				MountPath: "/etc/varnish",
-				ReadOnly:  true,
-			},
-			{
-				Name:      volumeVarnishRun,
-				MountPath: "/var/run/varnish",
-			},
-			{
-				Name:      volumeVarnishSecret,
-				MountPath: "/etc/varnish/secret",
-				SubPath:   "secret",
-				ReadOnly:  true,
-			},
-		},
-		ReadinessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				TCPSocket: &corev1.TCPSocketAction{
-					Port: intstr.FromInt(varnishHTTPPort),
-				},
-			},
-			InitialDelaySeconds: 5,
-			PeriodSeconds:       10,
-		},
-	}
-}
-
-// buildSidecarContainer creates the sidecar container specification.
-func (r *GatewayReconciler) buildSidecarContainer(gateway *gatewayv1.Gateway) corev1.Container {
-	return corev1.Container{
-		Name:  "sidecar",
-		Image: r.Config.SidecarImage,
+		Name:  "varnish-gateway",
+		Image: r.Config.GatewayImage,
 		Env: []corev1.EnvVar{
 			{
 				Name: "NAMESPACE",
@@ -216,17 +159,25 @@ func (r *GatewayReconciler) buildSidecarContainer(gateway *gatewayv1.Gateway) co
 					},
 				},
 			},
-			{Name: "VARNISH_ADMIN_ADDR", Value: "localhost:6082"},
-			{Name: "VARNISH_SECRET_PATH", Value: "/etc/varnish/secret"},
+			{Name: "VARNISH_ADMIN_PORT", Value: "6082"},
+			{Name: "VARNISH_HTTP_ADDR", Value: fmt.Sprintf("localhost:%d", varnishHTTPPort)},
+			{Name: "VARNISH_LISTEN", Value: fmt.Sprintf(":%d,http", varnishHTTPPort)},
+			{Name: "VARNISH_STORAGE", Value: "malloc,256m"},
 			{Name: "VCL_PATH", Value: "/etc/varnish/main.vcl"},
-			{Name: "SERVICES_FILE_PATH", Value: "/etc/varnish/services.json"},
-			{Name: "BACKENDS_FILE_PATH", Value: "/var/run/varnish/backends.conf"},
-			{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", sidecarHealthPort)},
+			{Name: "ROUTING_CONFIG_PATH", Value: "/etc/varnish/routing.json"},
+			{Name: "GHOST_CONFIG_PATH", Value: "/var/run/varnish/ghost.json"},
+			{Name: "WORK_DIR", Value: "/var/run/varnish"},
+			{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
 		},
 		Ports: []corev1.ContainerPort{
 			{
+				Name:          "http",
+				ContainerPort: int32(varnishHTTPPort),
+				Protocol:      corev1.ProtocolTCP,
+			},
+			{
 				Name:          "health",
-				ContainerPort: int32(sidecarHealthPort),
+				ContainerPort: int32(chaperoneHealthPort),
 				Protocol:      corev1.ProtocolTCP,
 			},
 		},
@@ -240,23 +191,26 @@ func (r *GatewayReconciler) buildSidecarContainer(gateway *gatewayv1.Gateway) co
 				Name:      volumeVarnishRun,
 				MountPath: "/var/run/varnish",
 			},
-			{
-				Name:      volumeVarnishSecret,
-				MountPath: "/etc/varnish/secret",
-				SubPath:   "secret",
-				ReadOnly:  true,
-			},
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/health",
-					Port:   intstr.FromInt(sidecarHealthPort),
+					Port:   intstr.FromInt(chaperoneHealthPort),
 					Scheme: corev1.URISchemeHTTP,
 				},
 			},
 			InitialDelaySeconds: 5,
 			PeriodSeconds:       10,
+		},
+		LivenessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(varnishHTTPPort),
+				},
+			},
+			InitialDelaySeconds: 10,
+			PeriodSeconds:       15,
 		},
 	}
 }

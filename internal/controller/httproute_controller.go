@@ -17,7 +17,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
-	"github.com/varnish/gateway/internal/backends"
+	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/status"
 	"github.com/varnish/gateway/internal/vcl"
 )
@@ -208,20 +208,19 @@ func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute,
 	return false
 }
 
-// updateConfigMap updates the Gateway's VCL ConfigMap with generated VCL and services.json.
+// updateConfigMap updates the Gateway's VCL ConfigMap with generated VCL and routing.json.
 func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
-	// Generate VCL from routes
+	// Generate VCL from routes (ghost preamble)
 	generatedVCL := vcl.Generate(routes, vcl.GeneratorConfig{})
 
 	// Get user VCL (placeholder for future GatewayClassParameters support)
 	userVCL := r.getUserVCL(ctx, gateway)
 	finalVCL := vcl.Merge(generatedVCL, userVCL)
 
-	// Generate services.json
-	services := vcl.CollectServices(routes)
-	backendServices := vcl.ServicesToBackends(services)
-	servicesConfig := backends.ServicesConfig{Services: backendServices}
-	servicesJSON, err := json.MarshalIndent(servicesConfig, "", "  ")
+	// Generate routing.json for ghost
+	routeBackends := vcl.CollectHTTPRouteBackends(routes, gateway.Namespace)
+	routingConfig := ghost.GenerateRoutingConfig(routeBackends, nil)
+	routingJSON, err := json.MarshalIndent(routingConfig, "", "  ")
 	if err != nil {
 		return fmt.Errorf("json.MarshalIndent: %w", err)
 	}
@@ -238,7 +237,7 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		cm.Data = make(map[string]string)
 	}
 	cm.Data["main.vcl"] = finalVCL
-	cm.Data["services.json"] = string(servicesJSON)
+	cm.Data["routing.json"] = string(routingJSON)
 
 	if err := r.Update(ctx, &cm); err != nil {
 		return fmt.Errorf("r.Update(%s): %w", cmName, err)
@@ -247,7 +246,7 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	r.Logger.Info("updated ConfigMap",
 		"configmap", cmName,
 		"routes", len(routes),
-		"services", len(services))
+		"backends", len(routeBackends))
 
 	return nil
 }
