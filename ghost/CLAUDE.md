@@ -4,16 +4,16 @@ Rust vmod for Varnish Gateway API routing. See `ghost-vmod.md` for full plan and
 
 ## Build
 
-Local (requires Varnish 7.6 installed):
+Local (requires Varnish 8.0 installed):
 
 ```bash
 cargo build --release
 ```
 
-Docker:
+Full image (from repo root):
 
 ```bash
-docker build -t ghost-build .
+docker build -f docker/chaperone.Dockerfile -t varnish-gateway .
 ```
 
 ## Test

@@ -183,8 +183,8 @@ The chaperone triggers reload by sending this request to Varnish on localhost.
 ### Build
 
 ```bash
-docker build -t ghost-build .
-docker run --rm ghost-build cat /usr/lib/varnish/vmods/libvmod_ghost.so > libvmod_ghost.so
+# From repo root
+docker build -f docker/chaperone.Dockerfile -t varnish-gateway .
 ```
 
 ---

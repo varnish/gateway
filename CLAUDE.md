@@ -68,7 +68,7 @@ All three components (operator, chaperone, ghost) are now at Phase 1 completion.
 - Streaming response bodies via tokio channels (`src/response.rs`)
 - Hot-reload via `/.varnish-ghost/reload` endpoint
 - 29 unit tests, VTC integration test framework ready
-- Builds against Varnish 7.6 with `varnish` crate 0.5.5
+- Builds against Varnish 8.0 with `varnish` crate 0.5.5
 
 ### Not Yet Implemented
 
