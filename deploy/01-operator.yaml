@@ -104,14 +104,14 @@ spec:
         - name: regcred
       containers:
         - name: operator
-          image: registry.digitalocean.com/varnish-gateway/gateway-operator:latest
+          image: registry.digitalocean.com/varnish-gateway/gateway-operator:v0.1.6
           args:
             - --leader-elect=true
           env:
             - name: GATEWAY_CLASS_NAME
               value: "varnish"
             - name: GATEWAY_IMAGE
-              value: "registry.digitalocean.com/varnish-gateway/gateway-chaperone:latest"
+              value: "registry.digitalocean.com/varnish-gateway/gateway-chaperone:v0.1.6"
             - name: IMAGE_PULL_SECRETS
               value: "regcred"
           ports:

@@ -32,6 +32,10 @@ help:
 	@echo "  make docker-buildx    Build and push images via buildx (amd64)"
 	@echo "  make docker-buildx-setup  Create buildx builder for multi-arch (run once)"
 	@echo ""
+	@echo "Deploy:"
+	@echo "  make deploy-update    Update deploy/ manifests with current version"
+	@echo "  make deploy           Update manifests and apply to cluster"
+	@echo ""
 	@echo "Other:"
 	@echo "  make vendor           Update Go vendor directory"
 	@echo "  make clean            Remove build artifacts"
@@ -152,6 +156,18 @@ docker-buildx-varnish:
 		-t $(VARNISH_IMAGE):$(VERSION) \
 		-t $(VARNISH_IMAGE):latest \
 		-f docker/varnish.Dockerfile --push .
+
+# ============================================================================
+# Deploy
+# ============================================================================
+
+deploy-update:
+	@echo "Updating deploy/01-operator.yaml to version $(VERSION)"
+	@sed -i 's|gateway-operator:v[0-9.]*|gateway-operator:$(VERSION)|' deploy/01-operator.yaml
+	@sed -i 's|gateway-chaperone:v[0-9.]*"|gateway-chaperone:$(VERSION)"|' deploy/01-operator.yaml
+
+deploy: deploy-update
+	kubectl apply -f deploy/
 
 # ============================================================================
 # Maintenance
