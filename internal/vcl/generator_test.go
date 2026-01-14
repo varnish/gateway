@@ -66,12 +66,15 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 		t.Error("expected ghost_backend initialization")
 	}
 
-	// Check vcl_recv for reload handling
+	// Check vcl_recv for reload interception
 	if !strings.Contains(result, "sub vcl_recv {") {
 		t.Error("expected vcl_recv subroutine")
 	}
-	if !strings.Contains(result, "ghost.recv()") {
-		t.Error("expected ghost.recv call")
+	if !strings.Contains(result, `req.url == "/.varnish-ghost/reload"`) {
+		t.Error("expected reload URL check in vcl_recv")
+	}
+	if !strings.Contains(result, "return (pass)") {
+		t.Error("expected return (pass) for reload requests")
 	}
 
 	// Check vcl_backend_fetch

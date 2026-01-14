@@ -47,21 +47,16 @@ varnish v1 -vcl {
     }
 
     sub vcl_recv {
-        # Check for reload request
-        if (ghost.recv()) {
-            return (synth(200, "Reload"));
+        # Intercept reload requests and bypass cache
+        # In production, also check client.ip == "127.0.0.1"
+        if (req.url == "/.varnish-ghost/reload") {
+            return (pass);
         }
     }
 
     sub vcl_backend_fetch {
+        # Ghost handles both routing and reload requests
         set bereq.backend = router.backend();
-    }
-
-    sub vcl_synth {
-        # For reload responses, use the ghost.recv() return value
-        # (In real usage, you'd capture this in vcl_recv)
-        set resp.http.content-type = "application/json";
-        return (deliver);
     }
 } -start
 

@@ -2,9 +2,7 @@ package reload
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 )
@@ -16,12 +14,6 @@ const (
 	// DefaultTimeout is the default timeout for reload requests.
 	DefaultTimeout = 5 * time.Second
 )
-
-// Response represents the JSON response from ghost's reload endpoint.
-type Response struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
 
 // Client is an HTTP client for triggering ghost config reloads.
 type Client struct {
@@ -41,7 +33,8 @@ func NewClient(varnishAddr string) *Client {
 }
 
 // TriggerReload sends a reload request to ghost and waits for the response.
-// Returns nil on success, or an error if the reload failed.
+// Returns nil on success (HTTP 200), or an error if the reload failed (HTTP 500).
+// On failure, the error message is extracted from the x-ghost-error header if present.
 func (c *Client) TriggerReload(ctx context.Context) error {
 	url := c.baseURL + ReloadPath
 
@@ -56,18 +49,12 @@ func (c *Client) TriggerReload(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("io.ReadAll: %w", err)
-	}
-
-	var reloadResp Response
-	if err := json.Unmarshal(body, &reloadResp); err != nil {
-		return fmt.Errorf("json.Unmarshal: %w (body: %s)", err, string(body))
-	}
-
-	if reloadResp.Status != "ok" {
-		return fmt.Errorf("ghost reload failed: %s", reloadResp.Message)
+	if resp.StatusCode != http.StatusOK {
+		errMsg := resp.Header.Get("x-ghost-error")
+		if errMsg != "" {
+			return fmt.Errorf("ghost reload failed: %s", errMsg)
+		}
+		return fmt.Errorf("ghost reload failed: HTTP %d", resp.StatusCode)
 	}
 
 	return nil

@@ -29,6 +29,8 @@ vcl 4.1;
 
 import ghost;
 
+backend dummy { .host = "127.0.0.1"; .port = "80"; }
+
 sub vcl_init {
 ## Initialize ghost with the configuration file path
 ghost.init("/etc/varnish/ghost.json");
@@ -38,25 +40,15 @@ new router = ghost.ghost_backend();
 }
 
 sub vcl_recv {
-## Handle configuration reload requests
-## Returns JSON response for /.varnish-ghost/reload
-set req.http.x-ghost-reload = ghost.recv();
-if (req.http.x-ghost-reload) {
-return (synth(200, "Reload"));
-}
-}
-
-sub vcl_synth {
-## Return reload response
-if (req.http.x-ghost-reload) {
-set resp.http.content-type = "application/json";
-set resp.body = req.http.x-ghost-reload;
-return (deliver);
+## Intercept reload requests (localhost only) and bypass cache
+if (req.url == "/.varnish-ghost/reload" && client.ip == "127.0.0.1") {
+return (pass);
 }
 }
 
 sub vcl_backend_fetch {
 ## Use ghost for backend selection based on Host header
+## Ghost handles reload requests internally, returning 200/500 status
 set bereq.backend = router.backend();
 }
 ```
@@ -99,10 +91,10 @@ Both error responses include a JSON body with details.
 Trigger a configuration reload by sending:
 
 ```bash
-curl http://localhost/.varnish-ghost/reload
+curl -i http://localhost/.varnish-ghost/reload
 ```
 
-Returns `{"status": "ok", "message": "configuration reloaded"}` on success.
+Returns HTTP 200 on success, HTTP 500 on failure (with error in `x-ghost-error` header).
 
 ```vcl
 // Place import statement at the top of your VCL file
@@ -138,35 +130,22 @@ ghost.init("/etc/varnish/ghost.json");
 
 ### Function `STRING ghost.recv()`
 
-Handle reload requests in `vcl_recv`.
+Pre-routing hook for `vcl_recv`.
 
-Checks if the current request is a configuration reload request
-(path `/.varnish-ghost/reload`). If so, reloads the configuration
-from disk and returns a JSON status message.
+This function is reserved for future URL rewriting and pre-routing logic.
+Currently returns `None` (no action). Reload handling has moved to the
+backend fetch phase for cleaner separation.
 
 #### Returns
 
-- `None` if this is a normal request (not a reload request)
-- `Some(json)` if this is a reload request, containing the status
+- `None` - no action, continue normal request processing
 
-#### Example
+#### Future Use
 
-```vcl
-sub vcl_recv {
-set req.http.x-ghost-reload = ghost.recv();
-if (req.http.x-ghost-reload) {
-return (synth(200, "Reload"));
-}
-}
-
-sub vcl_synth {
-if (req.http.x-ghost-reload) {
-set resp.http.content-type = "application/json";
-set resp.body = req.http.x-ghost-reload;
-return (deliver);
-}
-}
-```
+This will be used for:
+- URL normalization/rewriting
+- Authentication checks
+- Rate limiting intercepts
 
 ### Constructor `ghost.ghost_backend()`
 

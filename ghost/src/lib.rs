@@ -85,23 +85,28 @@ struct GhostBackend {
 
 impl VclBackend<ResponseBody> for GhostBackend {
     fn get_response(&self, ctx: &mut Ctx) -> Result<Option<ResponseBody>, VclError> {
+        // Get bereq for URL check
+        let bereq = ctx
+            .http_bereq
+            .as_ref()
+            .ok_or_else(|| VclError::new("ghost: no bereq available".to_string()))?;
+
+        // Get URL from bereq
+        let url = get_url(bereq).unwrap_or_else(|| "/".to_string());
+
+        // Handle reload endpoint - returns empty body with status code
+        if url == "/.varnish-ghost/reload" {
+            return handle_reload(ctx);
+        }
+
         // Get routing config state
         let state_guard = STATE.read();
         let state = state_guard
             .as_ref()
             .ok_or_else(|| VclError::new("ghost: not initialized".to_string()))?;
 
-        // Get Host header from bereq
-        let bereq = ctx
-            .http_bereq
-            .as_ref()
-            .ok_or_else(|| VclError::new("ghost: no bereq available".to_string()))?;
-
         let host = get_host_header(bereq)
             .ok_or_else(|| VclError::new("ghost: no Host header in request".to_string()))?;
-
-        // Get URL from bereq
-        let url = get_url(bereq).unwrap_or_else(|| "/".to_string());
 
         // Match vhost
         let vhost = match routing::match_vhost(&state.config, &host) {
@@ -223,6 +228,26 @@ fn synth_response(
     Ok(ResponseBody::buffered(body.as_bytes().to_vec()))
 }
 
+/// Handle reload request - triggers config reload and returns status via HTTP code
+fn handle_reload(ctx: &mut Ctx) -> Result<Option<ResponseBody>, VclError> {
+    let beresp = ctx
+        .http_beresp
+        .as_mut()
+        .ok_or_else(|| VclError::new("ghost: no beresp available".to_string()))?;
+
+    match reload_config() {
+        Ok(()) => {
+            beresp.set_status(200);
+            Ok(Some(ResponseBody::buffered(vec![])))
+        }
+        Err(e) => {
+            beresp.set_status(500);
+            beresp.set_header("x-ghost-error", &e)?;
+            Ok(Some(ResponseBody::buffered(vec![])))
+        }
+    }
+}
+
 /// Convert StrOrBytes to String if possible
 fn str_or_bytes_to_string(sob: &StrOrBytes) -> Option<String> {
     match sob {
@@ -304,6 +329,8 @@ fn reload_config() -> Result<(), String> {
 ///
 /// import ghost;
 ///
+/// backend dummy { .host = "127.0.0.1"; .port = "80"; }
+///
 /// sub vcl_init {
 ///     # Initialize ghost with the configuration file path
 ///     ghost.init("/etc/varnish/ghost.json");
@@ -313,25 +340,15 @@ fn reload_config() -> Result<(), String> {
 /// }
 ///
 /// sub vcl_recv {
-///     # Handle configuration reload requests
-///     # Returns JSON response for /.varnish-ghost/reload
-///     set req.http.x-ghost-reload = ghost.recv();
-///     if (req.http.x-ghost-reload) {
-///         return (synth(200, "Reload"));
-///     }
-/// }
-///
-/// sub vcl_synth {
-///     # Return reload response
-///     if (req.http.x-ghost-reload) {
-///         set resp.http.content-type = "application/json";
-///         set resp.body = req.http.x-ghost-reload;
-///         return (deliver);
+///     # Intercept reload requests (localhost only) and bypass cache
+///     if (req.url == "/.varnish-ghost/reload" && client.ip == "127.0.0.1") {
+///         return (pass);
 ///     }
 /// }
 ///
 /// sub vcl_backend_fetch {
 ///     # Use ghost for backend selection based on Host header
+///     # Ghost handles reload requests internally, returning 200/500 status
 ///     set bereq.backend = router.backend();
 /// }
 /// ```
@@ -374,10 +391,10 @@ fn reload_config() -> Result<(), String> {
 /// Trigger a configuration reload by sending:
 ///
 /// ```bash
-/// curl http://localhost/.varnish-ghost/reload
+/// curl -i http://localhost/.varnish-ghost/reload
 /// ```
 ///
-/// Returns `{"status": "ok", "message": "configuration reloaded"}` on success.
+/// Returns HTTP 200 on success, HTTP 500 on failure (with error in `x-ghost-error` header).
 #[varnish::vmod(docs = "README.md")]
 mod ghost {
     use super::*;
@@ -442,59 +459,26 @@ mod ghost {
         Ok(())
     }
 
-    /// Handle reload requests in `vcl_recv`.
+    /// Pre-routing hook for `vcl_recv`.
     ///
-    /// Checks if the current request is a configuration reload request
-    /// (path `/.varnish-ghost/reload`). If so, reloads the configuration
-    /// from disk and returns a JSON status message.
+    /// This function is reserved for future URL rewriting and pre-routing logic.
+    /// Currently returns `None` (no action). Reload handling has moved to the
+    /// backend fetch phase for cleaner separation.
     ///
     /// # Returns
     ///
-    /// - `None` if this is a normal request (not a reload request)
-    /// - `Some(json)` if this is a reload request, containing the status
+    /// - `None` - no action, continue normal request processing
     ///
-    /// # Example
+    /// # Future Use
     ///
-    /// ```vcl
-    /// sub vcl_recv {
-    ///     set req.http.x-ghost-reload = ghost.recv();
-    ///     if (req.http.x-ghost-reload) {
-    ///         return (synth(200, "Reload"));
-    ///     }
-    /// }
-    ///
-    /// sub vcl_synth {
-    ///     if (req.http.x-ghost-reload) {
-    ///         set resp.http.content-type = "application/json";
-    ///         set resp.body = req.http.x-ghost-reload;
-    ///         return (deliver);
-    ///     }
-    /// }
-    /// ```
+    /// This will be used for:
+    /// - URL normalization/rewriting
+    /// - Authentication checks
+    /// - Rate limiting intercepts
+    #[allow(unused_variables)]
     pub fn recv(ctx: &mut Ctx) -> Option<String> {
-        let req = ctx.http_req.as_ref()?;
-
-        // Check for reload path
-        let url = req.url()?;
-        let url_str = str_or_bytes_to_string(&url)?;
-        if url_str != "/.varnish-ghost/reload" {
-            return None;
-        }
-
-        // Check for localhost (basic check - could be improved)
-        // For now, we'll allow the reload from anywhere since this is Phase 1
-        // TODO: Add proper localhost check in production
-
-        // Reload config
-        let result = reload_config();
-
-        match result {
-            Ok(()) => Some(r#"{"status": "ok", "message": "configuration reloaded"}"#.to_string()),
-            Err(e) => Some(format!(
-                r#"{{"status": "error", "message": "{}"}}"#,
-                e.replace('"', "\\\"")
-            )),
-        }
+        // Placeholder for future URL rewriting logic
+        None
     }
 
     /// Ghost backend object for request routing.

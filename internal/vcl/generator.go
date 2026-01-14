@@ -38,20 +38,11 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    new router = ghost.ghost_backend();\n")
 	sb.WriteString("}\n\n")
 
-	// Generate vcl_recv for ghost reload handling
+	// Generate vcl_recv - intercept reload requests before user VCL
+	// The reload is handled in vcl_backend_fetch by ghost, we just bypass cache here
 	sb.WriteString("sub vcl_recv {\n")
-	sb.WriteString("    set req.http.x-ghost-reload = ghost.recv();\n")
-	sb.WriteString("    if (req.http.x-ghost-reload != \"\") {\n")
-	sb.WriteString("        return (synth(200, \"Reload\"));\n")
-	sb.WriteString("    }\n")
-	sb.WriteString("}\n\n")
-
-	// Generate vcl_synth for reload response
-	sb.WriteString("sub vcl_synth {\n")
-	sb.WriteString("    if (resp.reason == \"Reload\") {\n")
-	sb.WriteString("        set resp.http.Content-Type = \"application/json\";\n")
-	sb.WriteString("        synthetic(req.http.x-ghost-reload);\n")
-	sb.WriteString("        return (deliver);\n")
+	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\" && client.ip == \"127.0.0.1\") {\n")
+	sb.WriteString("        return (pass);\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")
 
