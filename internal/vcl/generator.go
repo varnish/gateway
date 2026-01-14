@@ -41,7 +41,7 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	// Generate vcl_recv for ghost reload handling
 	sb.WriteString("sub vcl_recv {\n")
 	sb.WriteString("    set req.http.x-ghost-reload = ghost.recv();\n")
-	sb.WriteString("    if (req.http.x-ghost-reload) {\n")
+	sb.WriteString("    if (req.http.x-ghost-reload != \"\") {\n")
 	sb.WriteString("        return (synth(200, \"Reload\"));\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")
