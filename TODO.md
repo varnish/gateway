@@ -43,6 +43,12 @@ Note: In k8s, cert-manager handles ACME. We just consume `kubernetes.io/tls` Sec
 - sectionName matching (`parentRef.SectionName`)
 - Cross-namespace routes (ReferenceGrant validation)
 
+## Observability
+
+- Add varnishlog-json subprocess to chaperone for access logging to stdout
+- Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency
+- Both log streams intermingled on stdout with distinguishing fields
+
 ## Open Questions
 
 - Cross-namespace services: Chaperone needs RBAC to watch EndpointSlices across namespaces
