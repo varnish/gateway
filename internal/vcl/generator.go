@@ -29,6 +29,9 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("vcl 4.1;\n\n")
 	sb.WriteString("import ghost;\n\n")
 
+	// Dummy backend to satisfy VCL compiler requirement (ghost handles actual routing)
+	sb.WriteString("backend dummy { .host = \"127.0.0.1\"; .port = \"80\"; }\n\n")
+
 	// Generate vcl_init
 	sb.WriteString("sub vcl_init {\n")
 	fmt.Fprintf(&sb, "    ghost.init(%q);\n", config.GhostConfigPath)
