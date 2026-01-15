@@ -12,8 +12,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/varnish/gateway/internal/status"
@@ -173,18 +175,9 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", desired.GetName(), err)
 	}
 
-	// Resource exists - update if needed
-	// Skip ConfigMap updates - HTTPRoute controller manages VCL and routing.json content
-	if _, isConfigMap := desired.(*corev1.ConfigMap); isConfigMap {
-		return nil
-	}
-
-	// For other resources, update every reconcile
-	desired.SetResourceVersion(existing.GetResourceVersion())
-	if err := r.Update(ctx, desired); err != nil {
-		return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
-	}
-
+	// Resource exists - all owned resources are static after creation
+	// The operator generates them from Gateway spec which doesn't change dynamically
+	// If GATEWAY_IMAGE changes, the operator pod must be restarted anyway
 	return nil
 }
 
@@ -212,17 +205,36 @@ func (r *GatewayReconciler) setConditions(gateway *gatewayv1.Gateway, success bo
 
 // setListenerStatuses updates status for each Gateway listener.
 func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
-	// Build map of existing listener statuses to preserve AttachedRoutes
-	existingAttached := make(map[gatewayv1.SectionName]int32)
+	// Build map of existing listener statuses to preserve AttachedRoutes and condition times
+	existingStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
 	for _, ls := range gateway.Status.Listeners {
-		existingAttached[ls.Name] = ls.AttachedRoutes
+		existingStatuses[ls.Name] = ls
 	}
 
 	gateway.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
 
 	for i, listener := range gateway.Spec.Listeners {
+		existing, hasExisting := existingStatuses[listener.Name]
+
 		// Preserve existing AttachedRoutes count (set by HTTPRoute controller)
-		attachedRoutes := existingAttached[listener.Name]
+		attachedRoutes := int32(0)
+		if hasExisting {
+			attachedRoutes = existing.AttachedRoutes
+		}
+
+		// Preserve existing condition times if status unchanged
+		acceptedTime := metav1.Now()
+		programmedTime := metav1.Now()
+		if hasExisting {
+			for _, c := range existing.Conditions {
+				if c.Type == string(gatewayv1.ListenerConditionAccepted) && c.Status == metav1.ConditionTrue {
+					acceptedTime = c.LastTransitionTime
+				}
+				if c.Type == string(gatewayv1.ListenerConditionProgrammed) && c.Status == metav1.ConditionTrue {
+					programmedTime = c.LastTransitionTime
+				}
+			}
+		}
 
 		gateway.Status.Listeners[i] = gatewayv1.ListenerStatus{
 			Name: listener.Name,
@@ -238,7 +250,7 @@ func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
 					Type:               string(gatewayv1.ListenerConditionAccepted),
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: gateway.Generation,
-					LastTransitionTime: metav1.Now(),
+					LastTransitionTime: acceptedTime,
 					Reason:             string(gatewayv1.ListenerReasonAccepted),
 					Message:            "Listener accepted",
 				},
@@ -246,7 +258,7 @@ func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
 					Type:               string(gatewayv1.ListenerConditionProgrammed),
 					Status:             metav1.ConditionTrue,
 					ObservedGeneration: gateway.Generation,
-					LastTransitionTime: metav1.Now(),
+					LastTransitionTime: programmedTime,
 					Reason:             string(gatewayv1.ListenerReasonProgrammed),
 					Message:            "Listener programmed",
 				},
@@ -267,7 +279,7 @@ func (r *GatewayReconciler) buildLabels(gateway *gatewayv1.Gateway) map[string]s
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&gatewayv1.Gateway{}).
+		For(&gatewayv1.Gateway{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
