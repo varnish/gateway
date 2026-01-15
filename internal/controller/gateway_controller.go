@@ -175,10 +175,35 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", desired.GetName(), err)
 	}
 
-	// Resource exists - all owned resources are static after creation
-	// The operator generates them from Gateway spec which doesn't change dynamically
-	// If GATEWAY_IMAGE changes, the operator pod must be restarted anyway
+	// For Deployments, check if image needs updating (supports rolling updates)
+	if desiredDeploy, ok := desired.(*appsv1.Deployment); ok {
+		existingDeploy := existing.(*appsv1.Deployment)
+		if needsDeploymentUpdate(existingDeploy, desiredDeploy) {
+			// Update the pod template spec to trigger a rolling update
+			existingDeploy.Spec.Template = desiredDeploy.Spec.Template
+			existingDeploy.Spec.Strategy = desiredDeploy.Spec.Strategy
+			if err := r.Update(ctx, existingDeploy); err != nil {
+				return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
+			}
+			r.Logger.Info("updated deployment",
+				"name", desired.GetName(),
+				"image", desiredDeploy.Spec.Template.Spec.Containers[0].Image)
+			return nil
+		}
+	}
+
 	return nil
+}
+
+// needsDeploymentUpdate checks if the Deployment needs to be updated.
+func needsDeploymentUpdate(existing, desired *appsv1.Deployment) bool {
+	if len(existing.Spec.Template.Spec.Containers) == 0 ||
+		len(desired.Spec.Template.Spec.Containers) == 0 {
+		return false
+	}
+	// Check if image changed
+	return existing.Spec.Template.Spec.Containers[0].Image !=
+		desired.Spec.Template.Spec.Containers[0].Image
 }
 
 // setConditions updates Gateway status conditions.

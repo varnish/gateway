@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/varnishadm"
@@ -25,6 +26,27 @@ import (
 
 //go:embed .version
 var version string
+
+// healthState tracks the health/draining state of the chaperone.
+type healthState struct {
+	mu       sync.RWMutex
+	draining bool
+}
+
+func (s *healthState) setDraining() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.draining = true
+}
+
+func (s *healthState) isDraining() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.draining
+}
+
+// Global health state for graceful shutdown
+var state = &healthState{}
 
 // Config holds the chaperone configuration from environment variables
 type Config struct {
@@ -170,9 +192,22 @@ func run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	// Drain wait period for graceful shutdown
+	const drainWait = 10 * time.Second
+
 	go func() {
 		sig := <-sigCh
-		slog.Info("received signal, shutting down", "signal", sig)
+		slog.Info("received signal, initiating graceful shutdown", "signal", sig)
+
+		// Set draining state - health endpoint will return 503
+		state.setDraining()
+
+		// Wait for drain period to allow load balancer to stop sending traffic
+		// and existing requests to complete
+		slog.Info("waiting for connections to drain", "duration", drainWait)
+		time.Sleep(drainWait)
+
+		slog.Info("drain complete, shutting down")
 		cancel()
 	}()
 
@@ -268,10 +303,14 @@ func run() error {
 		}
 	}()
 
-	// Start health server
+	// Start health server with drain endpoint for graceful shutdown
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/drain", drainHandler)
+
 	healthServer := &http.Server{
 		Addr:    cfg.HealthAddr,
-		Handler: http.HandlerFunc(healthHandler),
+		Handler: mux,
 	}
 
 	wg.Add(1)
@@ -350,6 +389,18 @@ func run() error {
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
+	if state.isDraining() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("draining"))
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+func drainHandler(w http.ResponseWriter, r *http.Request) {
+	state.setDraining()
+	slog.Info("drain requested via endpoint, health will now return 503")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("draining"))
 }

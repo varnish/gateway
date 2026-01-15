@@ -97,6 +97,13 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
+	// Rolling update strategy for zero-downtime deployments
+	maxUnavailable := intstr.FromInt(0) // Never reduce available pods during update
+	maxSurge := intstr.FromInt(1)       // Create new pod before removing old
+
+	// Termination grace period for graceful shutdown
+	terminationGracePeriod := int64(30)
+
 	// Build image pull secrets from config
 	var imagePullSecrets []corev1.LocalObjectReference
 	if r.Config.ImagePullSecrets != "" {
@@ -120,6 +127,13 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: &replicas,
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDeployment{
+					MaxUnavailable: &maxUnavailable,
+					MaxSurge:       &maxSurge,
+				},
+			},
 			Selector: &metav1.LabelSelector{
 				MatchLabels: labels,
 			},
@@ -128,8 +142,9 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: fmt.Sprintf("%s-chaperone", gateway.Name),
-					ImagePullSecrets:   imagePullSecrets,
+					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),
+					ImagePullSecrets:              imagePullSecrets,
+					TerminationGracePeriodSeconds: &terminationGracePeriod,
 					Containers: []corev1.Container{
 						r.buildGatewayContainer(gateway),
 					},
@@ -203,6 +218,16 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway) co
 			{
 				Name:      volumeVarnishRun,
 				MountPath: "/var/run/varnish",
+			},
+		},
+		// PreStop hook triggers graceful shutdown before SIGTERM
+		Lifecycle: &corev1.Lifecycle{
+			PreStop: &corev1.LifecycleHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path:   "/drain",
+					Port:   intstr.FromInt(chaperoneHealthPort),
+					Scheme: corev1.URISchemeHTTP,
+				},
 			},
 		},
 		ReadinessProbe: &corev1.Probe{
