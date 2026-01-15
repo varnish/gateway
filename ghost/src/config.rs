@@ -33,8 +33,15 @@ pub struct Config {
     pub default: Option<VHost>,
 }
 
-/// Load configuration from a JSON file
+/// Load configuration from a JSON file.
+/// If the file doesn't exist, returns an empty config (useful for startup before
+/// the config is generated).
 pub fn load(path: &Path) -> Result<Config, String> {
+    // If file doesn't exist, return empty config
+    if !path.exists() {
+        return Ok(Config::empty());
+    }
+
     let content = fs::read_to_string(path)
         .map_err(|e| format!("failed to read config file {}: {}", path.display(), e))?;
 
@@ -44,6 +51,18 @@ pub fn load(path: &Path) -> Result<Config, String> {
     validate(&config)?;
 
     Ok(config)
+}
+
+impl Config {
+    /// Create an empty configuration with no vhosts.
+    /// Used when the config file doesn't exist yet at startup.
+    pub fn empty() -> Self {
+        Config {
+            version: 1,
+            vhosts: HashMap::new(),
+            default: None,
+        }
+    }
 }
 
 /// Validate configuration
@@ -132,6 +151,16 @@ mod tests {
     fn test_load_minimal_config() {
         let file = write_config(r#"{"version": 1}"#);
         let config = load(file.path()).unwrap();
+        assert_eq!(config.version, 1);
+        assert!(config.vhosts.is_empty());
+        assert!(config.default.is_none());
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        // Loading a non-existent file should return an empty config
+        let path = Path::new("/nonexistent/ghost.json");
+        let config = load(path).unwrap();
         assert_eq!(config.version, 1);
         assert!(config.vhosts.is_empty());
         assert!(config.default.is_none());
