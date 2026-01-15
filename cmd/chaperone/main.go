@@ -378,7 +378,14 @@ func run() error {
 		// Step 4: Wait for child to signal readiness
 		select {
 		case <-readyCh:
-			slog.Info("Varnish is ready to receive traffic")
+			// Varnish is ready, but we still need to wait for ghost to load backends
+		case <-ctx.Done():
+			return
+		}
+
+		// Step 5: Wait for ghost watcher to complete first backend reload
+		select {
+		case <-ghostWatcher.Ready():
 			state.setReady()
 		case <-ctx.Done():
 			return

@@ -38,11 +38,16 @@ type Watcher struct {
 	logger            *slog.Logger
 	reloadClient      *reload.Client
 
+	// Ready signaling
+	readyCh   chan struct{}
+	readyOnce sync.Once
+
 	// Internal state protected by mutex
-	mu            sync.RWMutex
-	routingConfig *RoutingConfig            // current routing rules
-	endpoints     map[string][]Endpoint     // service key -> endpoints
-	serviceWatch  map[string]struct{}       // services we care about (namespace/name)
+	mu              sync.RWMutex
+	initialSyncDone bool                      // true after initial EndpointSlice sync
+	routingConfig   *RoutingConfig            // current routing rules
+	endpoints       map[string][]Endpoint     // service key -> endpoints
+	serviceWatch    map[string]struct{}       // services we care about (namespace/name)
 }
 
 // NewWatcher creates a new ghost configuration watcher.
@@ -65,9 +70,17 @@ func NewWatcher(
 		client:            client,
 		logger:            logger,
 		reloadClient:      reload.NewClient(varnishAddr),
+		readyCh:           make(chan struct{}),
 		endpoints:         make(map[string][]Endpoint),
 		serviceWatch:      make(map[string]struct{}),
 	}
+}
+
+// Ready returns a channel that closes when the watcher has completed its first
+// successful configuration reload. This indicates backends are loaded and the
+// gateway is ready to serve traffic.
+func (w *Watcher) Ready() <-chan struct{} {
+	return w.readyCh
 }
 
 // Run starts watching routing config and EndpointSlices.
@@ -105,7 +118,7 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		w.logger.Info("waiting for varnish to be ready")
 		select {
 		case <-varnishReady:
-			w.logger.Info("varnish is ready")
+			w.logger.Debug("varnish is ready")
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -143,14 +156,25 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	// Start the informer
 	factory.Start(ctx.Done())
 
-	// Wait for cache sync
+	// Wait for cache sync - all EndpointSlice events will be processed during this
+	// but handlers won't trigger reloads until initialSyncDone is set
 	if !cache.WaitForCacheSync(ctx.Done(), endpointSliceInformer.HasSynced) {
 		return fmt.Errorf("failed to sync EndpointSlice cache")
 	}
 
-	// Generate initial ghost.json and trigger reload
+	// Mark initial sync complete - subsequent endpoint changes will trigger reloads
+	w.mu.Lock()
+	w.initialSyncDone = true
+	w.mu.Unlock()
+
+	// Generate ghost.json with all backends and trigger single reload
 	if err := w.regenerateConfig(ctx); err != nil {
 		w.logger.Error("initial ghost config generation failed", "error", err)
+	} else {
+		// Signal ready after successful reload with all backends
+		w.readyOnce.Do(func() {
+			close(w.readyCh)
+		})
 	}
 
 	var debounceTimer *time.Timer
@@ -262,6 +286,7 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 	}
 
 	w.endpoints[key] = newEndpoints
+	shouldReload := w.initialSyncDone
 	w.mu.Unlock()
 
 	// Log the specific changes
@@ -276,6 +301,11 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 	}
 	for _, ep := range removed {
 		w.logger.Info("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
+	}
+
+	// Skip reload during initial sync - we'll do one reload after sync completes
+	if !shouldReload {
+		return
 	}
 
 	// Regenerate ghost.json
@@ -310,6 +340,7 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 
 	// Remove endpoints for this service
 	delete(w.endpoints, key)
+	shouldReload := w.initialSyncDone
 
 	w.mu.Unlock()
 
@@ -320,6 +351,11 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 	)
 	for _, ep := range oldEndpoints {
 		w.logger.Info("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
+	}
+
+	// Skip reload during initial sync - we'll do one reload after sync completes
+	if !shouldReload {
+		return
 	}
 
 	// Regenerate ghost.json
