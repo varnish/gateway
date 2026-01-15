@@ -1,9 +1,16 @@
 package ghost
 
+import "fmt"
+
 // Endpoint represents a discovered backend endpoint from Kubernetes.
 type Endpoint struct {
 	IP   string
 	Port int
+}
+
+// String returns a string representation of the endpoint for comparison and logging.
+func (e Endpoint) String() string {
+	return fmt.Sprintf("%s:%d", e.IP, e.Port)
 }
 
 // ServiceEndpoints maps service keys (namespace/name) to their discovered endpoints.

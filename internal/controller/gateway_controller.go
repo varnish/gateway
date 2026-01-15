@@ -212,9 +212,18 @@ func (r *GatewayReconciler) setConditions(gateway *gatewayv1.Gateway, success bo
 
 // setListenerStatuses updates status for each Gateway listener.
 func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
+	// Build map of existing listener statuses to preserve AttachedRoutes
+	existingAttached := make(map[gatewayv1.SectionName]int32)
+	for _, ls := range gateway.Status.Listeners {
+		existingAttached[ls.Name] = ls.AttachedRoutes
+	}
+
 	gateway.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
 
 	for i, listener := range gateway.Spec.Listeners {
+		// Preserve existing AttachedRoutes count (set by HTTPRoute controller)
+		attachedRoutes := existingAttached[listener.Name]
+
 		gateway.Status.Listeners[i] = gatewayv1.ListenerStatus{
 			Name: listener.Name,
 			SupportedKinds: []gatewayv1.RouteGroupKind{
@@ -223,7 +232,7 @@ func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
 					Kind:  "HTTPRoute",
 				},
 			},
-			AttachedRoutes: 0, // Updated by HTTPRouteController
+			AttachedRoutes: attachedRoutes,
 			Conditions: []metav1.Condition{
 				{
 					Type:               string(gatewayv1.ListenerConditionAccepted),

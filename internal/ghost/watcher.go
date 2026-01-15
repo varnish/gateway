@@ -238,15 +238,32 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 	}
 
 	// Extract ready endpoints
-	endpoints := extractEndpoints(slice)
-	w.endpoints[key] = endpoints
+	newEndpoints := extractEndpoints(slice)
+	oldEndpoints := w.endpoints[key]
 
+	// Check if endpoints actually changed
+	added, removed := diffEndpoints(oldEndpoints, newEndpoints)
+	if len(added) == 0 && len(removed) == 0 {
+		w.mu.Unlock()
+		return
+	}
+
+	w.endpoints[key] = newEndpoints
 	w.mu.Unlock()
 
-	w.logger.Debug("endpoints updated",
+	// Log the specific changes
+	w.logger.Info("endpoints changed",
 		"service", key,
-		"count", len(endpoints),
+		"added", len(added),
+		"removed", len(removed),
+		"total", len(newEndpoints),
 	)
+	for _, ep := range added {
+		w.logger.Info("backend added", "service", key, "address", ep.IP, "port", ep.Port)
+	}
+	for _, ep := range removed {
+		w.logger.Info("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
+	}
 
 	// Regenerate ghost.json
 	if err := w.regenerateConfig(ctx); err != nil {
@@ -271,12 +288,26 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 		return
 	}
 
+	// Check if we actually had endpoints for this service
+	oldEndpoints, existed := w.endpoints[key]
+	if !existed || len(oldEndpoints) == 0 {
+		w.mu.Unlock()
+		return
+	}
+
 	// Remove endpoints for this service
 	delete(w.endpoints, key)
 
 	w.mu.Unlock()
 
-	w.logger.Debug("endpoints deleted", "service", key)
+	// Log the specific changes
+	w.logger.Info("endpoints deleted",
+		"service", key,
+		"removed", len(oldEndpoints),
+	)
+	for _, ep := range oldEndpoints {
+		w.logger.Info("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
+	}
 
 	// Regenerate ghost.json
 	if err := w.regenerateConfig(ctx); err != nil {
@@ -321,6 +352,35 @@ func (w *Watcher) regenerateConfig(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// diffEndpoints compares old and new endpoint slices, returning added and removed endpoints.
+func diffEndpoints(oldEndpoints, newEndpoints []Endpoint) (added, removed []Endpoint) {
+	oldSet := make(map[string]Endpoint)
+	for _, ep := range oldEndpoints {
+		oldSet[ep.String()] = ep
+	}
+
+	newSet := make(map[string]Endpoint)
+	for _, ep := range newEndpoints {
+		newSet[ep.String()] = ep
+	}
+
+	// Find added endpoints (in new but not in old)
+	for key, ep := range newSet {
+		if _, exists := oldSet[key]; !exists {
+			added = append(added, ep)
+		}
+	}
+
+	// Find removed endpoints (in old but not in new)
+	for key, ep := range oldSet {
+		if _, exists := newSet[key]; !exists {
+			removed = append(removed, ep)
+		}
+	}
+
+	return added, removed
 }
 
 // extractEndpoints extracts ready endpoints from an EndpointSlice.
