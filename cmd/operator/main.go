@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -40,9 +41,11 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election")
 	flag.Parse()
 
-	// Configure slog
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	// Configure slog and controller-runtime logger
+	handler := slog.NewJSONHandler(os.Stderr, nil)
+	logger := slog.New(handler)
 	slog.SetDefault(logger)
+	ctrl.SetLogger(logr.FromSlogHandler(handler))
 
 	// Load config from environment
 	cfg := controller.Config{
