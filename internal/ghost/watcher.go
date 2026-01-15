@@ -93,7 +93,25 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		return fmt.Errorf("fsWatcher.Add(%s): %w", dir, err)
 	}
 
-	// Set up EndpointSlice informer
+	w.logger.Info("ghost watcher started",
+		"routingConfigPath", w.routingConfigPath,
+		"ghostConfigPath", w.ghostConfigPath,
+		"varnishAddr", w.varnishAddr,
+		"namespace", w.namespace,
+	)
+
+	// Wait for Varnish to be ready before setting up informers and triggering reload
+	if varnishReady != nil {
+		w.logger.Info("waiting for varnish to be ready")
+		select {
+		case <-varnishReady:
+			w.logger.Info("varnish is ready")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Set up EndpointSlice informer (after Varnish is ready to avoid reload race)
 	factory := informers.NewSharedInformerFactoryWithOptions(
 		w.client,
 		30*time.Second,
@@ -128,24 +146,6 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	// Wait for cache sync
 	if !cache.WaitForCacheSync(ctx.Done(), endpointSliceInformer.HasSynced) {
 		return fmt.Errorf("failed to sync EndpointSlice cache")
-	}
-
-	w.logger.Info("ghost watcher started",
-		"routingConfigPath", w.routingConfigPath,
-		"ghostConfigPath", w.ghostConfigPath,
-		"varnishAddr", w.varnishAddr,
-		"namespace", w.namespace,
-	)
-
-	// Wait for Varnish to be ready before triggering the initial reload
-	if varnishReady != nil {
-		w.logger.Info("waiting for varnish to be ready before initial reload")
-		select {
-		case <-varnishReady:
-			w.logger.Info("varnish is ready, triggering initial reload")
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 	}
 
 	// Generate initial ghost.json and trigger reload
