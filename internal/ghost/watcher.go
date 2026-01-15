@@ -72,7 +72,9 @@ func NewWatcher(
 
 // Run starts watching routing config and EndpointSlices.
 // It blocks until the context is cancelled.
-func (w *Watcher) Run(ctx context.Context) error {
+// The varnishReady channel should close when Varnish is ready to accept reload requests.
+// If nil, the initial reload is attempted immediately (may fail if Varnish isn't ready).
+func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	// Load initial routing config
 	if err := w.loadRoutingConfig(); err != nil {
 		return fmt.Errorf("initial loadRoutingConfig: %w", err)
@@ -135,7 +137,18 @@ func (w *Watcher) Run(ctx context.Context) error {
 		"namespace", w.namespace,
 	)
 
-	// Generate initial ghost.json
+	// Wait for Varnish to be ready before triggering the initial reload
+	if varnishReady != nil {
+		w.logger.Info("waiting for varnish to be ready before initial reload")
+		select {
+		case <-varnishReady:
+			w.logger.Info("varnish is ready, triggering initial reload")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Generate initial ghost.json and trigger reload
 	if err := w.regenerateConfig(ctx); err != nil {
 		w.logger.Error("initial ghost config generation failed", "error", err)
 	}

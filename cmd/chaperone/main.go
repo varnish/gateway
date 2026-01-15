@@ -210,6 +210,10 @@ func run() error {
 		logger.With("component", "vcl"),
 	)
 
+	// Start all components concurrently
+	var wg sync.WaitGroup
+	errCh := make(chan error, 5) // buffer for all components
+
 	// Build varnishd arguments
 	varnishCfg := &vrun.Config{
 		WorkDir:    cfg.WorkDir,
@@ -220,9 +224,22 @@ func run() error {
 	}
 	varnishArgs := vrun.BuildArgs(varnishCfg)
 
-	// Start all components concurrently
-	var wg sync.WaitGroup
-	errCh := make(chan error, 5) // buffer for all components
+	// Start Varnish (manager process only, no VCL loaded yet)
+	// We need readyCh before starting ghost watcher so it can wait for Varnish
+	slog.Info("starting Varnish", "args", varnishArgs)
+	readyCh, err := varnishMgr.Start(ctx, "", varnishArgs)
+	if err != nil {
+		return fmt.Errorf("varnishMgr.Start: %w", err)
+	}
+
+	// Wait for Varnish process to exit
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := varnishMgr.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("varnishMgr.Wait: %w", err)
+		}
+	}()
 
 	// Start varnishadm server
 	wg.Add(1)
@@ -233,11 +250,11 @@ func run() error {
 		}
 	}()
 
-	// Start ghost watcher
+	// Start ghost watcher (with readyCh so it waits for Varnish before initial reload)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := ghostWatcher.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := ghostWatcher.Run(ctx, readyCh); err != nil && !errors.Is(err, context.Canceled) {
 			errCh <- fmt.Errorf("ghostWatcher.Run: %w", err)
 		}
 	}()
@@ -271,24 +288,6 @@ func run() error {
 		<-ctx.Done()
 		if err := healthServer.Close(); err != nil {
 			slog.Error("health server close failed", "error", err)
-		}
-	}()
-
-	// Start Varnish (manager process only, no VCL loaded yet)
-	slog.Info("starting Varnish", "args", varnishArgs)
-	readyCh, err := varnishMgr.Start(ctx, "", varnishArgs)
-	if err != nil {
-		cancel()
-		wg.Wait()
-		return fmt.Errorf("varnishMgr.Start: %w", err)
-	}
-
-	// Wait for Varnish process to exit
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := varnishMgr.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("varnishMgr.Wait: %w", err)
 		}
 	}()
 
