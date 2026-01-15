@@ -37,6 +37,16 @@ RUN cargo build --release
 # Stage 3: Runtime image based on Varnish
 FROM varnish:8.0
 
+USER root
+
+# Install libcap2-bin for setcap, set IPC_LOCK capability on varnishd for mlock()
+RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
+    && setcap cap_ipc_lock+ep /usr/sbin/varnishd \
+    && apt-get remove -y libcap2-bin && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+USER varnish
+
 # Copy chaperone binary
 COPY --from=go-builder /chaperone /usr/local/bin/chaperone
 
