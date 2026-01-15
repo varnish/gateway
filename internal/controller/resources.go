@@ -207,6 +207,11 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		Name:  "varnish-gateway",
 		Image: r.Config.GatewayImage,
 		Env:   env,
+		SecurityContext: &corev1.SecurityContext{
+			Capabilities: &corev1.Capabilities{
+				Add: []corev1.Capability{"IPC_LOCK"},
+			},
+		},
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",
