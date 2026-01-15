@@ -48,6 +48,11 @@ Note: In k8s, cert-manager handles ACME. We just consume `kubernetes.io/tls` Sec
 - Add varnishlog-json subprocess to chaperone for access logging to stdout
 - Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency
 - Both log streams intermingled on stdout with distinguishing fields
+- Logging policy configuration:
+  - Add logging defaults to GatewayClassParameters (format, query, verbosity)
+  - Create VarnishLoggingPolicy CRD using Gateway API policy attachment pattern
+  - Policy targets Gateway via `targetRef`, overrides class defaults when present
+  - Enables per-gateway logging config (e.g., verbose for staging, minimal for prod)
 
 ## Open Questions
 
