@@ -27,10 +27,24 @@ import (
 //go:embed .version
 var version string
 
-// healthState tracks the health/draining state of the chaperone.
+// healthState tracks the health/readiness/draining state of the chaperone.
 type healthState struct {
 	mu       sync.RWMutex
+	ready    bool
 	draining bool
+}
+
+func (s *healthState) setReady() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ready = true
+	slog.Info("health endpoint now returning healthy")
+}
+
+func (s *healthState) isReady() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ready
 }
 
 func (s *healthState) setDraining() {
@@ -365,6 +379,7 @@ func run() error {
 		select {
 		case <-readyCh:
 			slog.Info("Varnish is ready to receive traffic")
+			state.setReady()
 		case <-ctx.Done():
 			return
 		}
@@ -389,6 +404,11 @@ func run() error {
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
+	if !state.isReady() {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("not ready"))
+		return
+	}
 	if state.isDraining() {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte("draining"))
