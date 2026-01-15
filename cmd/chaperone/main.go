@@ -70,9 +70,10 @@ type Config struct {
 	AdminPort  int    // varnishadm port
 
 	// Varnish runtime configuration
-	VarnishHTTPAddr string   // varnish HTTP address for ghost reload (e.g., "localhost:80")
-	VarnishListen   []string // -a arguments for varnishd
-	VarnishStorage  []string // -s arguments for varnishd
+	VarnishHTTPAddr   string   // varnish HTTP address for ghost reload (e.g., "localhost:80")
+	VarnishListen     []string // -a arguments for varnishd
+	VarnishStorage    []string // -s arguments for varnishd
+	VarnishdExtraArgs []string // additional command-line arguments for varnishd
 
 	// Ghost configuration
 	RoutingConfigPath string // path to routing.json from operator
@@ -101,6 +102,7 @@ func loadConfig() (*Config, error) {
 		VarnishHTTPAddr:   getEnvOrDefault("VARNISH_HTTP_ADDR", "localhost:80"),
 		VarnishListen:     parseList(getEnvOrDefault("VARNISH_LISTEN", ":80,http")),
 		VarnishStorage:    parseList(getEnvOrDefault("VARNISH_STORAGE", "malloc,256m")),
+		VarnishdExtraArgs: parseList(os.Getenv("VARNISHD_EXTRA_ARGS")), // no default, optional
 		RoutingConfigPath: getEnvOrDefault("ROUTING_CONFIG_PATH", "/etc/varnish/routing.json"),
 		GhostConfigPath:   getEnvOrDefault("GHOST_CONFIG_PATH", "/var/run/varnish/ghost.json"),
 		VCLPath:           getEnvOrDefault("VCL_PATH", "/var/run/varnish/main.vcl"),
@@ -270,8 +272,12 @@ func run() error {
 		VarnishDir: cfg.VarnishDir,
 		Listen:     cfg.VarnishListen,
 		Storage:    cfg.VarnishStorage,
+		ExtraArgs:  cfg.VarnishdExtraArgs,
 	}
-	varnishArgs := vrun.BuildArgs(varnishCfg)
+	varnishArgs, err := vrun.BuildArgs(varnishCfg)
+	if err != nil {
+		return fmt.Errorf("vrun.BuildArgs: %w", err)
+	}
 
 	// Start Varnish (manager process only, no VCL loaded yet)
 	// We need readyCh before starting ghost watcher so it can wait for Varnish

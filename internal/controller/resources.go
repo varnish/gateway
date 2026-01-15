@@ -93,7 +93,7 @@ func (r *GatewayReconciler) buildServiceAccount(gateway *gatewayv1.Gateway) *cor
 
 // buildDeployment creates the Deployment containing the combined varnish-gateway container.
 // The container runs chaperone which manages the varnishd process internally.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.Deployment {
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -146,7 +146,7 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
 					Containers: []corev1.Container{
-						r.buildGatewayContainer(gateway),
+						r.buildGatewayContainer(gateway, varnishdExtraArgs),
 					},
 					Volumes: []corev1.Volume{
 						{
@@ -174,29 +174,39 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway) *appsv1.
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
 // This container runs chaperone which manages varnishd internally.
-func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway) corev1.Container {
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string) corev1.Container {
+	env := []corev1.EnvVar{
+		{
+			Name: "NAMESPACE",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+		{Name: "VARNISH_ADMIN_PORT", Value: "6082"},
+		{Name: "VARNISH_HTTP_ADDR", Value: fmt.Sprintf("localhost:%d", varnishHTTPPort)},
+		{Name: "VARNISH_LISTEN", Value: fmt.Sprintf(":%d,http", varnishHTTPPort)},
+		{Name: "VARNISH_STORAGE", Value: "malloc,256m"},
+		{Name: "VCL_PATH", Value: "/etc/varnish/main.vcl"},
+		{Name: "ROUTING_CONFIG_PATH", Value: "/etc/varnish/routing.json"},
+		{Name: "GHOST_CONFIG_PATH", Value: "/var/run/varnish/ghost.json"},
+		{Name: "WORK_DIR", Value: "/var/run/varnish"},
+		{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
+	}
+
+	// Add varnishd extra args if specified (semicolon-separated)
+	if len(varnishdExtraArgs) > 0 {
+		env = append(env, corev1.EnvVar{
+			Name:  "VARNISHD_EXTRA_ARGS",
+			Value: strings.Join(varnishdExtraArgs, ";"),
+		})
+	}
+
 	return corev1.Container{
 		Name:  "varnish-gateway",
 		Image: r.Config.GatewayImage,
-		Env: []corev1.EnvVar{
-			{
-				Name: "NAMESPACE",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.namespace",
-					},
-				},
-			},
-			{Name: "VARNISH_ADMIN_PORT", Value: "6082"},
-			{Name: "VARNISH_HTTP_ADDR", Value: fmt.Sprintf("localhost:%d", varnishHTTPPort)},
-			{Name: "VARNISH_LISTEN", Value: fmt.Sprintf(":%d,http", varnishHTTPPort)},
-			{Name: "VARNISH_STORAGE", Value: "malloc,256m"},
-			{Name: "VCL_PATH", Value: "/etc/varnish/main.vcl"},
-			{Name: "ROUTING_CONFIG_PATH", Value: "/etc/varnish/routing.json"},
-			{Name: "GHOST_CONFIG_PATH", Value: "/var/run/varnish/ghost.json"},
-			{Name: "WORK_DIR", Value: "/var/run/varnish"},
-			{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
-		},
+		Env:   env,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "http",

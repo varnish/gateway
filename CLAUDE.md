@@ -7,6 +7,10 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 - **chaperone**: handles endpoint discovery and triggers ghost reload
 - **ghost**: Rust VMOD that handles all routing logic internally
 
+## Documentation
+
+- [Configuration Reference](docs/configuration-reference.md) - GatewayClassParameters, varnishd args, defaults
+
 ## Progress
 
 ### Phase 1 Complete
@@ -17,7 +21,7 @@ All three components (operator, chaperone, ghost) are now at Phase 1 completion.
 - Gateway controller - creates Deployment, Service, ConfigMap, Secret, ServiceAccount
 - HTTPRoute controller - watches routes, regenerates routing.json on changes
 - Status conditions (Accepted/Programmed) on Gateway and HTTPRoute
-- GatewayClassParameters CRD for user VCL injection
+- GatewayClassParameters CRD for user VCL injection and varnishd extra args
 - Single-container deployment model (combined varnish+ghost+chaperone image)
 - VCL generator produces ghost preamble (no complex routing VCL)
 - ConfigMap contains `main.vcl` and `routing.json`

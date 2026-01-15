@@ -26,6 +26,13 @@ type GatewayClassParametersSpec struct {
 	// subroutine concatenation feature.
 	// +optional
 	UserVCLConfigMapRef *ConfigMapReference `json:"userVCLConfigMapRef,omitempty"`
+
+	// VarnishdExtraArgs specifies additional command-line arguments to pass to varnishd.
+	// Each element is a separate argument (e.g., ["-p", "thread_pools=4"]).
+	// Protected arguments (-M, -S, -F, -f, -n) cannot be overridden as they are
+	// controlled by the operator.
+	// +optional
+	VarnishdExtraArgs []string `json:"varnishdExtraArgs,omitempty"`
 }
 
 // ConfigMapReference is a reference to a ConfigMap in a specific namespace.

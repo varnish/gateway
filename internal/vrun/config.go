@@ -20,10 +20,27 @@ type Config struct {
 	Listen  []string          // -a values, e.g. ":8080,http", ":443,https", "/path.sock,http"
 	Storage []string          // -s values, e.g. "malloc,256m", "file,/path,10G"
 	Params  map[string]string // -p parameters as name -> value
+
+	// ExtraArgs are additional arguments appended to the command line.
+	// Protected arguments (-M, -S, -F, -f, -n) are rejected.
+	ExtraArgs []string
 }
 
+// protectedFlags are varnishd arguments that cannot be overridden by ExtraArgs.
+var protectedFlags = []string{"-M", "-S", "-F", "-f", "-n"}
+
 // BuildArgs constructs varnishd command line arguments from Config.
-func BuildArgs(cfg *Config) []string {
+// Returns an error if ExtraArgs contains protected flags.
+func BuildArgs(cfg *Config) ([]string, error) {
+	// Validate ExtraArgs doesn't contain protected flags
+	for _, arg := range cfg.ExtraArgs {
+		for _, protected := range protectedFlags {
+			if arg == protected {
+				return nil, fmt.Errorf("BuildArgs: cannot override protected argument %s", protected)
+			}
+		}
+	}
+
 	args := make([]string, 0)
 
 	secretPath := filepath.Join(cfg.WorkDir, "secret")
@@ -49,7 +66,10 @@ func BuildArgs(cfg *Config) []string {
 		args = append(args, "-p", fmt.Sprintf("%s=%s", k, v))
 	}
 
-	return args
+	// Append user-provided extra arguments
+	args = append(args, cfg.ExtraArgs...)
+
+	return args, nil
 }
 
 // GetParamName extracts the Varnish parameter name from the yaml struct tag.

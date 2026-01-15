@@ -63,6 +63,14 @@ spec:
                     key:
                       type: string
                       description: Key in the ConfigMap data containing the VCL. Defaults to "user.vcl"
+                varnishdExtraArgs:
+                  type: array
+                  description: |
+                    Additional command-line arguments to pass to varnishd.
+                    Each element is a separate argument (e.g., ["-p", "thread_pools=4"]).
+                    Protected arguments (-M, -S, -F, -f, -n) cannot be overridden.
+                  items:
+                    type: string
       additionalPrinterColumns:
         - name: Age
           type: date

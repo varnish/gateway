@@ -1,3 +1,15 @@
+# GatewayClassParameters for Varnish configuration
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: varnish-params
+spec:
+  varnishdExtraArgs:
+    - "-p"
+    - "thread_pools=2"
+    - "-s"
+    - "malloc,512m"
+---
 # GatewayClass for Varnish Gateway
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
@@ -8,3 +20,7 @@ metadata:
 spec:
   controllerName: varnish-software.com/gateway
   description: Varnish-based Gateway implementation with caching support
+  parametersRef:
+    group: gateway.varnish-software.com
+    kind: GatewayClassParameters
+    name: varnish-params

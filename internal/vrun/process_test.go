@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,7 +72,10 @@ func TestBuildArgs(t *testing.T) {
 		Params:     map[string]string{"thread_pool_min": "10"},
 	}
 
-	args := BuildArgs(cfg)
+	args, err := BuildArgs(cfg)
+	if err != nil {
+		t.Fatalf("BuildArgs failed: %v", err)
+	}
 
 	// Check expected arguments
 	expectedArgs := []string{"-n", "/tmp/test/varnish", "-F", "-f", "", "-a", ":8080,http"}
@@ -110,6 +114,81 @@ func TestBuildArgs(t *testing.T) {
 	}
 	if !paramFound {
 		t.Error("Param arguments not found in args")
+	}
+}
+
+func TestBuildArgsWithExtraArgs(t *testing.T) {
+	cfg := &Config{
+		AdminPort:  6082,
+		WorkDir:    "/tmp/test",
+		VarnishDir: "/tmp/test/varnish",
+		ExtraArgs:  []string{"-p", "thread_pools=4", "-p", "workspace_client=256k"},
+	}
+
+	args, err := BuildArgs(cfg)
+	if err != nil {
+		t.Fatalf("BuildArgs failed: %v", err)
+	}
+
+	// Verify extra args are appended at the end
+	// The last 4 elements should be our extra args
+	if len(args) < 4 {
+		t.Fatalf("Expected at least 4 args, got %d", len(args))
+	}
+
+	tail := args[len(args)-4:]
+	expected := []string{"-p", "thread_pools=4", "-p", "workspace_client=256k"}
+	for i, exp := range expected {
+		if tail[i] != exp {
+			t.Errorf("Expected extra arg[%d] = %s, got %s", i, exp, tail[i])
+		}
+	}
+}
+
+func TestBuildArgsProtectedFlagRejection(t *testing.T) {
+	protectedTests := []struct {
+		name      string
+		extraArgs []string
+	}{
+		{"reject -M", []string{"-M", "localhost:6082"}},
+		{"reject -S", []string{"-S", "/path/to/secret"}},
+		{"reject -F", []string{"-F"}},
+		{"reject -f", []string{"-f", "/path/to/vcl"}},
+		{"reject -n", []string{"-n", "/var/lib/varnish"}},
+	}
+
+	for _, tt := range protectedTests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				AdminPort: 6082,
+				WorkDir:   "/tmp/test",
+				ExtraArgs: tt.extraArgs,
+			}
+
+			_, err := BuildArgs(cfg)
+			if err == nil {
+				t.Errorf("Expected error for protected flag, got nil")
+			}
+		})
+	}
+}
+
+func TestBuildArgsAllowsNonProtectedFlags(t *testing.T) {
+	cfg := &Config{
+		AdminPort: 6082,
+		WorkDir:   "/tmp/test",
+		ExtraArgs: []string{"-a", ":9090,http", "-s", "file,/tmp/storage,1g", "-p", "feature=+http2"},
+	}
+
+	args, err := BuildArgs(cfg)
+	if err != nil {
+		t.Fatalf("BuildArgs should allow non-protected flags, got error: %v", err)
+	}
+
+	// Verify extra args are present
+	extraArgsStr := strings.Join(args, " ")
+	if !strings.Contains(extraArgsStr, "-a :9090,http") {
+		t.Errorf("Expected extra -a arg in output")
 	}
 }
 
@@ -197,7 +276,10 @@ func TestIntegrationStartVarnish(t *testing.T) {
 		Listen:     []string{"127.0.0.1:0,http"},
 		Storage:    []string{"malloc,32m"},
 	}
-	args := BuildArgs(cfg)
+	args, err := BuildArgs(cfg)
+	if err != nil {
+		t.Fatalf("BuildArgs failed: %v", err)
+	}
 
 	// Start varnishd (non-blocking) - starts without VCL
 	ready, err := mgr.Start(ctx, "", args)
