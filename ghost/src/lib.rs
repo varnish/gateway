@@ -14,6 +14,7 @@
 //! - Pool parameters (idle timeout, max connections) are properly managed
 
 use parking_lot::RwLock;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
@@ -248,11 +249,11 @@ fn handle_reload(ctx: &mut Ctx) -> Result<Option<ResponseBody>, VclError> {
     }
 }
 
-/// Convert StrOrBytes to String if possible
-fn str_or_bytes_to_string(sob: &StrOrBytes) -> Option<String> {
+/// Convert StrOrBytes to Cow<str> if possible (avoids allocation when already UTF-8)
+fn str_or_bytes_to_cow<'a>(sob: &'a StrOrBytes<'a>) -> Option<Cow<'a, str>> {
     match sob {
-        StrOrBytes::Utf8(s) => Some(s.to_string()),
-        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
+        StrOrBytes::Utf8(s) => Some(Cow::Borrowed(s)),
+        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(Cow::Borrowed),
     }
 }
 
@@ -260,7 +261,7 @@ fn str_or_bytes_to_string(sob: &StrOrBytes) -> Option<String> {
 fn get_host_header(http: &HttpHeaders) -> Option<String> {
     // Use the header() method for case-insensitive lookup
     let host_value = http.header("host")?;
-    let host_str = str_or_bytes_to_string(&host_value)?;
+    let host_str = str_or_bytes_to_cow(&host_value)?;
     // Strip port if present
     let host = host_str.split(':').next()?;
     Some(host.to_lowercase())
@@ -268,22 +269,30 @@ fn get_host_header(http: &HttpHeaders) -> Option<String> {
 
 /// Get URL from HTTP request
 fn get_url(http: &HttpHeaders) -> Option<String> {
-    http.url().and_then(|s| str_or_bytes_to_string(&s))
+    http.url().and_then(|s| match s {
+        StrOrBytes::Utf8(s) => Some(s.to_string()),
+        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
+    })
 }
 
 /// Get method from HTTP request
 fn get_method(http: &HttpHeaders) -> Option<String> {
-    http.method().and_then(|s| str_or_bytes_to_string(&s))
+    http.method().and_then(|s| match s {
+        StrOrBytes::Utf8(s) => Some(s.to_string()),
+        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
+    })
 }
 
 /// Collect request headers into a Vec (filtering hop-by-hop headers)
 fn collect_request_headers(http: &HttpHeaders) -> Vec<(String, String)> {
     let mut headers = Vec::new();
     for (name, value) in http {
-        let name_lower = name.to_lowercase();
-        if !FILTERED_REQUEST_HEADERS.iter().any(|h| *h == name_lower) {
-            if let Some(v) = str_or_bytes_to_string(&value) {
-                headers.push((name.to_string(), v));
+        if !FILTERED_REQUEST_HEADERS
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(name))
+        {
+            if let Some(v) = str_or_bytes_to_cow(&value) {
+                headers.push((name.to_string(), v.into_owned()));
             }
         }
     }

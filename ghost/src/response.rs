@@ -1,6 +1,5 @@
 //! Response body handling for Ghost VMOD
 
-use std::sync::Mutex;
 use varnish::vcl::{VclError, VclResponse};
 
 use crate::runtime::BodyChunk;
@@ -17,10 +16,12 @@ pub enum ResponseBody {
     },
     /// Async streaming via channel from background runtime
     AsyncStreaming {
-        /// Channel receiver for body chunks (wrapped in Mutex for interior mutability)
-        receiver: Mutex<Option<tokio::sync::mpsc::Receiver<BodyChunk>>>,
-        /// Buffer for partially consumed chunks
-        buffer: Mutex<(Vec<u8>, usize)>,
+        /// Channel receiver for body chunks
+        receiver: Option<tokio::sync::mpsc::Receiver<BodyChunk>>,
+        /// Current chunk being read (zero-copy via Bytes)
+        current_chunk: Option<bytes::Bytes>,
+        /// Cursor position within current chunk
+        chunk_cursor: usize,
         /// Content length if known
         content_length: Option<usize>,
     },
@@ -38,8 +39,9 @@ impl ResponseBody {
         content_length: Option<usize>,
     ) -> Self {
         ResponseBody::AsyncStreaming {
-            receiver: Mutex::new(Some(rx)),
-            buffer: Mutex::new((Vec::new(), 0)),
+            receiver: Some(rx),
+            current_chunk: None,
+            chunk_cursor: 0,
             content_length,
         }
     }
@@ -70,24 +72,31 @@ impl VclResponse for ResponseBody {
                 Ok(to_copy)
             }
             ResponseBody::AsyncStreaming {
-                receiver, buffer, ..
+                receiver,
+                current_chunk,
+                chunk_cursor,
+                ..
             } => {
-                // First, try to serve from the buffer
-                {
-                    let buf_guard = buffer.get_mut().unwrap();
-                    let (ref data, ref mut cursor) = *buf_guard;
-                    let remaining = data.len() - *cursor;
+                // First, try to serve from current chunk
+                if let Some(chunk) = current_chunk {
+                    let remaining = chunk.len() - *chunk_cursor;
                     if remaining > 0 {
                         let to_copy = std::cmp::min(remaining, buf.len());
-                        buf[..to_copy].copy_from_slice(&data[*cursor..*cursor + to_copy]);
-                        *cursor += to_copy;
+                        buf[..to_copy]
+                            .copy_from_slice(&chunk[*chunk_cursor..*chunk_cursor + to_copy]);
+                        *chunk_cursor += to_copy;
+
+                        // Clear chunk if fully consumed
+                        if *chunk_cursor >= chunk.len() {
+                            *current_chunk = None;
+                            *chunk_cursor = 0;
+                        }
                         return Ok(to_copy);
                     }
                 }
 
-                // Buffer exhausted, try to receive more data
-                let rx_guard = receiver.get_mut().unwrap();
-                if let Some(rx) = rx_guard.as_mut() {
+                // Current chunk exhausted, try to receive more data
+                if let Some(rx) = receiver.as_mut() {
                     // Blocking receive from async channel
                     match rx.blocking_recv() {
                         Some(Ok(chunk)) => {
@@ -97,20 +106,18 @@ impl VclResponse for ResponseBody {
                             let to_copy = std::cmp::min(chunk.len(), buf.len());
                             buf[..to_copy].copy_from_slice(&chunk[..to_copy]);
 
-                            // Store remainder in buffer if chunk is larger than buf
+                            // Store remainder in current_chunk if chunk is larger than buf
                             if chunk.len() > buf.len() {
-                                let buf_guard = buffer.get_mut().unwrap();
-                                *buf_guard = (chunk, to_copy);
+                                *current_chunk = Some(chunk);
+                                *chunk_cursor = to_copy;
                             }
 
                             Ok(to_copy)
                         }
-                        Some(Err(e)) => {
-                            Err(VclError::new(format!("ghost: stream error: {}", e)))
-                        }
+                        Some(Err(e)) => Err(VclError::new(format!("ghost: stream error: {}", e))),
                         None => {
                             // Stream ended
-                            *rx_guard = None;
+                            *receiver = None;
                             Ok(0)
                         }
                     }

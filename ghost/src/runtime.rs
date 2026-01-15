@@ -29,7 +29,7 @@ pub struct HttpResponse {
 }
 
 /// A chunk of body data or end-of-stream
-pub type BodyChunk = Result<Vec<u8>, String>;
+pub type BodyChunk = Result<bytes::Bytes, String>;
 
 /// Background thread holding the tokio runtime and request channel
 ///
@@ -116,7 +116,7 @@ async fn process_request(client: reqwest::Client, req: HttpRequest) {
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        if body_tx.send(Ok(chunk.to_vec())).await.is_err() {
+                        if body_tx.send(Ok(chunk)).await.is_err() {
                             break; // Receiver dropped
                         }
                     }
