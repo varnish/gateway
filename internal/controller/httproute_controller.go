@@ -325,6 +325,9 @@ func (r *HTTPRouteReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1
 
 // updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.
 func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
+	// Use patch to avoid conflicts when multiple HTTPRoutes reconcile concurrently
+	patch := client.MergeFrom(gateway.DeepCopy())
+
 	// Count routes per listener
 	attachedCount := int32(len(routes))
 
@@ -333,8 +336,8 @@ func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, g
 		gateway.Status.Listeners[i].AttachedRoutes = attachedCount
 	}
 
-	if err := r.Status().Update(ctx, gateway); err != nil {
-		return fmt.Errorf("r.Status().Update: %w", err)
+	if err := r.Status().Patch(ctx, gateway, patch); err != nil {
+		return fmt.Errorf("r.Status().Patch: %w", err)
 	}
 
 	return nil
