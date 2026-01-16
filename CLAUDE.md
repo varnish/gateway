@@ -264,24 +264,27 @@ HEALTH_ADDR=:8081 \
 
 ## Docker Registry
 
-Images are pushed to DigitalOcean Container Registry:
+Images are pushed to GitHub Container Registry (public):
 
 ```
-registry.digitalocean.com/varnish-gateway/gateway-operator
-registry.digitalocean.com/varnish-gateway/gateway-chaperone
+ghcr.io/varnish/gateway-operator
+ghcr.io/varnish/gateway-chaperone
+ghcr.io/varnish/varnish-ghost
 ```
 
-Build and push:
+**Automated builds**: Images are built and pushed automatically via GitHub Actions on:
+- Push to `main` branch (tagged as `latest` + version from `.version`)
+- Version tags (`v*`) (tagged with version + `latest`)
+
+**Manual builds**:
 
 ```bash
-# Authenticate
-doctl registry login
+# Build locally
+make docker
 
-# Build and push (single arch)
+# Build and push (requires ghcr.io authentication)
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 make docker-push
-
-# Build and push (multi-arch: amd64 + arm64)
-make docker-buildx
 ```
 
 ## Conventions

@@ -100,20 +100,16 @@ spec:
         app.kubernetes.io/component: operator
     spec:
       serviceAccountName: varnish-gateway-operator
-      imagePullSecrets:
-        - name: regcred
       containers:
         - name: operator
-          image: registry.digitalocean.com/varnish-gateway/gateway-operator:v0.1.17
+          image: ghcr.io/varnish/gateway-operator:v0.1.20
           args:
             - --leader-elect=true
           env:
             - name: GATEWAY_CLASS_NAME
               value: "varnish"
             - name: GATEWAY_IMAGE
-              value: "registry.digitalocean.com/varnish-gateway/gateway-chaperone:v0.1.17"
-            - name: IMAGE_PULL_SECRETS
-              value: "regcred"
+              value: "ghcr.io/varnish/gateway-chaperone:v0.1.20"
           ports:
             - name: metrics
               containerPort: 8080

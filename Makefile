@@ -1,5 +1,5 @@
 VERSION := $(shell cat .version)
-REGISTRY ?= registry.digitalocean.com/varnish-gateway
+REGISTRY ?= ghcr.io/varnish
 OPERATOR_IMAGE := $(REGISTRY)/gateway-operator
 CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
