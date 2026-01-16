@@ -2,7 +2,7 @@
 
 ## Phase 1: Complete
 
-See CLAUDE.md for current status.
+- Basic vhost-based routing 
 
 ## Phase 2: Path Matching
 
@@ -29,7 +29,7 @@ See CLAUDE.md for current status.
 - RequestRedirect filter
 - Add `ghost.deliver()` call to VCL preamble
 
-## Phase 6: TLS
+## Phase 6: client-side TLS
 
 - Listener TLS termination (watch `certificateRefs` Secrets)
 - Certificate hot-reload on Secret changes
