@@ -106,9 +106,6 @@ func TestGenerate_GhostReloadHandler(t *testing.T) {
 	if !strings.Contains(result, "beresp.http.x-ghost-reload || beresp.http.x-ghost-error") {
 		t.Error("expected vcl_backend_error to check for ghost headers")
 	}
-	if !strings.Contains(result, `set beresp.http.content-length = "0"`) {
-		t.Error("expected vcl_backend_error to set content-length for ghost responses")
-	}
 
 	// Should have return (deliver) in the ghost reload block
 	reloadBlock := strings.Index(result, "beresp.http.x-ghost-reload")

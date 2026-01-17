@@ -57,7 +57,6 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    # Check if this is a ghost reload response (200 or 500 with x-ghost-reload header)\n")
 	sb.WriteString("    if (beresp.http.x-ghost-reload || beresp.http.x-ghost-error) {\n")
 	sb.WriteString("        # Ghost has already set the status and headers, just deliver\n")
-	sb.WriteString("        set beresp.http.content-length = \"0\";\n")
 	sb.WriteString("        return (deliver);\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")
