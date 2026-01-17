@@ -10,7 +10,7 @@ COPY internal/ internal/
 RUN CGO_ENABLED=0 go build -mod=vendor -o /chaperone ./cmd/chaperone
 
 # Stage 2: Build ghost VMOD (Rust)
-FROM rust:1.83-bookworm AS rust-builder
+FROM rust:1.92-bookworm AS rust-builder
 
 # Install Varnish 8.0 development headers and build dependencies
 RUN apt-get update && apt-get install -y \

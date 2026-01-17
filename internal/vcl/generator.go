@@ -41,7 +41,7 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	// Generate vcl_recv - intercept reload requests before user VCL
 	// The reload is handled in vcl_backend_fetch by ghost, we just bypass cache here
 	sb.WriteString("sub vcl_recv {\n")
-	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\" && client.ip == \"127.0.0.1\") {\n")
+	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\" && (client.ip == \"127.0.0.1\" || client.ip == \"::1\")) {\n")
 	sb.WriteString("        return (pass);\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")

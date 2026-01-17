@@ -4,7 +4,7 @@
 # Stage 2: Varnish runtime with Ghost installed
 
 # Build stage
-FROM rust:1.83-bookworm AS builder
+FROM rust:1.92-bookworm AS builder
 
 # Install Varnish 7.6 development headers and build dependencies
 RUN apt-get update && apt-get install -y \
