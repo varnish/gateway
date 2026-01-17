@@ -1,9 +1,20 @@
 package ghost
 
 import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	discoveryv1 "k8s.io/api/discovery/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestDiffEndpoints(t *testing.T) {
@@ -316,5 +327,248 @@ func TestExtractEndpointsNoPorts(t *testing.T) {
 	}
 	if endpoints[0].Port != 0 {
 		t.Errorf("expected port 0 (default), got %d", endpoints[0].Port)
+	}
+}
+
+// TestWatcherReloadFailureFatal verifies that ghost reload failures cause the watcher to exit
+func TestWatcherReloadFailureFatal(t *testing.T) {
+	// Create a fake HTTP server that returns 503 for reload requests
+	reloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.varnish-ghost/reload" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer reloadServer.Close()
+
+	// Create temp directory for config files
+	tmpDir := t.TempDir()
+	routingConfigPath := filepath.Join(tmpDir, "routing.json")
+	ghostConfigPath := filepath.Join(tmpDir, "ghost.json")
+
+	// Write initial routing config
+	routingConfig := &RoutingConfig{
+		Version: 1,
+		VHosts: map[string]RoutingRule{
+			"test.example.com": {
+				Service:   "test-service",
+				Namespace: "default",
+				Port:      8080,
+				Weight:    100,
+			},
+		},
+	}
+	data, err := json.Marshal(routingConfig)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if err := os.WriteFile(routingConfigPath, data, 0644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+
+	// Create fake Kubernetes client
+	client := fake.NewSimpleClientset()
+
+	// Create watcher pointing at our fake server
+	// Extract host:port from the test server URL (strip http://)
+	varnishAddr := strings.TrimPrefix(reloadServer.URL, "http://")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	watcher := NewWatcher(
+		client,
+		routingConfigPath,
+		ghostConfigPath,
+		varnishAddr,
+		"default",
+		logger,
+	)
+
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Create varnish ready channel that closes immediately
+	varnishReady := make(chan struct{})
+	close(varnishReady)
+
+	// Start watcher in goroutine
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- watcher.Run(ctx, varnishReady)
+	}()
+
+	// Wait a bit for initial sync to complete
+	time.Sleep(100 * time.Millisecond)
+
+	// Create an EndpointSlice that will trigger a reload
+	int32Ptr := func(i int32) *int32 { return &i }
+	boolPtr := func(b bool) *bool { return &b }
+
+	endpointSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-service-abc",
+			Namespace: "default",
+			Labels: map[string]string{
+				"kubernetes.io/service-name": "test-service",
+			},
+		},
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				Addresses:  []string{"10.0.0.1"},
+				Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)},
+			},
+		},
+		Ports: []discoveryv1.EndpointPort{
+			{Port: int32Ptr(8080)},
+		},
+	}
+
+	// Add the endpoint slice - this should trigger a reload which will fail
+	_, err = client.DiscoveryV1().EndpointSlices("default").Create(ctx, endpointSlice, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create EndpointSlice: %v", err)
+	}
+
+	// Wait for the watcher to exit with an error
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("expected watcher to exit with error, got nil")
+		}
+		if err == context.DeadlineExceeded || err == context.Canceled {
+			t.Fatal("watcher exited due to context timeout/cancel, not reload failure")
+		}
+		// Verify the error is related to ghost reload
+		errStr := err.Error()
+		if !strings.Contains(errStr, "ghost reload") && !strings.Contains(errStr, "503") {
+			t.Errorf("expected error to mention 'ghost reload' or '503', got: %v", err)
+		}
+		t.Logf("watcher exited with expected error: %v", err)
+
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher did not exit within 3 seconds after reload failure")
+	}
+}
+
+// TestWatcherReloadSuccessDoesNotExit verifies that successful reloads don't cause exit
+func TestWatcherReloadSuccessDoesNotExit(t *testing.T) {
+	// Create a fake HTTP server that returns 200 for reload requests
+	reloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.varnish-ghost/reload" {
+			w.Header().Set("x-ghost-reload", "success")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer reloadServer.Close()
+
+	// Create temp directory for config files
+	tmpDir := t.TempDir()
+	routingConfigPath := filepath.Join(tmpDir, "routing.json")
+	ghostConfigPath := filepath.Join(tmpDir, "ghost.json")
+
+	// Write initial routing config
+	routingConfig := &RoutingConfig{
+		Version: 1,
+		VHosts: map[string]RoutingRule{
+			"test.example.com": {
+				Service:   "test-service",
+				Namespace: "default",
+				Port:      8080,
+				Weight:    100,
+			},
+		},
+	}
+	data, err := json.Marshal(routingConfig)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if err := os.WriteFile(routingConfigPath, data, 0644); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+
+	// Create fake Kubernetes client
+	client := fake.NewSimpleClientset()
+
+	// Create watcher
+	varnishAddr := strings.TrimPrefix(reloadServer.URL, "http://")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	watcher := NewWatcher(
+		client,
+		routingConfigPath,
+		ghostConfigPath,
+		varnishAddr,
+		"default",
+		logger,
+	)
+
+	// Create a context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Create varnish ready channel
+	varnishReady := make(chan struct{})
+	close(varnishReady)
+
+	// Start watcher
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- watcher.Run(ctx, varnishReady)
+	}()
+
+	// Wait for ready signal
+	select {
+	case <-watcher.Ready():
+		t.Log("watcher is ready")
+	case <-time.After(1 * time.Second):
+		t.Fatal("watcher did not become ready within 1 second")
+	}
+
+	// Create an endpoint slice - this should trigger a successful reload
+	int32Ptr := func(i int32) *int32 { return &i }
+	boolPtr := func(b bool) *bool { return &b }
+
+	endpointSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-service-abc",
+			Namespace: "default",
+			Labels: map[string]string{
+				"kubernetes.io/service-name": "test-service",
+			},
+		},
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				Addresses:  []string{"10.0.0.1"},
+				Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)},
+			},
+		},
+		Ports: []discoveryv1.EndpointPort{
+			{Port: int32Ptr(8080)},
+		},
+	}
+
+	_, err = client.DiscoveryV1().EndpointSlices("default").Create(ctx, endpointSlice, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("failed to create EndpointSlice: %v", err)
+	}
+
+	// Wait a bit to ensure reload happens
+	time.Sleep(200 * time.Millisecond)
+
+	// Watcher should still be running - check that errCh is empty
+	select {
+	case err := <-errCh:
+		// Should only exit on context cancel
+		if err != context.DeadlineExceeded && err != context.Canceled {
+			t.Fatalf("watcher exited unexpectedly with error: %v", err)
+		}
+		t.Log("watcher exited as expected on context cancel")
+	case <-time.After(500 * time.Millisecond):
+		// Good - watcher is still running
+		t.Log("watcher still running after successful reload - test passed")
+		cancel() // Clean up
 	}
 }
