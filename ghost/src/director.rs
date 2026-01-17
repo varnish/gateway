@@ -135,15 +135,8 @@ impl GhostDirector {
 
 impl VclDirector for GhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
-        // Get bereq for URL and Host extraction
+        // Get bereq for Host header extraction
         let bereq = ctx.http_bereq.as_ref()?;
-
-        // Check if this is a reload request
-        let url = get_url(bereq).unwrap_or_else(|| "/".to_string());
-        if url == "/.varnish-ghost/reload" {
-            // Handle reload and return synthetic response via beresp
-            return self.handle_reload(ctx);
-        }
 
         // Get Host header
         let host = get_host_header(bereq)?;
@@ -192,31 +185,24 @@ impl VclDirector for GhostDirector {
     }
 }
 
-impl GhostDirector {
-    /// Handle reload request - returns synthetic response
-    fn handle_reload(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
-        // Do reload first (needs mutable ctx)
-        let reload_result = self.reload(ctx);
+/// Wrapper around Arc<GhostDirector> to implement VclDirector (orphan rules workaround)
+pub struct SharedGhostDirector(pub Arc<GhostDirector>);
 
-        // Then access beresp to set status
-        let beresp = ctx.http_beresp.as_mut()?;
+impl VclDirector for SharedGhostDirector {
+    fn resolve(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
+        self.0.resolve(ctx)
+    }
 
-        match reload_result {
-            Ok(()) => {
-                beresp.set_status(200);
-                let _ = beresp.set_header("content-type", "application/json");
-                let _ = beresp.set_header("x-ghost-reload", "success");
-            }
-            Err(e) => {
-                beresp.set_status(500);
-                let _ = beresp.set_header("content-type", "application/json");
-                let _ = beresp.set_header("x-ghost-error", &e);
-            }
-        }
+    fn healthy(&self, ctx: &mut Ctx) -> (bool, SystemTime) {
+        self.0.healthy(ctx)
+    }
 
-        // Return None to trigger synthetic response in VCL
-        // The status code has been set, so vcl_backend_error will handle it
-        None
+    fn release(&self) {
+        self.0.release()
+    }
+
+    fn list(&self, ctx: &mut Ctx, vsb: &mut Buffer, detailed: bool, json: bool) {
+        self.0.list(ctx, vsb, detailed, json)
     }
 }
 
@@ -318,14 +304,6 @@ fn get_host_header(http: &HttpHeaders) -> Option<String> {
     // Strip port if present
     let host = host_str.split(':').next()?;
     Some(host.to_lowercase())
-}
-
-/// Get URL from HTTP request
-fn get_url(http: &HttpHeaders) -> Option<String> {
-    http.url().and_then(|s| match s {
-        StrOrBytes::Utf8(s) => Some(s.to_string()),
-        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
-    })
 }
 
 #[cfg(test)]

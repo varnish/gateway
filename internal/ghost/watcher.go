@@ -42,6 +42,9 @@ type Watcher struct {
 	readyCh   chan struct{}
 	readyOnce sync.Once
 
+	// Fatal error channel for reload failures
+	fatalErrCh chan error
+
 	// Internal state protected by mutex
 	mu              sync.RWMutex
 	initialSyncDone bool                      // true after initial EndpointSlice sync
@@ -71,6 +74,7 @@ func NewWatcher(
 		logger:            logger,
 		reloadClient:      reload.NewClient(varnishAddr),
 		readyCh:           make(chan struct{}),
+		fatalErrCh:        make(chan error, 1), // buffered to avoid blocking
 		endpoints:         make(map[string][]Endpoint),
 		serviceWatch:      make(map[string]struct{}),
 	}
@@ -169,13 +173,14 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 
 	// Generate ghost.json with all backends and trigger single reload
 	if err := w.regenerateConfig(ctx); err != nil {
-		w.logger.Error("initial ghost config generation failed", "error", err)
-	} else {
-		// Signal ready after successful reload with all backends
-		w.readyOnce.Do(func() {
-			close(w.readyCh)
-		})
+		// Initial reload failure is fatal - we can't serve traffic without backends
+		return fmt.Errorf("initial ghost reload: %w", err)
 	}
+
+	// Signal ready after successful reload with all backends
+	w.readyOnce.Do(func() {
+		close(w.readyCh)
+	})
 
 	var debounceTimer *time.Timer
 	filename := filepath.Base(w.routingConfigPath)
@@ -185,6 +190,11 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		case <-ctx.Done():
 			w.logger.Info("ghost watcher stopping")
 			return ctx.Err()
+
+		case err := <-w.fatalErrCh:
+			// Fatal reload error - routing is out of sync
+			w.logger.Error("fatal ghost reload error, exiting", "error", err)
+			return fmt.Errorf("fatal ghost reload: %w", err)
 
 		case event, ok := <-fsWatcher.Events:
 			if !ok {
@@ -210,10 +220,18 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 			debounceTimer = time.AfterFunc(debounceDelay, func() {
 				if err := w.loadRoutingConfig(); err != nil {
 					w.logger.Error("failed to reload routing config", "error", err)
+					select {
+					case w.fatalErrCh <- fmt.Errorf("loadRoutingConfig: %w", err):
+					default:
+					}
 					return
 				}
 				if err := w.regenerateConfig(ctx); err != nil {
 					w.logger.Error("failed to regenerate ghost config", "error", err)
+					select {
+					case w.fatalErrCh <- err:
+					default:
+					}
 				}
 			})
 
@@ -311,6 +329,10 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 	// Regenerate ghost.json
 	if err := w.regenerateConfig(ctx); err != nil {
 		w.logger.Error("failed to regenerate ghost config", "error", err)
+		select {
+		case w.fatalErrCh <- err:
+		default:
+		}
 	}
 }
 
@@ -361,6 +383,10 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 	// Regenerate ghost.json
 	if err := w.regenerateConfig(ctx); err != nil {
 		w.logger.Error("failed to regenerate ghost config", "error", err)
+		select {
+		case w.fatalErrCh <- err:
+		default:
+		}
 	}
 }
 
@@ -394,12 +420,10 @@ func (w *Watcher) regenerateConfig(ctx context.Context) error {
 
 	// Trigger ghost reload
 	if err := w.reloadClient.TriggerReload(ctx); err != nil {
-		w.logger.Warn("ghost reload failed (varnish may not be ready yet)", "error", err)
-		// Don't return error - varnish may not be ready yet
-	} else {
-		w.logger.Info("ghost reload triggered successfully")
+		return fmt.Errorf("ghost reload failed: %w", err)
 	}
 
+	w.logger.Info("ghost reload triggered successfully")
 	return nil
 }
 

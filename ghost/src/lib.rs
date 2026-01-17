@@ -24,7 +24,7 @@ mod config;
 mod director;
 
 use backend_pool::BackendPool;
-use director::{build_routing_state, GhostDirector};
+use director::{build_routing_state, GhostDirector, SharedGhostDirector};
 
 // Run VTC tests
 varnish::run_vtc_tests!("tests/*.vtc");
@@ -40,7 +40,8 @@ static STATE: RwLock<Option<Arc<GhostState>>> = RwLock::new(None);
 /// The ghost backend - wraps our director
 #[allow(non_camel_case_types)]
 pub struct ghost_backend {
-    director: Director<GhostDirector>,
+    director: Director<SharedGhostDirector>,
+    ghost_director: Arc<GhostDirector>,
 }
 
 /// Ghost VMOD - Gateway API routing for Varnish
@@ -77,7 +78,7 @@ pub struct ghost_backend {
 ///
 /// sub vcl_recv {
 ///     # Intercept reload requests (localhost only) and bypass cache
-///     if (req.url == "/.varnish-ghost/reload" && client.ip == "127.0.0.1") {
+///     if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
 ///         return (pass);
 ///     }
 /// }
@@ -257,11 +258,15 @@ mod ghost {
             // Build routing state and create backends
             let routing = build_routing_state(&config, &mut backend_pool, ctx)?;
 
-            // Create director
-            let ghost_director = GhostDirector::new(Arc::new(routing), backend_pool, config_path);
-            let director = Director::new(ctx, "ghost", name, ghost_director)?;
+            // Create director (Arc-wrapped so we can clone for reload access)
+            let ghost_director = Arc::new(GhostDirector::new(Arc::new(routing), backend_pool, config_path));
+            let shared_director = SharedGhostDirector(Arc::clone(&ghost_director));
+            let director = Director::new(ctx, "ghost", name, shared_director)?;
 
-            Ok(ghost_backend { director })
+            Ok(ghost_backend {
+                director,
+                ghost_director,
+            })
         }
 
         /// Get the VCL backend for use in `vcl_backend_fetch`.
@@ -290,6 +295,34 @@ mod ghost {
         /// ```
         pub unsafe fn backend(&self) -> VCL_BACKEND {
             self.director.vcl_ptr()
+        }
+
+        /// Reload the configuration for this ghost backend.
+        ///
+        /// Reloads the ghost.json configuration file and updates routing state.
+        /// New backends are created as needed, existing backends are preserved
+        /// for connection pooling.
+        ///
+        /// # Returns
+        ///
+        /// - `true` on success
+        /// - `false` on failure
+        ///
+        /// # Example
+        ///
+        /// ```vcl
+        /// sub vcl_recv {
+        ///     if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
+        ///         if (router.reload()) {
+        ///             return (synth(200, "OK"));
+        ///         } else {
+        ///             return (synth(500, "Reload failed"));
+        ///         }
+        ///     }
+        /// }
+        /// ```
+        pub fn reload(&self, ctx: &mut Ctx) -> bool {
+            self.ghost_director.reload(ctx).is_ok()
         }
     }
 }

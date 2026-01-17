@@ -38,27 +38,20 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    new router = ghost.ghost_backend();\n")
 	sb.WriteString("}\n\n")
 
-	// Generate vcl_recv - intercept reload requests before user VCL
-	// The reload is handled in vcl_backend_fetch by ghost, we just bypass cache here
+	// Generate vcl_recv - intercept reload requests and handle with synthetic response
 	sb.WriteString("sub vcl_recv {\n")
 	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\" && (client.ip == \"127.0.0.1\" || client.ip == \"::1\")) {\n")
-	sb.WriteString("        return (pass);\n")
+	sb.WriteString("        if (router.reload()) {\n")
+	sb.WriteString("            return (synth(200, \"OK\"));\n")
+	sb.WriteString("        } else {\n")
+	sb.WriteString("            return (synth(500, \"Reload failed\"));\n")
+	sb.WriteString("        }\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")
 
 	// Generate vcl_backend_fetch
 	sb.WriteString("sub vcl_backend_fetch {\n")
 	sb.WriteString("    set bereq.backend = router.backend();\n")
-	sb.WriteString("}\n\n")
-
-	// Generate vcl_backend_error - handle ghost reload responses
-	sb.WriteString("sub vcl_backend_error {\n")
-	sb.WriteString("    # Ghost sets beresp.status and headers before returning no backend\n")
-	sb.WriteString("    # Check if this is a ghost reload response (200 or 500 with x-ghost-reload header)\n")
-	sb.WriteString("    if (beresp.http.x-ghost-reload || beresp.http.x-ghost-error) {\n")
-	sb.WriteString("        # Ghost has already set the status and headers, just deliver\n")
-	sb.WriteString("        return (deliver);\n")
-	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")
 
 	sb.WriteString("# --- User VCL concatenated below ---\n")

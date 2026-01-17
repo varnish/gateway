@@ -73,8 +73,8 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	if !strings.Contains(result, `req.url == "/.varnish-ghost/reload"`) {
 		t.Error("expected reload URL check in vcl_recv")
 	}
-	if !strings.Contains(result, "return (pass)") {
-		t.Error("expected return (pass) for reload requests")
+	if !strings.Contains(result, "router.reload()") {
+		t.Error("expected router.reload() call for reload requests")
 	}
 
 	// Check vcl_backend_fetch
@@ -99,27 +99,24 @@ func TestGenerate_GhostReloadHandler(t *testing.T) {
 		t.Error("expected vcl_recv to check both IPv4 and IPv6 localhost")
 	}
 
-	// Check vcl_backend_error for ghost reload handling
-	if !strings.Contains(result, "sub vcl_backend_error {") {
-		t.Error("expected vcl_backend_error subroutine")
-	}
-	if !strings.Contains(result, "beresp.http.x-ghost-reload || beresp.http.x-ghost-error") {
-		t.Error("expected vcl_backend_error to check for ghost headers")
+	// Check that reload is called on the router
+	if !strings.Contains(result, "router.reload()") {
+		t.Error("expected vcl_recv to call router.reload()")
 	}
 
-	// Should have return (deliver) in the ghost reload block
-	reloadBlock := strings.Index(result, "beresp.http.x-ghost-reload")
-	if reloadBlock == -1 {
-		t.Fatal("couldn't find reload block")
+	// Should return synth(200) on success
+	if !strings.Contains(result, `return (synth(200, "OK"))`) {
+		t.Error("expected vcl_recv to return synth(200) on successful reload")
 	}
-	afterReload := result[reloadBlock:]
-	nextCloseBrace := strings.Index(afterReload, "}")
-	if nextCloseBrace == -1 {
-		t.Fatal("couldn't find end of if block")
+
+	// Should return synth(500) on failure
+	if !strings.Contains(result, `return (synth(500, "Reload failed"))`) {
+		t.Error("expected vcl_recv to return synth(500) on failed reload")
 	}
-	ifBlock := afterReload[:nextCloseBrace]
-	if !strings.Contains(ifBlock, "return (deliver)") {
-		t.Error("expected return (deliver) in ghost reload handler")
+
+	// Should NOT have vcl_backend_error (reload handled in vcl_recv)
+	if strings.Contains(result, "sub vcl_backend_error {") {
+		t.Error("should not have vcl_backend_error (reload handled in vcl_recv)")
 	}
 }
 

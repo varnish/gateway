@@ -42,7 +42,7 @@ new router = ghost.ghost_backend();
 
 sub vcl_recv {
 ## Intercept reload requests (localhost only) and bypass cache
-if (req.url == "/.varnish-ghost/reload" && client.ip == "127.0.0.1") {
+if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
 return (pass);
 }
 }
@@ -217,5 +217,32 @@ of the ghost_backend object.
 ```vcl
 sub vcl_backend_fetch {
 set bereq.backend = router.backend();
+}
+```
+
+#### Method `BOOL <object>.reload()`
+
+Reload the configuration for this ghost backend.
+
+Reloads the ghost.json configuration file and updates routing state.
+New backends are created as needed, existing backends are preserved
+for connection pooling.
+
+##### Returns
+
+- `true` on success
+- `false` on failure
+
+##### Example
+
+```vcl
+sub vcl_recv {
+if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
+if (router.reload()) {
+return (synth(200, "OK"));
+} else {
+return (synth(500, "Reload failed"));
+}
+}
 }
 ```
