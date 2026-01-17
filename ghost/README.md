@@ -21,6 +21,7 @@ It handles virtual host routing, backend selection, and configuration hot-reload
 - **Weighted backend selection**: Distribute traffic across backends by weight
 - **Hot configuration reload**: Update routing without restarting Varnish
 - **Default backend fallback**: Catch-all for unmatched requests
+- **Native backends**: Uses Varnish's built-in HTTP client for optimal performance
 
 ### Minimal VCL Example
 
@@ -51,6 +52,15 @@ sub vcl_backend_fetch {
 ## Ghost handles reload requests internally, returning 200/500 status
 set bereq.backend = router.backend();
 }
+
+sub vcl_backend_error {
+## Handle cases where ghost director returns no backend
+if (beresp.status == 503) {
+set beresp.http.Content-Type = "application/json";
+synthetic({"{"error": "Backend selection failed"}"});
+}
+return (deliver);
+}
 ```
 
 ### Configuration File Format (ghost.json)
@@ -79,12 +89,11 @@ set bereq.backend = router.backend();
 }
 ```
 
-### Error Responses
+### Error Handling
 
-- **404 Not Found**: No virtual host matched and no default configured
-- **503 Service Unavailable**: Virtual host matched but has no backends
-
-Both error responses include a JSON body with details.
+When no backend is found (no vhost match and no default), the director returns `None`,
+causing Varnish to trigger `vcl_backend_error` with status 503. Handle this in your VCL
+to provide appropriate error responses.
 
 ### Hot Reload
 
@@ -95,6 +104,8 @@ curl -i http://localhost/.varnish-ghost/reload
 ```
 
 Returns HTTP 200 on success, HTTP 500 on failure (with error in `x-ghost-error` header).
+The reload happens within the director, creating new backends as needed while preserving
+existing connections for unchanged backends.
 
 ```vcl
 // Place import statement at the top of your VCL file
@@ -134,7 +145,7 @@ Pre-routing hook for `vcl_recv`.
 
 This function is reserved for future URL rewriting and pre-routing logic.
 Currently returns `None` (no action). Reload handling has moved to the
-backend fetch phase for cleaner separation.
+director for cleaner separation.
 
 #### Returns
 
@@ -155,6 +166,9 @@ The ghost backend routes requests to upstream servers based on the
 Host header and the loaded configuration. It performs weighted random
 selection when multiple backends are available for a virtual host.
 
+Uses the director pattern with Varnish native backends for optimal
+performance and connection pooling.
+
 #### Example
 
 ```vcl
@@ -170,13 +184,14 @@ set bereq.backend = router.backend();
 
 Create a new ghost backend instance.
 
-Must be called after `ghost.init()` has been called. The background
-runtime (created automatically on VCL load) provides connection pooling.
+Must be called after `ghost.init()` has been called. This creates
+a director that manages native Varnish backends for all endpoints
+in the configuration.
 
 ##### Errors
 
 Returns an error if `ghost.init()` has not been called first, or if
-the background runtime failed to initialize.
+any backend creation fails.
 
 #### Method `BACKEND <object>.backend()`
 
@@ -185,8 +200,11 @@ Get the VCL backend for use in `vcl_backend_fetch`.
 When this backend is used, ghost will:
 1. Match the request's Host header against configured virtual hosts
 2. Select a backend using weighted random selection
-3. Forward the request to the selected backend
-4. Return the response (or a synthetic 404/503 on error)
+3. Return a native Varnish backend pointer for the selected endpoint
+4. Varnish handles the actual HTTP request and connection pooling
+
+If no backend is found, returns `None` which causes `vcl_backend_error`
+with status 503.
 
 ##### Safety
 

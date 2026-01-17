@@ -2,6 +2,17 @@
 
 Kubernetes Gateway API implementation using Varnish.
 
+## Container Images
+
+Pre-built images are available on GitHub Container Registry:
+
+```
+ghcr.io/varnish/gateway-operator
+ghcr.io/varnish/gateway-chaperone
+```
+
+Images are public and require no authentication to pull.
+
 ## Architecture
 
 ```

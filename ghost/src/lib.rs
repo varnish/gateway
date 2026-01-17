@@ -3,318 +3,44 @@
 //! A purpose-built Varnish vmod for Kubernetes Gateway API implementation.
 //! Handles backend management, request routing, and configuration hot-reloading.
 //!
-//! ## Connection Pooling
+//! ## Native Backend Architecture
 //!
-//! Ghost uses a background tokio runtime with an async reqwest client for proper
-//! connection pooling. The runtime is created on VCL load and shared across all
-//! backends via `#[shared_per_vcl]`. This means:
+//! Ghost uses Varnish native backends with the director pattern for routing.
+//! This provides:
 //!
-//! - Connections are reused across requests
-//! - Config reloads don't drop existing connections
-//! - Pool parameters (idle timeout, max connections) are properly managed
+//! - Battle-tested HTTP client and connection pooling from Varnish
+//! - Lower latency and memory usage vs async Rust HTTP
+//! - Simpler code with fewer dependencies
+//! - Better integration with Varnish ecosystem
 
 use parking_lot::RwLock;
-use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
 
-use varnish::vcl::{Backend, Ctx, Event, HttpHeaders, StrOrBytes, VclBackend, VclError};
+use varnish::vcl::{Ctx, Director, VclError};
 
+mod backend_pool;
 mod config;
-mod response;
-mod routing;
-pub mod runtime;
+mod director;
 
-use config::Config;
-use response::ResponseBody;
-use routing::MatchResult;
-pub use runtime::BgThread;
-use runtime::HttpRequest;
+use backend_pool::BackendPool;
+use director::{build_routing_state, GhostDirector};
 
 // Run VTC tests
 varnish::run_vtc_tests!("tests/*.vtc");
 
-/// Todo: Is this really needed?
-/// Headers to filter out when forwarding requests to backends
-const FILTERED_REQUEST_HEADERS: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-    "x-forwarded-for",
-    "x-forwarded-host",
-    "x-forwarded-proto",
-];
-
-/// Headers to filter out when returning responses
-const FILTERED_RESPONSE_HEADERS: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
-];
-
-/// Global state for the ghost VMOD (routing config only, HTTP client is in BgThread)
+/// Global state for the ghost VMOD (routing config path only)
 struct GhostState {
     config_path: PathBuf,
-    config: Config,
 }
 
-/// Global state storage (routing config only)
+/// Global state storage (config path only, routing is in director instances)
 static STATE: RwLock<Option<Arc<GhostState>>> = RwLock::new(None);
 
-/// The ghost backend - wraps our routing logic
+/// The ghost backend - wraps our director
 #[allow(non_camel_case_types)]
 pub struct ghost_backend {
-    backend: Backend<GhostBackend, ResponseBody>,
-}
-
-/// Our VclBackend implementation that does the actual routing
-struct GhostBackend {
-    /// Channel sender to the background runtime for HTTP requests
-    sender: UnboundedSender<HttpRequest>,
-}
-
-impl VclBackend<ResponseBody> for GhostBackend {
-    fn get_response(&self, ctx: &mut Ctx) -> Result<Option<ResponseBody>, VclError> {
-        // Get bereq for URL check
-        let bereq = ctx
-            .http_bereq
-            .as_ref()
-            .ok_or_else(|| VclError::new("ghost: no bereq available".to_string()))?;
-
-        // Get URL from bereq
-        let url = get_url(bereq).unwrap_or_else(|| "/".to_string());
-
-        // Handle reload endpoint - returns empty body with status code
-        if url == "/.varnish-ghost/reload" {
-            return handle_reload(ctx);
-        }
-
-        // Get routing config state
-        let state_guard = STATE.read();
-        let state = state_guard
-            .as_ref()
-            .ok_or_else(|| VclError::new("ghost: not initialized".to_string()))?;
-
-        let host = get_host_header(bereq)
-            .ok_or_else(|| VclError::new("ghost: no Host header in request".to_string()))?;
-
-        // Match vhost
-        let vhost = match routing::match_vhost(&state.config, &host) {
-            MatchResult::Found(vhost) => vhost,
-            MatchResult::NotFound => {
-                return Ok(Some(synth_response(
-                    ctx,
-                    404,
-                    "Not Found",
-                    &format!(r#"{{"error": "no vhost match", "host": "{}"}}"#, host),
-                )?));
-            }
-            MatchResult::NoBackends => {
-                return Ok(Some(synth_response(
-                    ctx,
-                    503,
-                    "Service Unavailable",
-                    &format!(
-                        r#"{{"error": "no backends available", "host": "{}"}}"#,
-                        host
-                    ),
-                )?));
-            }
-        };
-
-        // Select backend
-        let target = routing::select_backend(vhost)
-            .ok_or_else(|| VclError::new("ghost: failed to select backend".to_string()))?;
-
-        // Build request URL
-        let target_url = format!("http://{}:{}{}", target.address, target.port, url);
-
-        // Parse method
-        let method_str = get_method(bereq).unwrap_or_default();
-        let method: reqwest::Method = method_str
-            .parse()
-            .unwrap_or(reqwest::Method::GET);
-
-        // Collect headers (filtering hop-by-hop)
-        let mut headers = collect_request_headers(bereq);
-        headers.push(("X-Forwarded-Host".to_string(), host.clone()));
-
-        // Drop state guard before blocking
-        drop(state_guard);
-
-        // Create oneshot channel for response
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-        // Build request for background runtime
-        let request = HttpRequest {
-            method,
-            url: target_url,
-            headers,
-            response_tx,
-        };
-
-        // Send to background runtime
-        self.sender
-            .send(request)
-            .map_err(|_| VclError::new("ghost: background runtime unavailable".to_string()))?;
-
-        // Block waiting for response from async runtime
-        let response = response_rx
-            .blocking_recv()
-            .map_err(|_| VclError::new("ghost: request was cancelled".to_string()))?
-            .map_err(|e| VclError::new(format!("ghost: backend request failed: {}", e)))?;
-
-        // Set response headers on beresp
-        let beresp = ctx
-            .http_beresp
-            .as_mut()
-            .ok_or_else(|| VclError::new("ghost: no beresp available".to_string()))?;
-
-        beresp.set_status(response.status);
-
-        // Copy response headers (filtering hop-by-hop)
-        for (name, value) in &response.headers {
-            if !FILTERED_RESPONSE_HEADERS
-                .iter()
-                .any(|h| h.eq_ignore_ascii_case(name))
-            {
-                let _ = beresp.set_header(name, value);
-            }
-        }
-
-        // Get content-length if available
-        let content_length = response.headers.iter().find_map(|(k, v)| {
-            if k.eq_ignore_ascii_case("content-length") {
-                v.parse().ok()
-            } else {
-                None
-            }
-        });
-
-        // Return streaming response body via channel
-        Ok(Some(ResponseBody::async_streaming(
-            response.body_rx,
-            content_length,
-        )))
-    }
-}
-
-/// Generate a synthetic response
-fn synth_response(
-    ctx: &mut Ctx,
-    status: u16,
-    reason: &str,
-    body: &str,
-) -> Result<ResponseBody, VclError> {
-    let beresp = ctx
-        .http_beresp
-        .as_mut()
-        .ok_or_else(|| VclError::new("ghost: no beresp available".to_string()))?;
-
-    beresp.set_status(status);
-    beresp.set_header("content-type", "application/json")?;
-    beresp.set_header("x-ghost-error", reason)?;
-
-    Ok(ResponseBody::buffered(body.as_bytes().to_vec()))
-}
-
-/// Handle reload request - triggers config reload and returns status via HTTP code
-fn handle_reload(ctx: &mut Ctx) -> Result<Option<ResponseBody>, VclError> {
-    let beresp = ctx
-        .http_beresp
-        .as_mut()
-        .ok_or_else(|| VclError::new("ghost: no beresp available".to_string()))?;
-
-    match reload_config() {
-        Ok(()) => {
-            beresp.set_status(200);
-            Ok(Some(ResponseBody::buffered(vec![])))
-        }
-        Err(e) => {
-            beresp.set_status(500);
-            beresp.set_header("x-ghost-error", &e)?;
-            Ok(Some(ResponseBody::buffered(vec![])))
-        }
-    }
-}
-
-/// Convert StrOrBytes to Cow<str> if possible (avoids allocation when already UTF-8)
-fn str_or_bytes_to_cow<'a>(sob: &'a StrOrBytes<'a>) -> Option<Cow<'a, str>> {
-    match sob {
-        StrOrBytes::Utf8(s) => Some(Cow::Borrowed(s)),
-        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(Cow::Borrowed),
-    }
-}
-
-/// Get Host header value (without port)
-fn get_host_header(http: &HttpHeaders) -> Option<String> {
-    // Use the header() method for case-insensitive lookup
-    let host_value = http.header("host")?;
-    let host_str = str_or_bytes_to_cow(&host_value)?;
-    // Strip port if present
-    let host = host_str.split(':').next()?;
-    Some(host.to_lowercase())
-}
-
-/// Get URL from HTTP request
-fn get_url(http: &HttpHeaders) -> Option<String> {
-    http.url().and_then(|s| match s {
-        StrOrBytes::Utf8(s) => Some(s.to_string()),
-        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
-    })
-}
-
-/// Get method from HTTP request
-fn get_method(http: &HttpHeaders) -> Option<String> {
-    http.method().and_then(|s| match s {
-        StrOrBytes::Utf8(s) => Some(s.to_string()),
-        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok().map(|s| s.to_string()),
-    })
-}
-
-/// Collect request headers into a Vec (filtering hop-by-hop headers)
-fn collect_request_headers(http: &HttpHeaders) -> Vec<(String, String)> {
-    let mut headers = Vec::new();
-    for (name, value) in http {
-        if !FILTERED_REQUEST_HEADERS
-            .iter()
-            .any(|h| h.eq_ignore_ascii_case(name))
-        {
-            if let Some(v) = str_or_bytes_to_cow(&value) {
-                headers.push((name.to_string(), v.into_owned()));
-            }
-        }
-    }
-    headers
-}
-
-/// Reload configuration from disk (HTTP client is in BgThread, not recreated here)
-fn reload_config() -> Result<(), String> {
-    let state_guard = STATE.read();
-    let current_state = state_guard.as_ref().ok_or("ghost not initialized")?;
-
-    let config_path = current_state.config_path.clone();
-    drop(state_guard);
-
-    let config = config::load(&config_path)?;
-
-    let new_state = GhostState { config_path, config };
-
-    let mut guard = STATE.write();
-    *guard = Some(Arc::new(new_state));
-
-    Ok(())
+    director: Director<GhostDirector>,
 }
 
 /// Ghost VMOD - Gateway API routing for Varnish
@@ -330,6 +56,7 @@ fn reload_config() -> Result<(), String> {
 /// - **Weighted backend selection**: Distribute traffic across backends by weight
 /// - **Hot configuration reload**: Update routing without restarting Varnish
 /// - **Default backend fallback**: Catch-all for unmatched requests
+/// - **Native backends**: Uses Varnish's built-in HTTP client for optimal performance
 ///
 /// ## Minimal VCL Example
 ///
@@ -360,6 +87,15 @@ fn reload_config() -> Result<(), String> {
 ///     # Ghost handles reload requests internally, returning 200/500 status
 ///     set bereq.backend = router.backend();
 /// }
+///
+/// sub vcl_backend_error {
+///     # Handle cases where ghost director returns no backend
+///     if (beresp.status == 503) {
+///         set beresp.http.Content-Type = "application/json";
+///         synthetic({"{"error": "Backend selection failed"}"});
+///     }
+///     return (deliver);
+/// }
 /// ```
 ///
 /// ## Configuration File Format (ghost.json)
@@ -388,12 +124,11 @@ fn reload_config() -> Result<(), String> {
 /// }
 /// ```
 ///
-/// ## Error Responses
+/// ## Error Handling
 ///
-/// - **404 Not Found**: No virtual host matched and no default configured
-/// - **503 Service Unavailable**: Virtual host matched but has no backends
-///
-/// Both error responses include a JSON body with details.
+/// When no backend is found (no vhost match and no default), the director returns `None`,
+/// causing Varnish to trigger `vcl_backend_error` with status 503. Handle this in your VCL
+/// to provide appropriate error responses.
 ///
 /// ## Hot Reload
 ///
@@ -404,36 +139,12 @@ fn reload_config() -> Result<(), String> {
 /// ```
 ///
 /// Returns HTTP 200 on success, HTTP 500 on failure (with error in `x-ghost-error` header).
+/// The reload happens within the director, creating new backends as needed while preserving
+/// existing connections for unchanged backends.
 #[varnish::vmod(docs = "README.md")]
 mod ghost {
     use super::*;
     use varnish::ffi::VCL_BACKEND;
-
-    /// VCL event handler - creates background runtime on VCL load.
-    ///
-    /// This is called automatically by Varnish when the VCL is loaded or discarded.
-    /// It creates the background tokio runtime with the async HTTP client for
-    /// connection pooling. The runtime is shared across all ghost backends in
-    /// the VCL via `#[shared_per_vcl]`.
-    #[event]
-    pub fn event(
-        #[shared_per_vcl] bg_thread: &mut Option<Box<BgThread>>,
-        event: Event,
-    ) {
-        if let Event::Load = event {
-            match BgThread::new() {
-                Ok(bgt) => {
-                    *bg_thread = Some(Box::new(bgt));
-                }
-                Err(e) => {
-                    // Log error but don't crash - the vmod will fail gracefully
-                    // when backends are used without initialization
-                    eprintln!("ghost: failed to initialize background runtime: {}", e);
-                }
-            }
-        }
-        // BgThread is automatically dropped when VCL is discarded
-    }
 
     /// Initialize ghost with a configuration file path.
     ///
@@ -457,10 +168,12 @@ mod ghost {
     /// ```
     pub fn init(path: &str) -> Result<(), VclError> {
         let config_path = PathBuf::from(path);
-        let config =
-            config::load(&config_path).map_err(|e| VclError::new(format!("ghost.init: {}", e)))?;
 
-        let state = GhostState { config_path, config };
+        // Validate config file exists and is parseable
+        let _config = config::load(&config_path)
+            .map_err(|e| VclError::new(format!("ghost.init: {}", e)))?;
+
+        let state = GhostState { config_path };
 
         let mut guard = STATE.write();
         *guard = Some(Arc::new(state));
@@ -472,7 +185,7 @@ mod ghost {
     ///
     /// This function is reserved for future URL rewriting and pre-routing logic.
     /// Currently returns `None` (no action). Reload handling has moved to the
-    /// backend fetch phase for cleaner separation.
+    /// director for cleaner separation.
     ///
     /// # Returns
     ///
@@ -496,6 +209,9 @@ mod ghost {
     /// Host header and the loaded configuration. It performs weighted random
     /// selection when multiple backends are available for a virtual host.
     ///
+    /// Uses the director pattern with Varnish native backends for optimal
+    /// performance and connection pooling.
+    ///
     /// # Example
     ///
     /// ```vcl
@@ -511,44 +227,41 @@ mod ghost {
     impl ghost_backend {
         /// Create a new ghost backend instance.
         ///
-        /// Must be called after `ghost.init()` has been called. The background
-        /// runtime (created automatically on VCL load) provides connection pooling.
+        /// Must be called after `ghost.init()` has been called. This creates
+        /// a director that manages native Varnish backends for all endpoints
+        /// in the configuration.
         ///
         /// # Errors
         ///
         /// Returns an error if `ghost.init()` has not been called first, or if
-        /// the background runtime failed to initialize.
-        pub fn new(
-            ctx: &mut Ctx,
-            #[vcl_name] name: &str,
-            #[shared_per_vcl] bg_thread: &mut Option<Box<BgThread>>,
-        ) -> Result<Self, VclError> {
-            // Verify routing config is initialized
-            {
+        /// any backend creation fails.
+        pub fn new(ctx: &mut Ctx, #[vcl_name] name: &str) -> Result<Self, VclError> {
+            // Get config path from global state
+            let config_path = {
                 let state_guard = STATE.read();
-                if state_guard.is_none() {
-                    return Err(VclError::new(
-                        "ghost.backend: ghost.init() must be called first".to_string(),
-                    ));
-                }
-            }
+                let state = state_guard
+                    .as_ref()
+                    .ok_or_else(|| {
+                        VclError::new("ghost.backend: ghost.init() must be called first".to_string())
+                    })?;
+                state.config_path.clone()
+            };
 
-            // Verify background runtime is initialized
-            let bg = bg_thread.as_ref().ok_or_else(|| {
-                VclError::new("ghost.backend: background runtime not initialized".to_string())
-            })?;
+            // Load configuration
+            let config = config::load(&config_path)
+                .map_err(|e| VclError::new(format!("ghost.backend: failed to load config: {}", e)))?;
 
-            let backend = Backend::new(
-                ctx,
-                "ghost",
-                name,
-                GhostBackend {
-                    sender: bg.sender.clone(),
-                },
-                false,
-            )?;
+            // Create backend pool for this director
+            let mut backend_pool = BackendPool::new();
 
-            Ok(ghost_backend { backend })
+            // Build routing state and create backends
+            let routing = build_routing_state(&config, &mut backend_pool, ctx)?;
+
+            // Create director
+            let ghost_director = GhostDirector::new(Arc::new(routing), backend_pool, config_path);
+            let director = Director::new(ctx, "ghost", name, ghost_director)?;
+
+            Ok(ghost_backend { director })
         }
 
         /// Get the VCL backend for use in `vcl_backend_fetch`.
@@ -556,8 +269,11 @@ mod ghost {
         /// When this backend is used, ghost will:
         /// 1. Match the request's Host header against configured virtual hosts
         /// 2. Select a backend using weighted random selection
-        /// 3. Forward the request to the selected backend
-        /// 4. Return the response (or a synthetic 404/503 on error)
+        /// 3. Return a native Varnish backend pointer for the selected endpoint
+        /// 4. Varnish handles the actual HTTP request and connection pooling
+        ///
+        /// If no backend is found, returns `None` which causes `vcl_backend_error`
+        /// with status 503.
         ///
         /// # Safety
         ///
@@ -573,7 +289,7 @@ mod ghost {
         /// }
         /// ```
         pub unsafe fn backend(&self) -> VCL_BACKEND {
-            self.backend.vcl_ptr()
+            self.director.vcl_ptr()
         }
     }
 }

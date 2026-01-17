@@ -57,6 +57,11 @@ varnish v1 -vcl {
     sub vcl_backend_fetch {
         # Ghost handles both routing and reload requests
         set bereq.backend = router.backend();
+
+        # Preserve original Host header for backends
+        if (bereq.http.host) {
+            set bereq.http.x-forwarded-host = bereq.http.host;
+        }
     }
 } -start
 
