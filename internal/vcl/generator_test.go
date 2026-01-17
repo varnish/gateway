@@ -91,6 +91,41 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	}
 }
 
+func TestGenerate_GhostReloadHandler(t *testing.T) {
+	result := Generate(nil, GeneratorConfig{})
+
+	// Check vcl_recv handles both IPv4 and IPv6 localhost
+	if !strings.Contains(result, `client.ip == "127.0.0.1" || client.ip == "::1"`) {
+		t.Error("expected vcl_recv to check both IPv4 and IPv6 localhost")
+	}
+
+	// Check vcl_backend_error for ghost reload handling
+	if !strings.Contains(result, "sub vcl_backend_error {") {
+		t.Error("expected vcl_backend_error subroutine")
+	}
+	if !strings.Contains(result, "beresp.http.x-ghost-reload || beresp.http.x-ghost-error") {
+		t.Error("expected vcl_backend_error to check for ghost headers")
+	}
+	if !strings.Contains(result, `set beresp.http.content-length = "0"`) {
+		t.Error("expected vcl_backend_error to set content-length for ghost responses")
+	}
+
+	// Should have return (deliver) in the ghost reload block
+	reloadBlock := strings.Index(result, "beresp.http.x-ghost-reload")
+	if reloadBlock == -1 {
+		t.Fatal("couldn't find reload block")
+	}
+	afterReload := result[reloadBlock:]
+	nextCloseBrace := strings.Index(afterReload, "}")
+	if nextCloseBrace == -1 {
+		t.Fatal("couldn't find end of if block")
+	}
+	ifBlock := afterReload[:nextCloseBrace]
+	if !strings.Contains(ifBlock, "return (deliver)") {
+		t.Error("expected return (deliver) in ghost reload handler")
+	}
+}
+
 func TestGenerate_CustomGhostConfigPath(t *testing.T) {
 	config := GeneratorConfig{GhostConfigPath: "/custom/path/ghost.json"}
 	result := Generate(nil, config)
