@@ -131,6 +131,29 @@ impl GhostDirector {
 
         Ok(())
     }
+
+    /// Check if the request's Host header matches any configured vhost
+    pub fn has_vhost(&self, ctx: &mut Ctx) -> bool {
+        // Get req for Host header extraction (in vcl_recv)
+        let req = match ctx.http_req.as_ref() {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // Get Host header
+        let host = match get_host_header(req) {
+            Some(h) => h,
+            None => return false,
+        };
+
+        // Get routing state
+        let routing_guard = self.routing.read();
+        let routing = routing_guard.clone();
+        drop(routing_guard);
+
+        // Check if host matches any vhost
+        match_host(&routing, &host).is_some()
+    }
 }
 
 impl VclDirector for GhostDirector {
@@ -379,5 +402,75 @@ mod tests {
     fn test_select_backend_weighted_empty() {
         let refs: Vec<WeightedBackendRef> = vec![];
         assert!(select_backend_weighted(&refs).is_none());
+    }
+
+    #[test]
+    fn test_match_host_exact() {
+        let routing = RoutingState {
+            exact: {
+                let mut map = HashMap::new();
+                map.insert(
+                    "api.example.com".to_string(),
+                    vec![WeightedBackendRef {
+                        key: "10.0.0.1:8080".to_string(),
+                        weight: 100,
+                    }],
+                );
+                map
+            },
+            wildcards: vec![],
+            default: None,
+        };
+
+        let result = match_host(&routing, "api.example.com");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()[0].key, "10.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_match_host_wildcard() {
+        let routing = RoutingState {
+            exact: HashMap::new(),
+            wildcards: vec![(
+                "*.example.com".to_string(),
+                vec![WeightedBackendRef {
+                    key: "10.0.0.1:8080".to_string(),
+                    weight: 100,
+                }],
+            )],
+            default: None,
+        };
+
+        let result = match_host(&routing, "foo.example.com");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()[0].key, "10.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_match_host_default() {
+        let routing = RoutingState {
+            exact: HashMap::new(),
+            wildcards: vec![],
+            default: Some(vec![WeightedBackendRef {
+                key: "10.0.0.99:80".to_string(),
+                weight: 100,
+            }]),
+        };
+
+        let result = match_host(&routing, "unknown.example.com");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap()[0].key, "10.0.0.99:80");
+    }
+
+    #[test]
+    fn test_match_host_no_match() {
+        let routing = RoutingState {
+            exact: HashMap::new(),
+            wildcards: vec![],
+            default: None,
+        };
+
+        let result = match_host(&routing, "unknown.example.com");
+        assert!(result.is_none());
     }
 }

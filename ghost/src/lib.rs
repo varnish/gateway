@@ -324,5 +324,28 @@ mod ghost {
         pub fn reload(&self, ctx: &mut Ctx) -> bool {
             self.ghost_director.reload(ctx).is_ok()
         }
+
+        /// Check if the request's Host header matches any configured vhost.
+        ///
+        /// This can be used in `vcl_recv` to generate a 404 response for
+        /// unconfigured hosts before attempting backend selection.
+        ///
+        /// # Returns
+        ///
+        /// - `true` if the Host header matches a configured vhost (exact, wildcard, or default)
+        /// - `false` if no match is found
+        ///
+        /// # Example
+        ///
+        /// ```vcl
+        /// sub vcl_recv {
+        ///     if (!router.has_vhost()) {
+        ///         return (synth(404, "vhost not found"));
+        ///     }
+        /// }
+        /// ```
+        pub fn has_vhost(&self, ctx: &mut Ctx) -> bool {
+            self.ghost_director.has_vhost(ctx)
+        }
     }
 }

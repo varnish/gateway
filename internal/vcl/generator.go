@@ -38,8 +38,9 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    new router = ghost.ghost_backend();\n")
 	sb.WriteString("}\n\n")
 
-	// Generate vcl_recv - intercept reload requests and handle with synthetic response
+	// Generate vcl_recv - intercept reload requests and handle unknown vhosts
 	sb.WriteString("sub vcl_recv {\n")
+	sb.WriteString("    # Handle reload endpoint (localhost only)\n")
 	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\" && (client.ip == \"127.0.0.1\" || client.ip == \"::1\")) {\n")
 	sb.WriteString("        if (router.reload()) {\n")
 	sb.WriteString("            return (synth(200, \"OK\"));\n")
@@ -47,11 +48,24 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("            return (synth(500, \"Reload failed\"));\n")
 	sb.WriteString("        }\n")
 	sb.WriteString("    }\n")
+	sb.WriteString("    # Return 404 for unknown vhosts\n")
+	sb.WriteString("    if (!router.has_vhost()) {\n")
+	sb.WriteString("        return (synth(404, \"vhost not found\"));\n")
+	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")
 
 	// Generate vcl_backend_fetch
 	sb.WriteString("sub vcl_backend_fetch {\n")
 	sb.WriteString("    set bereq.backend = router.backend();\n")
+	sb.WriteString("}\n\n")
+
+	// Generate vcl_synth - provide JSON response for 404 errors
+	sb.WriteString("sub vcl_synth {\n")
+	sb.WriteString("    if (resp.status == 404 && resp.reason == \"vhost not found\") {\n")
+	sb.WriteString("        set resp.http.Content-Type = \"application/json\";\n")
+	sb.WriteString("        synthetic({\"error\": \"vhost not found\"});\n")
+	sb.WriteString("    }\n")
+	sb.WriteString("    return (deliver);\n")
 	sb.WriteString("}\n\n")
 
 	sb.WriteString("# --- User VCL concatenated below ---\n")

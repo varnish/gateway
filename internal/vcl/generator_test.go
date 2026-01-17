@@ -66,7 +66,7 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 		t.Error("expected ghost_backend initialization")
 	}
 
-	// Check vcl_recv for reload interception
+	// Check vcl_recv for reload interception and vhost checking
 	if !strings.Contains(result, "sub vcl_recv {") {
 		t.Error("expected vcl_recv subroutine")
 	}
@@ -76,6 +76,12 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	if !strings.Contains(result, "router.reload()") {
 		t.Error("expected router.reload() call for reload requests")
 	}
+	if !strings.Contains(result, "router.has_vhost()") {
+		t.Error("expected router.has_vhost() check in vcl_recv")
+	}
+	if !strings.Contains(result, `return (synth(404, "vhost not found"))`) {
+		t.Error("expected synth(404) for unknown vhosts")
+	}
 
 	// Check vcl_backend_fetch
 	if !strings.Contains(result, "sub vcl_backend_fetch {") {
@@ -83,6 +89,20 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	}
 	if !strings.Contains(result, "router.backend()") {
 		t.Error("expected router.backend() call")
+	}
+
+	// Check vcl_synth for 404 JSON response
+	if !strings.Contains(result, "sub vcl_synth {") {
+		t.Error("expected vcl_synth subroutine")
+	}
+	if !strings.Contains(result, `resp.status == 404 && resp.reason == "vhost not found"`) {
+		t.Error("expected vcl_synth to check for 404 vhost not found")
+	}
+	if !strings.Contains(result, `set resp.http.Content-Type = "application/json"`) {
+		t.Error("expected vcl_synth to set JSON content type")
+	}
+	if !strings.Contains(result, `synthetic({"error": "vhost not found"})`) {
+		t.Error("expected vcl_synth to generate JSON error")
 	}
 
 	// Check user VCL marker
