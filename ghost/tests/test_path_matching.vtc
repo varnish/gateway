@@ -1,0 +1,168 @@
+varnishtest "ghost v2 path-based routing"
+
+# Backend server for users-v2 service
+server s1 {
+    rxreq
+    expect req.http.host == "api.example.com"
+    expect req.url == "/api/v2/users"
+    txresp -body "users-v2"
+} -start
+
+# Backend server for api-v1 service
+server s2 {
+    rxreq
+    expect req.http.host == "api.example.com"
+    txresp -body "api-v1"
+} -start
+
+# Backend server for file service
+server s3 {
+    rxreq
+    expect req.http.host == "files.example.com"
+    txresp -body "file-service"
+} -start
+
+# Backend server for fallback
+server s4 {
+    rxreq
+    expect req.http.host == "api.example.com"
+    txresp -body "fallback"
+} -start
+
+# Write v2 config file with path-based routing
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "api.example.com": {
+            "routes": [
+                {
+                    "path_match": {
+                        "type": "Exact",
+                        "value": "/api/v2/users"
+                    },
+                    "backends": [
+                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    ],
+                    "priority": 10000
+                },
+                {
+                    "path_match": {
+                        "type": "PathPrefix",
+                        "value": "/api"
+                    },
+                    "backends": [
+                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    ],
+                    "priority": 1040
+                }
+            ],
+            "default_backends": [
+                {"address": "${s4_addr}", "port": ${s4_port}, "weight": 100}
+            ]
+        },
+        "files.example.com": {
+            "routes": [
+                {
+                    "path_match": {
+                        "type": "RegularExpression",
+                        "value": "^/files/[0-9]+$"
+                    },
+                    "backends": [
+                        {"address": "${s3_addr}", "port": ${s3_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+varnish v1 -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        # Intercept reload requests
+        if (req.url == "/.varnish-ghost/reload") {
+            return (pass);
+        }
+    }
+
+    sub vcl_backend_fetch {
+        set bereq.backend = router.backend();
+    }
+} -start
+
+# Test 1: Exact match should win over prefix
+client c1 {
+    txreq -url "/api/v2/users" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "users-v2"
+} -run
+
+# Test 2: Prefix match for different path
+client c2 {
+    txreq -url "/api/v1/products" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "api-v1"
+} -run
+
+# Test 3: Prefix match for /api/v2/products (not exact users)
+client c3 {
+    txreq -url "/api/v2/products" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "api-v1"
+} -run
+
+# Test 4: No match falls back to default_backends
+client c4 {
+    txreq -url "/web/index.html" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "fallback"
+} -run
+
+# Test 5: Regex match for file IDs
+client c5 {
+    txreq -url "/files/12345" -hdr "Host: files.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "file-service"
+} -run
+
+# Test 6: Regex non-match (letters instead of digits)
+client c6 {
+    txreq -url "/files/abc" -hdr "Host: files.example.com"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.Content-Type == "application/json"
+} -run
+
+# Test 7: Query strings should be stripped before matching
+client c7 {
+    txreq -url "/api/v2/users?page=1" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "users-v2"
+} -run
+
+# Test 8: PathPrefix should not match /api2 (element-wise matching)
+client c8 {
+    txreq -url "/api2/something" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "fallback"
+} -run

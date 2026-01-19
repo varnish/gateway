@@ -42,6 +42,64 @@ type RoutingRule struct {
 	Weight    int    `json:"weight"`    // Default weight for backends
 }
 
+// PathMatchType defines the type of path matching.
+type PathMatchType string
+
+const (
+	PathMatchExact             PathMatchType = "Exact"
+	PathMatchPathPrefix        PathMatchType = "PathPrefix"
+	PathMatchRegularExpression PathMatchType = "RegularExpression"
+)
+
+// PathMatch represents a path matching rule.
+type PathMatch struct {
+	Type  PathMatchType `json:"type"`
+	Value string        `json:"value"`
+}
+
+// Route represents a path-based routing rule (v2 config).
+type Route struct {
+	PathMatch *PathMatch `json:"path_match,omitempty"`
+	Service   string     `json:"service"`
+	Namespace string     `json:"namespace"`
+	Port      int        `json:"port"`
+	Weight    int        `json:"weight"`
+	Priority  int        `json:"priority"`
+}
+
+// VHostRouting represents routing configuration for a vhost with path-based rules (v2).
+type VHostRouting struct {
+	Routes       []Route       `json:"routes"`
+	DefaultRoute *RoutingRule  `json:"default_route,omitempty"`
+}
+
+// RoutingConfigV2 represents the v2 routing configuration from the operator.
+type RoutingConfigV2 struct {
+	Version int                     `json:"version"`
+	VHosts  map[string]VHostRouting `json:"vhosts"`
+	Default *RoutingRule            `json:"default,omitempty"`
+}
+
+// RouteBackends represents a route with resolved backend IPs (v2 ghost.json).
+type RouteBackends struct {
+	PathMatch *PathMatch `json:"path_match,omitempty"`
+	Backends  []Backend  `json:"backends"`
+	Priority  int        `json:"priority"`
+}
+
+// VHostV2 represents a virtual host with path-based routing (v2 ghost.json).
+type VHostV2 struct {
+	Routes          []RouteBackends `json:"routes"`
+	DefaultBackends []Backend       `json:"default_backends,omitempty"`
+}
+
+// ConfigV2 represents the v2 ghost.json configuration file.
+type ConfigV2 struct {
+	Version int                `json:"version"`
+	VHosts  map[string]VHostV2 `json:"vhosts"`
+	Default *VHost             `json:"default,omitempty"`
+}
+
 // NewConfig creates a new Config with the current version.
 func NewConfig() *Config {
 	return &Config{
@@ -121,4 +179,57 @@ func (c *Config) AddVHost(hostname string, backends []Backend) {
 // SetDefault sets the default backend for requests that don't match any vhost.
 func (c *Config) SetDefault(backends []Backend) {
 	c.Default = &VHost{Backends: backends}
+}
+
+// NewConfigV2 creates a new ConfigV2 with version 2.
+func NewConfigV2() *ConfigV2 {
+	return &ConfigV2{
+		Version: 2,
+		VHosts:  make(map[string]VHostV2),
+	}
+}
+
+// ParseRoutingConfigV2 parses v2 routing configuration content from bytes.
+func ParseRoutingConfigV2(data []byte) (*RoutingConfigV2, error) {
+	var config RoutingConfigV2
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("json.Unmarshal: %w", err)
+	}
+	if config.Version != 2 {
+		return nil, fmt.Errorf("unsupported routing config version: %d (expected 2)", config.Version)
+	}
+	return &config, nil
+}
+
+// ParseConfigV2 parses v2 ghost.json content from bytes.
+func ParseConfigV2(data []byte) (*ConfigV2, error) {
+	var config ConfigV2
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("json.Unmarshal: %w", err)
+	}
+	if config.Version != 2 {
+		return nil, fmt.Errorf("unsupported config version: %d (expected 2)", config.Version)
+	}
+	return &config, nil
+}
+
+// WriteConfigV2 writes a v2 ghost.json configuration file atomically.
+func WriteConfigV2(path string, config *ConfigV2) error {
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("json.MarshalIndent: %w", err)
+	}
+
+	// Write to temp file first for atomic operation
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("os.WriteFile(%s): %w", tmpPath, err)
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath) // cleanup on failure
+		return fmt.Errorf("os.Rename(%s, %s): %w", tmpPath, path, err)
+	}
+
+	return nil
 }

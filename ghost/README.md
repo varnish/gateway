@@ -246,25 +246,3 @@ return (synth(500, "Reload failed"));
 }
 }
 ```
-
-#### Method `BOOL <object>.has_vhost()`
-
-Check if the request's Host header matches any configured vhost.
-
-This can be used in `vcl_recv` to generate a 404 response for
-unconfigured hosts before attempting backend selection.
-
-##### Returns
-
-- `true` if the Host header matches a configured vhost (exact, wildcard, or default)
-- `false` if no match is found
-
-##### Example
-
-```vcl
-sub vcl_recv {
-if (!router.has_vhost()) {
-return (synth(404, "vhost not found"));
-}
-}
-```

@@ -62,15 +62,9 @@ All three components (operator, chaperone, ghost) are now at Phase 1 completion.
 - VCL not loaded at startup (`-f ""`); load via admin socket after start
 
 **Ghost VMOD** (`ghost/`) - Phase 1 Complete:
-- Rust-based VMOD replacing nodes/udo/activedns vmod trio
-- JSON configuration loading with validation (`src/config.rs`)
-- Host matching with exact and wildcard support (`src/routing.rs`)
-- Weighted backend selection with random distribution
-- Async HTTP client with connection pooling (`src/runtime.rs`)
-- Streaming response bodies via tokio channels (`src/response.rs`)
+- Rust-based VMOD handling virtual host routing with native backends
 - Hot-reload via `/.varnish-ghost/reload` endpoint
-- 29 unit tests, VTC integration test framework ready
-- Builds against Varnish 8.0 with `varnish` crate 0.5.5
+- See `ghost/CLAUDE.md` and `ghost/README.md` for details
 
 ### Not Yet Implemented
 
@@ -153,6 +147,40 @@ to avoid parsing user VCL:
 3. If user defines the same subroutines, their code runs *after* the gateway code
 
 Users who need pre-routing logic (URL normalization, etc.) should define their own `vcl_recv`.
+
+**Important:** Avoid generating `vcl_synth` and `vcl_backend_error` in the gateway VCL:
+- These subroutines are commonly customized by users for error handling and synthetic responses
+- If our generated VCL includes `return` statements in these subroutines, user VCL won't run (VCL execution stops at first return)
+- This creates unexpected conflicts where user customizations are silently ignored
+- Instead, handle errors and special cases in `vcl_recv` before backend selection, or provide VMOD methods users can call explicitly
+
+### Synthetic Response Pattern for VMODs
+
+When the ghost VMOD needs to generate synthetic responses (e.g., 404 for unknown vhosts), we use the **synthetic backend pattern** instead of VCL error handlers:
+
+1. **Create a synthetic backend** - A struct implementing `VclBackend` trait that generates responses programmatically
+2. **Populate beresp in get_response()** - Set status, headers, and body content directly
+3. **Return from director** - The director returns the synthetic backend instead of `None`
+
+Example from ghost's NotFoundBackend:
+```rust
+impl VclBackend<NotFoundBody> for NotFoundBackend {
+    fn get_response(&self, ctx: &mut Ctx) -> Result<Option<NotFoundBody>, VclError> {
+        let beresp = ctx.http_beresp.as_mut().unwrap();
+        beresp.set_status(404);
+        beresp.set_header("Content-Type", "application/json")?;
+        Ok(Some(NotFoundBody { ... }))
+    }
+}
+```
+
+**Benefits:**
+- No VCL generation needed for error handling
+- Zero conflict with user VCL
+- Responses generated entirely within the VMOD
+- User can still customize via `vcl_backend_response` or `vcl_deliver` if needed
+
+**See:** `ghost/src/not_found_backend.rs` for the implementation
 
 ## File Formats
 
@@ -297,11 +325,4 @@ make docker-push
 - Error returns should follow this pattern: `fmt.Errorf("io.Open(%s): %w", filename, err)`
 
 ### Ghost VMOD (Rust)
-- Uses `varnish` crate 0.5.5 for VMOD bindings
-- All public functions exposed via `#[vmod]` macro
-- Configuration validated on load; invalid configs rejected
-- Connection pooling via reqwest persists across config reloads
-- Response bodies streamed via tokio channels (not buffered)
-- Build: `cargo build --release` produces `target/release/libvmod_ghost.so`
-- Tests: `cargo test` runs 29 unit tests
-- Docker build available via `ghost/Dockerfile`
+See `ghost/CLAUDE.md` for Rust-specific conventions, build instructions, and testing details.

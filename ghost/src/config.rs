@@ -33,6 +33,48 @@ pub struct Config {
     pub default: Option<VHost>,
 }
 
+/// Path match type for routing rules
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub enum PathMatchType {
+    Exact,
+    PathPrefix,
+    RegularExpression,
+}
+
+/// Path matching rule
+#[derive(Debug, Clone, Deserialize)]
+pub struct PathMatch {
+    #[serde(rename = "type")]
+    pub match_type: PathMatchType,
+    pub value: String,
+}
+
+/// Route with path-based matching (v2)
+#[derive(Debug, Clone, Deserialize)]
+pub struct Route {
+    pub path_match: Option<PathMatch>,
+    pub backends: Vec<Backend>,
+    pub priority: i32,
+}
+
+/// Virtual host configuration with path-based routing (v2)
+#[derive(Debug, Clone, Deserialize)]
+pub struct VHostV2 {
+    pub routes: Vec<Route>,
+    #[serde(default)]
+    pub default_backends: Vec<Backend>,
+}
+
+/// Phase 2 configuration schema with path-based routing
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigV2 {
+    pub version: u32,
+    #[serde(default)]
+    pub vhosts: HashMap<String, VHostV2>,
+    pub default: Option<VHost>,
+}
+
 /// Load configuration from a JSON file.
 /// If the file doesn't exist, returns an empty config (useful for startup before
 /// the config is generated).
@@ -63,6 +105,35 @@ impl Config {
             default: None,
         }
     }
+}
+
+impl ConfigV2 {
+    /// Create an empty v2 configuration with no vhosts.
+    pub fn empty() -> Self {
+        ConfigV2 {
+            version: 2,
+            vhosts: HashMap::new(),
+            default: None,
+        }
+    }
+}
+
+/// Load v2 configuration from a JSON file.
+pub fn load_v2(path: &Path) -> Result<ConfigV2, String> {
+    // If file doesn't exist, return empty config
+    if !path.exists() {
+        return Ok(ConfigV2::empty());
+    }
+
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("failed to read config file {}: {}", path.display(), e))?;
+
+    let config: ConfigV2 = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse config file {}: {}", path.display(), e))?;
+
+    validate_v2(&config)?;
+
+    Ok(config)
 }
 
 /// Validate configuration
@@ -130,6 +201,79 @@ fn validate_backends(context: &str, backends: &[Backend]) -> Result<(), String> 
                 "backend {} in '{}': weight cannot be 0",
                 i, context
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate v2 configuration
+fn validate_v2(config: &ConfigV2) -> Result<(), String> {
+    if config.version != 2 {
+        return Err(format!(
+            "unsupported config version: {} (expected 2)",
+            config.version
+        ));
+    }
+
+    for (hostname, vhost) in &config.vhosts {
+        validate_hostname(hostname)?;
+
+        for (i, route) in vhost.routes.iter().enumerate() {
+            let route_ctx = format!("{} route {}", hostname, i);
+            validate_backends(&route_ctx, &route.backends)?;
+
+            if let Some(ref path_match) = route.path_match {
+                validate_path_match(path_match, &route_ctx)?;
+            }
+        }
+
+        if !vhost.default_backends.is_empty() {
+            validate_backends(&format!("{} default_backends", hostname), &vhost.default_backends)?;
+        }
+    }
+
+    if let Some(ref default) = config.default {
+        validate_backends("default", &default.backends)?;
+    }
+
+    Ok(())
+}
+
+/// Validate path match configuration
+fn validate_path_match(path_match: &PathMatch, context: &str) -> Result<(), String> {
+    match path_match.match_type {
+        PathMatchType::Exact | PathMatchType::PathPrefix => {
+            // Paths must start with /
+            if !path_match.value.starts_with('/') {
+                return Err(format!(
+                    "{}: path '{}' must start with /",
+                    context, path_match.value
+                ));
+            }
+            // No consecutive slashes
+            if path_match.value.contains("//") {
+                return Err(format!(
+                    "{}: path '{}' cannot contain consecutive slashes",
+                    context, path_match.value
+                ));
+            }
+        }
+        PathMatchType::RegularExpression => {
+            // Regex patterns have a max length
+            if path_match.value.len() > 1024 {
+                return Err(format!(
+                    "{}: regex pattern too long ({} chars, max 1024)",
+                    context,
+                    path_match.value.len()
+                ));
+            }
+            // Try to compile it to validate syntax
+            if let Err(e) = regex::Regex::new(&path_match.value) {
+                return Err(format!(
+                    "{}: invalid regex pattern '{}': {}",
+                    context, path_match.value, e
+                ));
+            }
         }
     }
     Ok(())

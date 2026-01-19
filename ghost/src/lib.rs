@@ -22,9 +22,11 @@ use varnish::vcl::{Ctx, Director, VclError};
 mod backend_pool;
 mod config;
 mod director;
+mod not_found_backend;
 
 use backend_pool::BackendPool;
 use director::{build_routing_state, GhostDirector, SharedGhostDirector};
+use not_found_backend::{NotFoundBackend, NotFoundBody};
 
 // Run VTC tests
 varnish::run_vtc_tests!("tests/*.vtc");
@@ -42,6 +44,8 @@ static STATE: RwLock<Option<Arc<GhostState>>> = RwLock::new(None);
 pub struct ghost_backend {
     director: Director<SharedGhostDirector>,
     ghost_director: Arc<GhostDirector>,
+    // Keep not_found_backend alive for the lifetime of this ghost_backend
+    _not_found_backend: varnish::vcl::Backend<NotFoundBackend, NotFoundBody>,
 }
 
 /// Ghost VMOD - Gateway API routing for Varnish
@@ -259,13 +263,16 @@ mod ghost {
             let routing = build_routing_state(&config, &mut backend_pool, ctx)?;
 
             // Create director (Arc-wrapped so we can clone for reload access)
-            let ghost_director = Arc::new(GhostDirector::new(Arc::new(routing), backend_pool, config_path));
+            let (ghost_director_impl, not_found_backend) =
+                GhostDirector::new(ctx, Arc::new(routing), backend_pool, config_path)?;
+            let ghost_director = Arc::new(ghost_director_impl);
             let shared_director = SharedGhostDirector(Arc::clone(&ghost_director));
             let director = Director::new(ctx, "ghost", name, shared_director)?;
 
             Ok(ghost_backend {
                 director,
                 ghost_director,
+                _not_found_backend: not_found_backend,
             })
         }
 
@@ -323,29 +330,6 @@ mod ghost {
         /// ```
         pub fn reload(&self, ctx: &mut Ctx) -> bool {
             self.ghost_director.reload(ctx).is_ok()
-        }
-
-        /// Check if the request's Host header matches any configured vhost.
-        ///
-        /// This can be used in `vcl_recv` to generate a 404 response for
-        /// unconfigured hosts before attempting backend selection.
-        ///
-        /// # Returns
-        ///
-        /// - `true` if the Host header matches a configured vhost (exact, wildcard, or default)
-        /// - `false` if no match is found
-        ///
-        /// # Example
-        ///
-        /// ```vcl
-        /// sub vcl_recv {
-        ///     if (!router.has_vhost()) {
-        ///         return (synth(404, "vhost not found"));
-        ///     }
-        /// }
-        /// ```
-        pub fn has_vhost(&self, ctx: &mut Ctx) -> bool {
-            self.ghost_director.has_vhost(ctx)
         }
     }
 }

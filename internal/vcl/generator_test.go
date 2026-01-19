@@ -66,7 +66,7 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 		t.Error("expected ghost_backend initialization")
 	}
 
-	// Check vcl_recv for reload interception and vhost checking
+	// Check vcl_recv for reload interception
 	if !strings.Contains(result, "sub vcl_recv {") {
 		t.Error("expected vcl_recv subroutine")
 	}
@@ -76,12 +76,6 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	if !strings.Contains(result, "router.reload()") {
 		t.Error("expected router.reload() call for reload requests")
 	}
-	if !strings.Contains(result, "router.has_vhost()") {
-		t.Error("expected router.has_vhost() check in vcl_recv")
-	}
-	if !strings.Contains(result, `return (synth(404, "vhost not found"))`) {
-		t.Error("expected synth(404) for unknown vhosts")
-	}
 
 	// Check vcl_backend_fetch
 	if !strings.Contains(result, "sub vcl_backend_fetch {") {
@@ -89,20 +83,6 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	}
 	if !strings.Contains(result, "router.backend()") {
 		t.Error("expected router.backend() call")
-	}
-
-	// Check vcl_synth for 404 JSON response
-	if !strings.Contains(result, "sub vcl_synth {") {
-		t.Error("expected vcl_synth subroutine")
-	}
-	if !strings.Contains(result, `resp.status == 404 && resp.reason == "vhost not found"`) {
-		t.Error("expected vcl_synth to check for 404 vhost not found")
-	}
-	if !strings.Contains(result, `set resp.http.Content-Type = "application/json"`) {
-		t.Error("expected vcl_synth to set JSON content type")
-	}
-	if !strings.Contains(result, `synthetic({"error": "vhost not found"})`) {
-		t.Error("expected vcl_synth to generate JSON error")
 	}
 
 	// Check user VCL marker
@@ -366,5 +346,180 @@ func TestCollectHTTPRouteBackends_CrossNamespace(t *testing.T) {
 	}
 	if backends[0].Namespace != "other-namespace" {
 		t.Errorf("expected namespace other-namespace, got %s", backends[0].Namespace)
+	}
+}
+
+func TestCalculateRoutePriority(t *testing.T) {
+	tests := []struct {
+		name     string
+		pathMatch *ghost.PathMatch
+		expected int
+	}{
+		{
+			name:      "nil path match (default route)",
+			pathMatch: nil,
+			expected:  0,
+		},
+		{
+			name: "exact match",
+			pathMatch: &ghost.PathMatch{
+				Type:  ghost.PathMatchExact,
+				Value: "/api/v2/users",
+			},
+			expected: 10000,
+		},
+		{
+			name: "path prefix short",
+			pathMatch: &ghost.PathMatch{
+				Type:  ghost.PathMatchPathPrefix,
+				Value: "/api",
+			},
+			expected: 1000 + 40, // 1000 + len("/api")*10
+		},
+		{
+			name: "path prefix long",
+			pathMatch: &ghost.PathMatch{
+				Type:  ghost.PathMatchPathPrefix,
+				Value: "/api/v2/users",
+			},
+			expected: 1000 + 140, // 1000 + len("/api/v2/users")*10
+		},
+		{
+			name: "regex match",
+			pathMatch: &ghost.PathMatch{
+				Type:  ghost.PathMatchRegularExpression,
+				Value: "/files/.*",
+			},
+			expected: 100,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := CalculateRoutePriority(tc.pathMatch)
+			if result != tc.expected {
+				t.Errorf("CalculateRoutePriority() = %d, expected %d", result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestCollectHTTPRouteBackendsV2_WithPathMatches(t *testing.T) {
+	exactType := gatewayv1.PathMatchExact
+	prefixType := gatewayv1.PathMatchPathPrefix
+
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Hostnames: []gatewayv1.Hostname{"api.example.com"},
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{
+								Path: &gatewayv1.HTTPPathMatch{
+									Type:  &exactType,
+									Value: ptr("/api/v2/users"),
+								},
+							},
+						},
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{
+								BackendRef: gatewayv1.BackendRef{
+									BackendObjectReference: gatewayv1.BackendObjectReference{
+										Name: "users-v2",
+										Port: ptr(gatewayv1.PortNumber(8080)),
+									},
+								},
+							},
+						},
+					},
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{
+								Path: &gatewayv1.HTTPPathMatch{
+									Type:  &prefixType,
+									Value: ptr("/api"),
+								},
+							},
+						},
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{
+								BackendRef: gatewayv1.BackendRef{
+									BackendObjectReference: gatewayv1.BackendObjectReference{
+										Name: "api-v1",
+										Port: ptr(gatewayv1.PortNumber(8080)),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	collectedRoutes := CollectHTTPRouteBackendsV2(routes, "default")
+
+	if len(collectedRoutes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
+	}
+
+	// Routes should be sorted by priority (descending - higher priority first)
+	// Exact match (10000) should come before prefix match (1040)
+	if collectedRoutes[0].Service != "users-v2" {
+		t.Errorf("expected first route to be users-v2 (exact match), got %s", collectedRoutes[0].Service)
+	}
+	if collectedRoutes[0].Priority != 10000 {
+		t.Errorf("expected first route priority 10000, got %d", collectedRoutes[0].Priority)
+	}
+
+	if collectedRoutes[1].Service != "api-v1" {
+		t.Errorf("expected second route to be api-v1 (prefix match), got %s", collectedRoutes[1].Service)
+	}
+	if collectedRoutes[1].Priority != 1040 {
+		t.Errorf("expected second route priority 1040, got %d", collectedRoutes[1].Priority)
+	}
+}
+
+func TestCollectHTTPRouteBackendsV2_NoMatches(t *testing.T) {
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Hostnames: []gatewayv1.Hostname{"api.example.com"},
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						// No matches - should create default route with PathPrefix "/"
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{
+								BackendRef: gatewayv1.BackendRef{
+									BackendObjectReference: gatewayv1.BackendObjectReference{
+										Name: "api-service",
+										Port: ptr(gatewayv1.PortNumber(8080)),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	collectedRoutes := CollectHTTPRouteBackendsV2(routes, "default")
+
+	if len(collectedRoutes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(collectedRoutes))
+	}
+
+	if collectedRoutes[0].PathMatch == nil {
+		t.Fatal("expected path match to be set")
+	}
+	if collectedRoutes[0].PathMatch.Type != ghost.PathMatchPathPrefix {
+		t.Errorf("expected path match type PathPrefix, got %v", collectedRoutes[0].PathMatch.Type)
+	}
+	if collectedRoutes[0].PathMatch.Value != "/" {
+		t.Errorf("expected path match value /, got %s", collectedRoutes[0].PathMatch.Value)
 	}
 }

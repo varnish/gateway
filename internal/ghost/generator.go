@@ -114,3 +114,105 @@ func GenerateRoutingConfig(backends []HTTPRouteBackend, defaultBackend *HTTPRout
 
 	return config
 }
+
+// GenerateRoutingConfigV2 creates a v2 RoutingConfig from a map of hostname to routes.
+// Routes should already be sorted by priority.
+func GenerateRoutingConfigV2(routesByHost map[string][]Route, defaultBackend *RoutingRule) *RoutingConfigV2 {
+	config := &RoutingConfigV2{
+		Version: 2,
+		VHosts:  make(map[string]VHostRouting),
+		Default: defaultBackend,
+	}
+
+	for hostname, routes := range routesByHost {
+		config.VHosts[hostname] = VHostRouting{
+			Routes: routes,
+		}
+	}
+
+	return config
+}
+
+// GroupRoutesByHostname groups routes by hostname for v2 config generation.
+func GroupRoutesByHostname(routes []Route, hostnames []string) map[string][]Route {
+	grouped := make(map[string][]Route)
+
+	for _, hostname := range hostnames {
+		for _, route := range routes {
+			// Routes are already sorted by priority, just group them
+			grouped[hostname] = append(grouped[hostname], route)
+		}
+	}
+
+	return grouped
+}
+
+// GenerateV2 creates a v2 ghost.json Config by merging routing rules with discovered endpoints.
+// routingConfig contains the vhost-to-service mappings with path-based routes from the operator.
+// endpoints contains the discovered pod IPs for each service.
+func GenerateV2(routingConfig *RoutingConfigV2, endpoints ServiceEndpoints) *ConfigV2 {
+	config := NewConfigV2()
+
+	// Process each vhost
+	for hostname, vhostRouting := range routingConfig.VHosts {
+		var routeBackends []RouteBackends
+
+		// Process each route in this vhost
+		for _, route := range vhostRouting.Routes {
+			backends := routeToBackends(route, endpoints)
+			if len(backends) > 0 {
+				routeBackends = append(routeBackends, RouteBackends{
+					PathMatch: route.PathMatch,
+					Backends:  backends,
+					Priority:  route.Priority,
+				})
+			}
+		}
+
+		// Process default route if present
+		var defaultBackends []Backend
+		if vhostRouting.DefaultRoute != nil {
+			defaultBackends = endpointsToBackends(*vhostRouting.DefaultRoute, endpoints)
+		}
+
+		config.VHosts[hostname] = VHostV2{
+			Routes:          routeBackends,
+			DefaultBackends: defaultBackends,
+		}
+	}
+
+	// Process global default if present
+	if routingConfig.Default != nil {
+		backends := endpointsToBackends(*routingConfig.Default, endpoints)
+		config.Default = &VHost{Backends: backends}
+	}
+
+	return config
+}
+
+// routeToBackends converts a route with endpoints to backend list.
+func routeToBackends(route Route, endpoints ServiceEndpoints) []Backend {
+	key := ServiceKey(route.Namespace, route.Service)
+	eps, ok := endpoints[key]
+	if !ok {
+		return []Backend{}
+	}
+
+	backends := make([]Backend, 0, len(eps))
+	for _, ep := range eps {
+		port := ep.Port
+		if port == 0 {
+			port = route.Port
+		}
+		weight := route.Weight
+		if weight == 0 {
+			weight = 100
+		}
+		backends = append(backends, Backend{
+			Address: ep.IP,
+			Port:    port,
+			Weight:  weight,
+		})
+	}
+	return backends
+}
