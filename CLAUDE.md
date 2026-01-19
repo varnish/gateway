@@ -300,9 +300,9 @@ ghcr.io/varnish/gateway-chaperone
 ghcr.io/varnish/varnish-ghost
 ```
 
-**Automated builds**: Images are built and pushed automatically via GitHub Actions on:
-- Push to `main` branch (tagged as `latest` + version from `.version`)
-- Version tags (`v*`) (tagged with version + `latest`)
+**Automated CI**: Tests run automatically via GitHub Actions on push to `main` and pull requests.
+
+**Automated builds**: Images are built and pushed automatically via GitHub Actions on version tags (`v*`) only, tagged with both the version and `latest`.
 
 **Manual builds**:
 
