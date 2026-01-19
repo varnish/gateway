@@ -144,3 +144,219 @@ spec:
   ports:
   - port: 8080
     targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-gamma
+  labels:
+    app: app-gamma
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: app-gamma
+  template:
+    metadata:
+      labels:
+        app: app-gamma
+    spec:
+      containers:
+      - name: server
+        image: python:3.11-alpine
+        command:
+        - python3
+        - -c
+        - |
+          import http.server
+          import socketserver
+          import os
+          import json
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  response = {
+                      'app': 'gamma',
+                      'hostname': os.environ.get('HOSTNAME', 'unknown'),
+                      'path': self.path,
+                  }
+                  self.wfile.write(json.dumps(response, indent=2).encode())
+
+              def log_message(self, format, *args):
+                  pass  # Suppress logging
+
+          with socketserver.TCPServer(('', 8080), Handler) as httpd:
+              print(f"app-gamma serving on port 8080")
+              httpd.serve_forever()
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-gamma
+spec:
+  selector:
+    app: app-gamma
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-delta
+  labels:
+    app: app-delta
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: app-delta
+  template:
+    metadata:
+      labels:
+        app: app-delta
+    spec:
+      containers:
+      - name: server
+        image: python:3.11-alpine
+        command:
+        - python3
+        - -c
+        - |
+          import http.server
+          import socketserver
+          import os
+          import json
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  response = {
+                      'app': 'delta',
+                      'hostname': os.environ.get('HOSTNAME', 'unknown'),
+                      'path': self.path,
+                  }
+                  self.wfile.write(json.dumps(response, indent=2).encode())
+
+              def log_message(self, format, *args):
+                  pass  # Suppress logging
+
+          with socketserver.TCPServer(('', 8080), Handler) as httpd:
+              print(f"app-delta serving on port 8080")
+              httpd.serve_forever()
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-delta
+spec:
+  selector:
+    app: app-delta
+  ports:
+  - port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-epsilon
+  labels:
+    app: app-epsilon
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: app-epsilon
+  template:
+    metadata:
+      labels:
+        app: app-epsilon
+    spec:
+      containers:
+      - name: server
+        image: python:3.11-alpine
+        command:
+        - python3
+        - -c
+        - |
+          import http.server
+          import socketserver
+          import os
+          import json
+
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_GET(self):
+                  self.send_response(200)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  response = {
+                      'app': 'epsilon',
+                      'hostname': os.environ.get('HOSTNAME', 'unknown'),
+                      'path': self.path,
+                  }
+                  self.wfile.write(json.dumps(response, indent=2).encode())
+
+              def log_message(self, format, *args):
+                  pass  # Suppress logging
+
+          with socketserver.TCPServer(('', 8080), Handler) as httpd:
+              print(f"app-epsilon serving on port 8080")
+              httpd.serve_forever()
+        ports:
+        - containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 2
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-epsilon
+spec:
+  selector:
+    app: app-epsilon
+  ports:
+  - port: 8080
+    targetPort: 8080

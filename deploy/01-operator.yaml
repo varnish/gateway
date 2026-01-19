@@ -102,14 +102,14 @@ spec:
       serviceAccountName: varnish-gateway-operator
       containers:
         - name: operator
-          image: ghcr.io/varnish/gateway-operator:v0.1.20
+          image: ghcr.io/varnish/gateway-operator:v0.3.1
           args:
             - --leader-elect=true
           env:
             - name: GATEWAY_CLASS_NAME
               value: "varnish"
             - name: GATEWAY_IMAGE
-              value: "ghcr.io/varnish/gateway-chaperone:v0.1.20"
+              value: "ghcr.io/varnish/gateway-chaperone:v0.3.1"
           ports:
             - name: metrics
               containerPort: 8080

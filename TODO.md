@@ -2,13 +2,13 @@
 
 ## Phase 1: Complete
 
-- Basic vhost-based routing 
+- Basic vhost-based routing
 
-## Phase 2: Path Matching
+## Phase 2: Complete
 
-- Extend ghost.json generator to include path rules
-- Parse HTTPRoute path matches (exact, prefix, regex)
-- Order routes by specificity
+- Path-based routing with exact, prefix, and regex matching
+- Route ordering by specificity
+- Extended ghost.json format with path rules
 
 ## Phase 3: Advanced Request Matching
 
