@@ -451,8 +451,15 @@ impl VclDirector for GhostDirector {
     fn list(&self, _ctx: &mut Ctx, vsb: &mut Buffer, _detailed: bool, _json: bool) {
         let routing = self.routing.read();
         let backends = self.backends.read();
-        let total_vhosts = routing.exact.len() + routing.wildcards.len();
-        let has_default = routing.default.is_some();
+
+        let (total_vhosts, has_default) = match &*routing {
+            AnyRoutingState::V1(v1) => {
+                (v1.exact.len() + v1.wildcards.len(), v1.default.is_some())
+            }
+            AnyRoutingState::V2(v2) => {
+                (v2.exact.len() + v2.wildcards.len(), v2.default.is_some())
+            }
+        };
 
         let msg = format!(
             "{} vhosts, {} backends, default: {}",

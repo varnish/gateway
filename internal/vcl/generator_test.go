@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/varnish/gateway/internal/ghost"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
@@ -382,7 +383,7 @@ func TestCalculateRoutePriority(t *testing.T) {
 				Type:  ghost.PathMatchPathPrefix,
 				Value: "/api/v2/users",
 			},
-			expected: 1000 + 140, // 1000 + len("/api/v2/users")*10
+			expected: 1000 + 130, // 1000 + len("/api/v2/users")*10 (13 chars)
 		},
 		{
 			name: "regex match",
@@ -467,6 +468,9 @@ func TestCollectHTTPRouteBackendsV2_WithPathMatches(t *testing.T) {
 
 	// Routes should be sorted by priority (descending - higher priority first)
 	// Exact match (10000) should come before prefix match (1040)
+	if collectedRoutes[0].Hostname != "api.example.com" {
+		t.Errorf("expected first route hostname api.example.com, got %s", collectedRoutes[0].Hostname)
+	}
 	if collectedRoutes[0].Service != "users-v2" {
 		t.Errorf("expected first route to be users-v2 (exact match), got %s", collectedRoutes[0].Service)
 	}
@@ -474,6 +478,9 @@ func TestCollectHTTPRouteBackendsV2_WithPathMatches(t *testing.T) {
 		t.Errorf("expected first route priority 10000, got %d", collectedRoutes[0].Priority)
 	}
 
+	if collectedRoutes[1].Hostname != "api.example.com" {
+		t.Errorf("expected second route hostname api.example.com, got %s", collectedRoutes[1].Hostname)
+	}
 	if collectedRoutes[1].Service != "api-v1" {
 		t.Errorf("expected second route to be api-v1 (prefix match), got %s", collectedRoutes[1].Service)
 	}

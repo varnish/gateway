@@ -191,6 +191,7 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 						}
 
 						collectedRoutes = append(collectedRoutes, ghost.Route{
+							Hostname:  string(hostname),
 							PathMatch: pathMatch,
 							Service:   string(backend.Name),
 							Namespace: backendNS,
@@ -251,6 +252,7 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 							}
 
 							collectedRoutes = append(collectedRoutes, ghost.Route{
+								Hostname:  string(hostname),
 								PathMatch: pathMatch,
 								Service:   string(backend.Name),
 								Namespace: backendNS,
@@ -270,6 +272,9 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 		// Higher priority first
 		if a.Priority != b.Priority {
 			return b.Priority - a.Priority
+		}
+		if a.Hostname != b.Hostname {
+			return strings.Compare(a.Hostname, b.Hostname)
 		}
 		if a.Service != b.Service {
 			return strings.Compare(a.Service, b.Service)

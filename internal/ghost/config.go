@@ -59,6 +59,7 @@ type PathMatch struct {
 
 // Route represents a path-based routing rule (v2 config).
 type Route struct {
+	Hostname  string     `json:"hostname,omitempty"` // Used when collecting from HTTPRoutes
 	PathMatch *PathMatch `json:"path_match,omitempty"`
 	Service   string     `json:"service"`
 	Namespace string     `json:"namespace"`
