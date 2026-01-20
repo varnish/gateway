@@ -19,18 +19,28 @@ server s2 {
 shell {
     cat > ${tmpdir}/ghost.json <<EOF
 {
-    "version": 1,
+    "version": 2,
     "vhosts": {
         "api.example.com": {
-            "backends": [
-                {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        },
+        "*.example.com": {
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
             ]
         }
-    },
-    "default": {
-        "backends": [
-            {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
-        ]
     }
 }
 EOF

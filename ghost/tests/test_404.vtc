@@ -11,11 +11,16 @@ server s1 {
 shell {
     cat > ${tmpdir}/ghost.json <<EOF
 {
-    "version": 1,
+    "version": 2,
     "vhosts": {
         "api.example.com": {
-            "backends": [
-                {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
             ]
         }
     }

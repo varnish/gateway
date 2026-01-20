@@ -1,0 +1,177 @@
+varnishtest "ghost backend cleanup on config reload"
+
+# Backend server for host1.example.com
+server s1 {
+    loop 2 {
+        rxreq
+        expect req.http.host == "host1.example.com"
+        txresp -body "backend-host1"
+    }
+} -start
+
+# Backend server for host2.example.com
+server s2 {
+    loop 2 {
+        rxreq
+        expect req.http.host == "host2.example.com"
+        txresp -body "backend-host2"
+    }
+} -start
+
+# Backend server for host3.example.com (will be removed in reload)
+server s3 {
+    rxreq
+    expect req.http.host == "host3.example.com"
+    txresp -body "backend-host3"
+} -start
+
+# Write initial config file with all three hosts
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "host1.example.com": {
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        },
+        "host2.example.com": {
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        },
+        "host3.example.com": {
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s3_addr}", "port": ${s3_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+varnish v1 -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        # Intercept reload requests
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+    }
+
+    sub vcl_backend_fetch {
+        set bereq.backend = router.backend();
+    }
+} -start
+
+# Test 1: All three hosts should work with initial config
+client c1 {
+    txreq -url "/?v=1" -hdr "Host: host1.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-host1"
+} -run
+
+client c2 {
+    txreq -url "/?v=2" -hdr "Host: host2.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-host2"
+} -run
+
+client c3 {
+    txreq -url "/?v=3" -hdr "Host: host3.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-host3"
+} -run
+
+# Update config to remove host3 (simulating backend cleanup scenario)
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "host1.example.com": {
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        },
+        "host2.example.com": {
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+# Test 2: Trigger reload
+client c4 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# Test 3: host1 and host2 should still work after reload
+client c5 {
+    txreq -url "/?v=5" -hdr "Host: host1.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-host1"
+} -run
+
+client c6 {
+    txreq -url "/?v=6" -hdr "Host: host2.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-host2"
+} -run
+
+# Test 4: host3 should now return 404 (backend removed)
+client c7 {
+    txreq -url "/?v=7" -hdr "Host: host3.example.com"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.Content-Type == "application/json"
+    expect resp.body == "{\"error\": \"vhost not found\"}"
+} -run

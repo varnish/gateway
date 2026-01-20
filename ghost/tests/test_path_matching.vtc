@@ -2,17 +2,20 @@ varnishtest "ghost v2 path-based routing"
 
 # Backend server for users-v2 service
 server s1 {
-    rxreq
-    expect req.http.host == "api.example.com"
-    expect req.url == "/api/v2/users"
-    txresp -body "users-v2"
+    loop 2 {
+        rxreq
+        expect req.http.host == "api.example.com"
+        txresp -body "users-v2"
+    }
 } -start
 
 # Backend server for api-v1 service
 server s2 {
-    rxreq
-    expect req.http.host == "api.example.com"
-    txresp -body "api-v1"
+    loop 2 {
+        rxreq
+        expect req.http.host == "api.example.com"
+        txresp -body "api-v1"
+    }
 } -start
 
 # Backend server for file service
@@ -24,9 +27,11 @@ server s3 {
 
 # Backend server for fallback
 server s4 {
-    rxreq
-    expect req.http.host == "api.example.com"
-    txresp -body "fallback"
+    loop 2 {
+        rxreq
+        expect req.http.host == "api.example.com"
+        txresp -body "fallback"
+    }
 } -start
 
 # Write v2 config file with path-based routing

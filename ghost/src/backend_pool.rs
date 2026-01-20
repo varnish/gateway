@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use varnish::vcl::{Ctx, Endpoint, NativeBackend, NativeBackendConfig, VclError};
 
@@ -12,8 +13,10 @@ use varnish::vcl::{Ctx, Endpoint, NativeBackend, NativeBackendConfig, VclError};
 ///
 /// Each director owns its own backends. Backends are indexed by "address:port"
 /// and reused across config reloads within the same director.
+/// Backends are wrapped in Arc for efficient cloning during hot-reload.
+#[derive(Clone)]
 pub struct BackendPool {
-    backends: HashMap<String, NativeBackend>,
+    backends: HashMap<String, Arc<NativeBackend>>,
 }
 
 // SAFETY: VCL_BACKEND pointers are thread-safe in Varnish's model.
@@ -73,8 +76,8 @@ impl BackendPool {
         // Create native backend
         let backend = NativeBackend::new(ctx, &config, None)?;
 
-        // Insert into pool
-        self.backends.insert(key.clone(), backend);
+        // Insert into pool (wrapped in Arc)
+        self.backends.insert(key.clone(), Arc::new(backend));
 
         Ok(key)
     }
@@ -82,8 +85,8 @@ impl BackendPool {
     /// Look up a backend in the pool by key
     ///
     /// Returns None if the backend doesn't exist (shouldn't happen in normal use).
-    pub fn get(&self, key: &str) -> Option<&NativeBackend> {
-        self.backends.get(key)
+    pub fn get(&self, key: &str) -> Option<Arc<NativeBackend>> {
+        self.backends.get(key).cloned()
     }
 
     /// Get the number of backends in the pool (for diagnostics)
@@ -95,6 +98,21 @@ impl BackendPool {
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.backends.is_empty()
+    }
+
+    /// Remove all backends except those in the provided set of keys
+    ///
+    /// This is used during config reload to clean up backends that are
+    /// no longer referenced in the routing state.
+    pub fn retain_only(&mut self, keys_to_keep: &std::collections::HashSet<String>) {
+        let before = self.backends.len();
+        self.backends.retain(|key, _backend| keys_to_keep.contains(key));
+        let after = self.backends.len();
+        let removed = before - after;
+
+        if removed > 0 {
+            eprintln!("ghost: cleaned up {} unused backends ({} -> {})", removed, before, after);
+        }
     }
 }
 

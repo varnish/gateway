@@ -2,6 +2,16 @@
 
 Rust vmod for Varnish Gateway API routing. See `ghost-vmod.md` for full plan and `README.md` for auto-generated API documentation.
 
+## Monorepo Structure
+
+This is part of a monorepo where all components (operator, chaperone, ghost) are always deployed together and updated in sync.
+
+**Backward compatibility is not required:**
+- No need for compatibility shims, feature flags, or gradual migrations
+- Breaking changes can be made freely across component boundaries
+- Unused code should be deleted completely (no renaming to `_unused`, re-exporting, or `// removed` comments)
+- Interface changes between components can be made atomically in a single commit
+
 ## Architecture
 
 Ghost uses **Varnish native backends** with the director pattern for routing. This provides:
@@ -9,6 +19,17 @@ Ghost uses **Varnish native backends** with the director pattern for routing. Th
 - Lower latency and memory usage vs async Rust HTTP
 - Simpler code with fewer dependencies
 - Better integration with Varnish ecosystem
+
+## Backend Lifecycle
+
+Backends are created on-demand during config reload and stored in a per-director backend pool.
+When a config is reloaded, backends no longer referenced in the routing configuration are
+automatically removed from the pool to prevent memory leaks.
+
+This cleanup is safe because:
+- Varnish's VCL_BACKEND lifecycle management handles in-flight requests
+- Backends are removed only after the new routing state is fully constructed
+- The cleanup happens atomically under a write lock to maintain consistency
 
 ## Build
 

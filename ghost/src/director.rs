@@ -9,13 +9,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use parking_lot::RwLock;
+use arc_swap::ArcSwap;
 use regex::Regex;
 use varnish::ffi::VCL_BACKEND;
 use varnish::vcl::{Backend, Buffer, Ctx, HttpHeaders, StrOrBytes, VclDirector, VclError};
 
 use crate::backend_pool::BackendPool;
-use crate::config::{Config, ConfigV2, PathMatch, PathMatchType};
+use crate::config::{Config, PathMatch, PathMatchType};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 
 /// Wrapper for VCL_BACKEND pointer that implements Send + Sync
@@ -36,66 +36,36 @@ pub struct WeightedBackendRef {
     pub weight: u32,
 }
 
-/// Routing state for the director
-#[derive(Debug, Clone)]
-pub struct RoutingState {
-    /// Exact hostname matches
-    pub exact: HashMap<String, Vec<WeightedBackendRef>>,
-    /// Wildcard hostname patterns (in order)
-    pub wildcards: Vec<(String, Vec<WeightedBackendRef>)>,
-    /// Default fallback backends
-    pub default: Option<Vec<WeightedBackendRef>>,
-}
 
 /// Compiled path match for efficient matching
 #[derive(Debug, Clone)]
 pub enum PathMatchCompiled {
     Exact(String),
     PathPrefix(String),
-    Regex(String), // Store pattern as string; compile on demand with caching
+    Regex(Arc<Regex>), // Pre-compiled regex (immutable until next reload)
 }
 
 impl PathMatchCompiled {
     /// Create from config PathMatch
-    fn from_config(pm: &PathMatch) -> Self {
+    fn from_config(pm: &PathMatch) -> Result<Self, String> {
         match pm.match_type {
-            PathMatchType::Exact => PathMatchCompiled::Exact(pm.value.clone()),
-            PathMatchType::PathPrefix => PathMatchCompiled::PathPrefix(pm.value.clone()),
-            PathMatchType::RegularExpression => PathMatchCompiled::Regex(pm.value.clone()),
+            PathMatchType::Exact => Ok(PathMatchCompiled::Exact(pm.value.clone())),
+            PathMatchType::PathPrefix => Ok(PathMatchCompiled::PathPrefix(pm.value.clone())),
+            PathMatchType::RegularExpression => {
+                // Compile regex at config load time
+                let re = Regex::new(&pm.value)
+                    .map_err(|e| format!("Invalid regex pattern '{}': {}", pm.value, e))?;
+                Ok(PathMatchCompiled::Regex(Arc::new(re)))
+            }
         }
     }
 
     /// Check if this path match matches the given path
-    fn matches(&self, path: &str, regex_cache: &RwLock<HashMap<String, Arc<Regex>>>) -> bool {
+    fn matches(&self, path: &str) -> bool {
         match self {
             PathMatchCompiled::Exact(value) => path == value,
             PathMatchCompiled::PathPrefix(prefix) => matches_path_prefix(prefix, path),
-            PathMatchCompiled::Regex(pattern) => {
-                // Try to get from cache first (read lock)
-                {
-                    let cache = regex_cache.read();
-                    if let Some(re) = cache.get(pattern) {
-                        return re.is_match(path);
-                    }
-                }
-
-                // Cache miss - compile and cache (write lock)
-                let mut cache = regex_cache.write();
-                // Double-check in case another thread compiled it
-                if let Some(re) = cache.get(pattern) {
-                    return re.is_match(path);
-                }
-
-                // Compile regex
-                match Regex::new(pattern) {
-                    Ok(re) => {
-                        let is_match = re.is_match(path);
-                        cache.insert(pattern.clone(), Arc::new(re));
-                        is_match
-                    }
-                    Err(_) => false, // Invalid regex doesn't match
-                }
-            }
+            PathMatchCompiled::Regex(re) => re.is_match(path),
         }
     }
 }
@@ -110,78 +80,21 @@ pub struct RouteEntry {
 
 /// Routing state for v2 configuration with path-based routing
 #[derive(Debug, Clone)]
-pub struct RoutingStateV2 {
+pub struct RoutingState {
     /// Exact hostname matches with path-based routes
     pub exact: HashMap<String, Vec<RouteEntry>>,
     /// Wildcard hostname patterns with path-based routes (in order)
     pub wildcards: Vec<(String, Vec<RouteEntry>)>,
     /// Default fallback backends
     pub default: Option<Vec<WeightedBackendRef>>,
-    /// Regex compilation cache (shared, lock-protected)
-    pub regex_cache: Arc<RwLock<HashMap<String, Arc<Regex>>>>,
 }
 
-/// Build routing state from configuration
-///
-/// This creates the routing data structures and ensures all backends
-/// exist in the backend pool.
+/// Build routing state from configuration with path-based routing
 pub fn build_routing_state(
     config: &Config,
     backend_pool: &mut BackendPool,
     ctx: &mut Ctx,
 ) -> Result<RoutingState, VclError> {
-    let mut exact = HashMap::new();
-    let mut wildcards = Vec::new();
-
-    // Process vhosts
-    for (hostname, vhost) in &config.vhosts {
-        let mut backend_refs = Vec::new();
-
-        // Create backend refs for each backend
-        for backend in &vhost.backends {
-            let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
-            backend_refs.push(WeightedBackendRef {
-                key,
-                weight: backend.weight,
-            });
-        }
-
-        // Categorize into exact or wildcard
-        if hostname.starts_with("*.") {
-            wildcards.push((hostname.clone(), backend_refs));
-        } else {
-            exact.insert(hostname.clone(), backend_refs);
-        }
-    }
-
-    // Process default
-    let default = if let Some(default_vhost) = &config.default {
-        let mut backend_refs = Vec::new();
-        for backend in &default_vhost.backends {
-            let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
-            backend_refs.push(WeightedBackendRef {
-                key,
-                weight: backend.weight,
-            });
-        }
-        Some(backend_refs)
-    } else {
-        None
-    };
-
-    Ok(RoutingState {
-        exact,
-        wildcards,
-        default,
-    })
-}
-
-/// Build v2 routing state from configuration with path-based routing
-pub fn build_routing_state_v2(
-    config: &ConfigV2,
-    backend_pool: &mut BackendPool,
-    ctx: &mut Ctx,
-) -> Result<RoutingStateV2, VclError> {
     let mut exact = HashMap::new();
     let mut wildcards = Vec::new();
 
@@ -202,10 +115,13 @@ pub fn build_routing_state_v2(
                 });
             }
 
-            let path_match = route
-                .path_match
-                .as_ref()
-                .map(|pm| PathMatchCompiled::from_config(pm));
+            let path_match = match route.path_match.as_ref() {
+                Some(pm) => Some(
+                    PathMatchCompiled::from_config(pm)
+                        .map_err(|e| VclError::new(format!("Invalid path match: {}", e)))?,
+                ),
+                None => None,
+            };
 
             route_entries.push(RouteEntry {
                 path_match,
@@ -242,42 +158,51 @@ pub fn build_routing_state_v2(
         }
     }
 
-    // Process global default
-    let default = if let Some(default_vhost) = &config.default {
-        let mut backend_refs = Vec::new();
-        for backend in &default_vhost.backends {
-            let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
-            backend_refs.push(WeightedBackendRef {
-                key,
-                weight: backend.weight,
-            });
-        }
-        Some(backend_refs)
-    } else {
-        None
-    };
-
-    Ok(RoutingStateV2 {
+    Ok(RoutingState {
         exact,
         wildcards,
-        default,
-        regex_cache: Arc::new(RwLock::new(HashMap::new())),
+        default: None,
     })
 }
 
-/// Routing state that can be either v1 or v2
-#[derive(Debug, Clone)]
-pub enum AnyRoutingState {
-    V1(Arc<RoutingState>),
-    V2(Arc<RoutingStateV2>),
+/// Collect all backend keys referenced in routing state
+fn collect_referenced_backends(routing: &RoutingState) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+
+    // Collect from exact matches
+    for routes in routing.exact.values() {
+        for route in routes {
+            for backend_ref in &route.backends {
+                keys.insert(backend_ref.key.clone());
+            }
+        }
+    }
+
+    // Collect from wildcards
+    for (_, routes) in &routing.wildcards {
+        for route in routes {
+            for backend_ref in &route.backends {
+                keys.insert(backend_ref.key.clone());
+            }
+        }
+    }
+
+    // Collect from default
+    if let Some(refs) = &routing.default {
+        for backend_ref in refs {
+            keys.insert(backend_ref.key.clone());
+        }
+    }
+
+    keys
 }
 
 /// Ghost director implementation
 pub struct GhostDirector {
-    /// Routing state (wrapped for hot-reload)
-    routing: RwLock<AnyRoutingState>,
-    /// Backend pool (owned by this director)
-    backends: RwLock<BackendPool>,
+    /// Routing state (atomic swap for lock-free reads)
+    routing: ArcSwap<RoutingState>,
+    /// Backend pool (atomic swap for lock-free reads)
+    backends: ArcSwap<BackendPool>,
     /// Path to config file (for reload)
     config_path: PathBuf,
     /// Synthetic 404 backend for undefined vhosts (stored backend must outlive this director)
@@ -300,28 +225,8 @@ impl GhostDirector {
         let not_found_ptr = SendSyncBackend(not_found_backend.vcl_ptr());
 
         let director = Self {
-            routing: RwLock::new(AnyRoutingState::V1(routing)),
-            backends: RwLock::new(backends),
-            config_path,
-            not_found_backend: not_found_ptr,
-        };
-
-        Ok((director, not_found_backend))
-    }
-
-    /// Create a new Ghost director with v2 routing
-    pub fn new_v2(
-        ctx: &mut Ctx,
-        routing: Arc<RoutingStateV2>,
-        backends: BackendPool,
-        config_path: PathBuf,
-    ) -> Result<(Self, Backend<NotFoundBackend, NotFoundBody>), VclError> {
-        let not_found_backend = Backend::new(ctx, "ghost", "ghost_404", NotFoundBackend, false)?;
-        let not_found_ptr = SendSyncBackend(not_found_backend.vcl_ptr());
-
-        let director = Self {
-            routing: RwLock::new(AnyRoutingState::V2(routing)),
-            backends: RwLock::new(backends),
+            routing: ArcSwap::new(Arc::clone(&routing)),
+            backends: ArcSwap::new(Arc::new(backends)),
             config_path,
             not_found_backend: not_found_ptr,
         };
@@ -330,51 +235,25 @@ impl GhostDirector {
     }
 
     /// Reload configuration from disk
-    ///
-    /// Detects config version and loads appropriate routing state
     pub fn reload(&self, ctx: &mut Ctx) -> Result<(), String> {
-        use std::fs;
+        // Clone current backend pool for modification
+        let current_backends = self.backends.load();
+        let mut backend_pool = (**current_backends).clone();
 
-        // Read config file to detect version
-        let content = fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("Failed to read config: {}", e))?;
+        // Load config
+        let config = crate::config::load(&self.config_path)?;
+        let new_routing = build_routing_state(&config, &mut backend_pool, ctx)
+            .map_err(|e| format!("Failed to build routing state: {}", e))?;
 
-        // Parse just to get version
-        let version_check: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse config JSON: {}", e))?;
+        // Collect all backend keys referenced in the new routing state
+        let referenced_keys = collect_referenced_backends(&new_routing);
 
-        let version = version_check
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| "Config missing version field".to_string())?;
+        // Clean up unreferenced backends from the pool
+        backend_pool.retain_only(&referenced_keys);
 
-        let mut backend_pool = self.backends.write();
-
-        let new_routing = match version {
-            1 => {
-                // Load v1 config
-                let config = crate::config::load(&self.config_path)?;
-                let routing = build_routing_state(&config, &mut backend_pool, ctx)
-                    .map_err(|e| format!("Failed to build v1 routing state: {}", e))?;
-                AnyRoutingState::V1(Arc::new(routing))
-            }
-            2 => {
-                // Load v2 config
-                let config = crate::config::load_v2(&self.config_path)?;
-                let routing = build_routing_state_v2(&config, &mut backend_pool, ctx)
-                    .map_err(|e| format!("Failed to build v2 routing state: {}", e))?;
-                AnyRoutingState::V2(Arc::new(routing))
-            }
-            _ => {
-                return Err(format!("Unsupported config version: {}", version));
-            }
-        };
-
-        drop(backend_pool);
-
-        // Atomically update routing
-        let mut guard = self.routing.write();
-        *guard = new_routing;
+        // Atomic swap of routing and backends
+        self.routing.store(Arc::new(new_routing));
+        self.backends.store(Arc::new(backend_pool));
 
         Ok(())
     }
@@ -388,51 +267,34 @@ impl VclDirector for GhostDirector {
         // Get Host header
         let host = get_host_header(bereq)?;
 
-        // Get routing state
-        let routing_guard = self.routing.read();
-        let routing = routing_guard.clone();
-        drop(routing_guard);
+        // Load routing state (lock-free atomic load)
+        let routing = self.routing.load();
 
-        // Match based on routing version
-        let backend_refs = match &routing {
-            AnyRoutingState::V1(v1_routing) => {
-                // V1: hostname-only matching
-                match match_host(v1_routing, &host) {
-                    Some(refs) => refs,
-                    None => {
-                        // Return 404 backend for undefined vhosts
-                        return Some(self.not_found_backend.0);
-                    }
-                }
-            }
-            AnyRoutingState::V2(v2_routing) => {
-                // V2: hostname + path matching
-                // Extract URL from bereq
-                let url = bereq
-                    .header("url")
-                    .and_then(|u| match u {
-                        StrOrBytes::Utf8(s) => Some(s),
-                        StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
-                    })
-                    .unwrap_or("/");
+        // Extract URL from bereq
+        let url = bereq
+            .url()
+            .and_then(|u| match u {
+                StrOrBytes::Utf8(s) => Some(s),
+                StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
+            })
+            .unwrap_or("/");
 
-                let path = extract_path(url);
+        let path = extract_path(url);
 
-                match match_host_and_path(v2_routing, &host, path) {
-                    Some(refs) => refs,
-                    None => {
-                        // Return 404 backend for undefined vhosts
-                        return Some(self.not_found_backend.0);
-                    }
-                }
+        // Hostname + path matching
+        let backend_refs = match match_host_and_path(&routing, &host, path) {
+            Some(refs) => refs,
+            None => {
+                // Return 404 backend for undefined vhosts/paths
+                return Some(self.not_found_backend.0);
             }
         };
 
         // Select backend using weighted random
         let backend_ref = select_backend_weighted(backend_refs)?;
 
-        // Look up in backend pool
-        let backends = self.backends.read();
+        // Look up in backend pool (lock-free atomic load)
+        let backends = self.backends.load();
         let backend = backends.get(&backend_ref.key)?;
 
         Some(backend.vcl_ptr())
@@ -449,17 +311,11 @@ impl VclDirector for GhostDirector {
     }
 
     fn list(&self, _ctx: &mut Ctx, vsb: &mut Buffer, _detailed: bool, _json: bool) {
-        let routing = self.routing.read();
-        let backends = self.backends.read();
+        let routing = self.routing.load();
+        let backends = self.backends.load();
 
-        let (total_vhosts, has_default) = match &*routing {
-            AnyRoutingState::V1(v1) => {
-                (v1.exact.len() + v1.wildcards.len(), v1.default.is_some())
-            }
-            AnyRoutingState::V2(v2) => {
-                (v2.exact.len() + v2.wildcards.len(), v2.default.is_some())
-            }
-        };
+        let total_vhosts = routing.exact.len() + routing.wildcards.len();
+        let has_default = routing.default.is_some();
 
         let msg = format!(
             "{} vhosts, {} backends, default: {}",
@@ -492,37 +348,7 @@ impl VclDirector for SharedGhostDirector {
     }
 }
 
-/// Match hostname against routing state
-///
-/// Returns the list of backend references for the matched vhost.
-fn match_host<'a>(routing: &'a RoutingState, host: &str) -> Option<&'a [WeightedBackendRef]> {
-    let host = host.to_lowercase();
-
-    // 1. Exact match
-    if let Some(refs) = routing.exact.get(&host) {
-        if !refs.is_empty() {
-            return Some(refs);
-        }
-    }
-
-    // 2. Wildcard match
-    for (pattern, refs) in &routing.wildcards {
-        if matches_wildcard(pattern, &host) && !refs.is_empty() {
-            return Some(refs);
-        }
-    }
-
-    // 3. Default fallback
-    if let Some(refs) = &routing.default {
-        if !refs.is_empty() {
-            return Some(refs);
-        }
-    }
-
-    None
-}
-
-/// Match hostname and path against v2 routing state
+/// Match hostname and path against routing state
 ///
 /// Returns the list of backend references for the matched route.
 /// Matching priority:
@@ -530,7 +356,7 @@ fn match_host<'a>(routing: &'a RoutingState, host: &str) -> Option<&'a [Weighted
 /// 2. Within matched vhost, iterate routes by priority
 /// 3. First route whose path matches wins
 fn match_host_and_path<'a>(
-    routing: &'a RoutingStateV2,
+    routing: &'a RoutingState,
     host: &str,
     path: &str,
 ) -> Option<&'a [WeightedBackendRef]> {
@@ -538,7 +364,7 @@ fn match_host_and_path<'a>(
 
     // 1. Try exact hostname match
     if let Some(routes) = routing.exact.get(&host) {
-        if let Some(backends) = match_routes(routes, path, &routing.regex_cache) {
+        if let Some(backends) = match_routes(routes, path) {
             return Some(backends);
         }
     }
@@ -546,7 +372,7 @@ fn match_host_and_path<'a>(
     // 2. Try wildcard hostname match
     for (pattern, routes) in &routing.wildcards {
         if matches_wildcard(pattern, &host) {
-            if let Some(backends) = match_routes(routes, path, &routing.regex_cache) {
+            if let Some(backends) = match_routes(routes, path) {
                 return Some(backends);
             }
         }
@@ -566,12 +392,11 @@ fn match_host_and_path<'a>(
 fn match_routes<'a>(
     routes: &'a [RouteEntry],
     path: &str,
-    regex_cache: &RwLock<HashMap<String, Arc<Regex>>>,
 ) -> Option<&'a [WeightedBackendRef]> {
     for route in routes {
         // Check if path matches this route
         let path_matches = match &route.path_match {
-            Some(pm) => pm.matches(path, regex_cache),
+            Some(pm) => pm.matches(path),
             None => true, // No path match = matches all paths
         };
 
@@ -769,76 +594,6 @@ mod tests {
     }
 
     #[test]
-    fn test_match_host_exact() {
-        let routing = RoutingState {
-            exact: {
-                let mut map = HashMap::new();
-                map.insert(
-                    "api.example.com".to_string(),
-                    vec![WeightedBackendRef {
-                        key: "10.0.0.1:8080".to_string(),
-                        weight: 100,
-                    }],
-                );
-                map
-            },
-            wildcards: vec![],
-            default: None,
-        };
-
-        let result = match_host(&routing, "api.example.com");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap()[0].key, "10.0.0.1:8080");
-    }
-
-    #[test]
-    fn test_match_host_wildcard() {
-        let routing = RoutingState {
-            exact: HashMap::new(),
-            wildcards: vec![(
-                "*.example.com".to_string(),
-                vec![WeightedBackendRef {
-                    key: "10.0.0.1:8080".to_string(),
-                    weight: 100,
-                }],
-            )],
-            default: None,
-        };
-
-        let result = match_host(&routing, "foo.example.com");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap()[0].key, "10.0.0.1:8080");
-    }
-
-    #[test]
-    fn test_match_host_default() {
-        let routing = RoutingState {
-            exact: HashMap::new(),
-            wildcards: vec![],
-            default: Some(vec![WeightedBackendRef {
-                key: "10.0.0.99:80".to_string(),
-                weight: 100,
-            }]),
-        };
-
-        let result = match_host(&routing, "unknown.example.com");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap()[0].key, "10.0.0.99:80");
-    }
-
-    #[test]
-    fn test_match_host_no_match() {
-        let routing = RoutingState {
-            exact: HashMap::new(),
-            wildcards: vec![],
-            default: None,
-        };
-
-        let result = match_host(&routing, "unknown.example.com");
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn test_extract_path() {
         assert_eq!(extract_path("/api/users"), "/api/users");
         assert_eq!(extract_path("/api/users?foo=bar"), "/api/users");
@@ -872,53 +627,49 @@ mod tests {
     #[test]
     fn test_path_match_compiled_exact() {
         let pm = PathMatchCompiled::Exact("/api/v2/users".to_string());
-        let cache = RwLock::new(HashMap::new());
 
-        assert!(pm.matches("/api/v2/users", &cache));
-        assert!(!pm.matches("/api/v2/user", &cache));
-        assert!(!pm.matches("/api/v2/users/123", &cache));
+        assert!(pm.matches("/api/v2/users"));
+        assert!(!pm.matches("/api/v2/user"));
+        assert!(!pm.matches("/api/v2/users/123"));
     }
 
     #[test]
     fn test_path_match_compiled_prefix() {
         let pm = PathMatchCompiled::PathPrefix("/api".to_string());
-        let cache = RwLock::new(HashMap::new());
 
-        assert!(pm.matches("/api", &cache));
-        assert!(pm.matches("/api/users", &cache));
-        assert!(pm.matches("/api/v2/users", &cache));
-        assert!(!pm.matches("/api2", &cache));
-        assert!(!pm.matches("/web", &cache));
+        assert!(pm.matches("/api"));
+        assert!(pm.matches("/api/users"));
+        assert!(pm.matches("/api/v2/users"));
+        assert!(!pm.matches("/api2"));
+        assert!(!pm.matches("/web"));
     }
 
     #[test]
     fn test_path_match_compiled_regex() {
-        let pm = PathMatchCompiled::Regex(r"^/files/\d+$".to_string());
-        let cache = RwLock::new(HashMap::new());
+        let re = Regex::new(r"^/files/\d+$").unwrap();
+        let pm = PathMatchCompiled::Regex(Arc::new(re));
 
-        assert!(pm.matches("/files/123", &cache));
-        assert!(pm.matches("/files/456", &cache));
-        assert!(!pm.matches("/files/abc", &cache));
-        assert!(!pm.matches("/files/", &cache));
-        assert!(!pm.matches("/files/123/extra", &cache));
-
-        // Verify regex is cached
-        assert_eq!(cache.read().len(), 1);
+        assert!(pm.matches("/files/123"));
+        assert!(pm.matches("/files/456"));
+        assert!(!pm.matches("/files/abc"));
+        assert!(!pm.matches("/files/"));
+        assert!(!pm.matches("/files/123/extra"));
     }
 
     #[test]
-    fn test_path_match_compiled_invalid_regex() {
-        let pm = PathMatchCompiled::Regex(r"[invalid(".to_string());
-        let cache = RwLock::new(HashMap::new());
+    fn test_path_match_from_config_invalid_regex() {
+        let pm = PathMatch {
+            match_type: PathMatchType::RegularExpression,
+            value: r"[invalid(".to_string(),
+        };
 
-        // Invalid regex should not match anything
-        assert!(!pm.matches("/anything", &cache));
+        // Invalid regex should return an error
+        let result = PathMatchCompiled::from_config(&pm);
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_match_routes() {
-        let cache = RwLock::new(HashMap::new());
-
         let routes = vec![
             RouteEntry {
                 path_match: Some(PathMatchCompiled::Exact("/api/v2/users".to_string())),
@@ -947,18 +698,96 @@ mod tests {
         ];
 
         // Exact match wins
-        let result = match_routes(&routes, "/api/v2/users", &cache);
+        let result = match_routes(&routes, "/api/v2/users");
         assert!(result.is_some());
         assert_eq!(result.unwrap()[0].key, "backend1");
 
         // Prefix match
-        let result = match_routes(&routes, "/api/v1/users", &cache);
+        let result = match_routes(&routes, "/api/v1/users");
         assert!(result.is_some());
         assert_eq!(result.unwrap()[0].key, "backend2");
 
         // Default route
-        let result = match_routes(&routes, "/web", &cache);
+        let result = match_routes(&routes, "/web");
         assert!(result.is_some());
         assert_eq!(result.unwrap()[0].key, "backend3");
+    }
+
+    #[test]
+    fn test_collect_referenced_backends_empty() {
+        // Empty routing state
+        let routing = RoutingState {
+            exact: HashMap::new(),
+            wildcards: vec![],
+            default: None,
+        };
+
+        let keys = collect_referenced_backends(&routing);
+        assert_eq!(keys.len(), 0);
+    }
+
+    #[test]
+    fn test_collect_referenced_backends_all_variants() {
+        // Create routing state with multiple routes per vhost
+        let routing = RoutingState {
+            exact: {
+                let mut map = HashMap::new();
+                map.insert(
+                    "api.example.com".to_string(),
+                    vec![
+                        RouteEntry {
+                            path_match: Some(PathMatchCompiled::PathPrefix("/v2".to_string())),
+                            backends: vec![WeightedBackendRef {
+                                key: "10.0.0.1:8080".to_string(),
+                                weight: 100,
+                            }],
+                            priority: 100,
+                        },
+                        RouteEntry {
+                            path_match: Some(PathMatchCompiled::PathPrefix("/v1".to_string())),
+                            backends: vec![WeightedBackendRef {
+                                key: "10.0.0.2:8080".to_string(),
+                                weight: 100,
+                            }],
+                            priority: 50,
+                        },
+                        RouteEntry {
+                            path_match: None,
+                            backends: vec![WeightedBackendRef {
+                                key: "10.0.0.3:8080".to_string(),
+                                weight: 100,
+                            }],
+                            priority: 0,
+                        },
+                    ],
+                );
+                map
+            },
+            wildcards: vec![(
+                "*.staging.example.com".to_string(),
+                vec![RouteEntry {
+                    path_match: None,
+                    backends: vec![WeightedBackendRef {
+                        key: "10.0.2.1:8080".to_string(),
+                        weight: 100,
+                    }],
+                    priority: 0,
+                }],
+            )],
+            default: Some(vec![WeightedBackendRef {
+                key: "10.0.99.1:80".to_string(),
+                weight: 100,
+            }]),
+        };
+
+        let keys = collect_referenced_backends(&routing);
+
+        // Should have all 5 unique backend keys
+        assert_eq!(keys.len(), 5);
+        assert!(keys.contains("10.0.0.1:8080"));
+        assert!(keys.contains("10.0.0.2:8080"));
+        assert!(keys.contains("10.0.0.3:8080"));
+        assert!(keys.contains("10.0.2.1:8080"));
+        assert!(keys.contains("10.0.99.1:80"));
     }
 }

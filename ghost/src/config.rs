@@ -18,20 +18,6 @@ fn default_weight() -> u32 {
     100
 }
 
-/// Virtual host configuration
-#[derive(Debug, Clone, Deserialize)]
-pub struct VHost {
-    pub backends: Vec<Backend>,
-}
-
-/// Phase 1 configuration schema
-#[derive(Debug, Clone, Deserialize)]
-pub struct Config {
-    pub version: u32,
-    #[serde(default)]
-    pub vhosts: HashMap<String, VHost>,
-    pub default: Option<VHost>,
-}
 
 /// Path match type for routing rules
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -58,21 +44,20 @@ pub struct Route {
     pub priority: i32,
 }
 
-/// Virtual host configuration with path-based routing (v2)
+/// Virtual host configuration with path-based routing
 #[derive(Debug, Clone, Deserialize)]
-pub struct VHostV2 {
+pub struct VHost {
     pub routes: Vec<Route>,
     #[serde(default)]
     pub default_backends: Vec<Backend>,
 }
 
-/// Phase 2 configuration schema with path-based routing
+/// Configuration schema with path-based routing
 #[derive(Debug, Clone, Deserialize)]
-pub struct ConfigV2 {
+pub struct Config {
     pub version: u32,
     #[serde(default)]
-    pub vhosts: HashMap<String, VHostV2>,
-    pub default: Option<VHost>,
+    pub vhosts: HashMap<String, VHost>,
 }
 
 /// Load configuration from a JSON file.
@@ -100,58 +85,36 @@ impl Config {
     /// Used when the config file doesn't exist yet at startup.
     pub fn empty() -> Self {
         Config {
-            version: 1,
-            vhosts: HashMap::new(),
-            default: None,
-        }
-    }
-}
-
-impl ConfigV2 {
-    /// Create an empty v2 configuration with no vhosts.
-    pub fn empty() -> Self {
-        ConfigV2 {
             version: 2,
             vhosts: HashMap::new(),
-            default: None,
         }
     }
-}
-
-/// Load v2 configuration from a JSON file.
-pub fn load_v2(path: &Path) -> Result<ConfigV2, String> {
-    // If file doesn't exist, return empty config
-    if !path.exists() {
-        return Ok(ConfigV2::empty());
-    }
-
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("failed to read config file {}: {}", path.display(), e))?;
-
-    let config: ConfigV2 = serde_json::from_str(&content)
-        .map_err(|e| format!("failed to parse config file {}: {}", path.display(), e))?;
-
-    validate_v2(&config)?;
-
-    Ok(config)
 }
 
 /// Validate configuration
 fn validate(config: &Config) -> Result<(), String> {
-    if config.version != 1 {
+    if config.version != 2 {
         return Err(format!(
-            "unsupported config version: {} (expected 1)",
+            "unsupported config version: {} (expected 2)",
             config.version
         ));
     }
 
     for (hostname, vhost) in &config.vhosts {
         validate_hostname(hostname)?;
-        validate_backends(hostname, &vhost.backends)?;
-    }
 
-    if let Some(ref default) = config.default {
-        validate_backends("default", &default.backends)?;
+        for (i, route) in vhost.routes.iter().enumerate() {
+            let route_ctx = format!("{} route {}", hostname, i);
+            validate_backends(&route_ctx, &route.backends)?;
+
+            if let Some(ref path_match) = route.path_match {
+                validate_path_match(path_match, &route_ctx)?;
+            }
+        }
+
+        if !vhost.default_backends.is_empty() {
+            validate_backends(&format!("{} default_backends", hostname), &vhost.default_backends)?;
+        }
     }
 
     Ok(())
@@ -206,38 +169,6 @@ fn validate_backends(context: &str, backends: &[Backend]) -> Result<(), String> 
     Ok(())
 }
 
-/// Validate v2 configuration
-fn validate_v2(config: &ConfigV2) -> Result<(), String> {
-    if config.version != 2 {
-        return Err(format!(
-            "unsupported config version: {} (expected 2)",
-            config.version
-        ));
-    }
-
-    for (hostname, vhost) in &config.vhosts {
-        validate_hostname(hostname)?;
-
-        for (i, route) in vhost.routes.iter().enumerate() {
-            let route_ctx = format!("{} route {}", hostname, i);
-            validate_backends(&route_ctx, &route.backends)?;
-
-            if let Some(ref path_match) = route.path_match {
-                validate_path_match(path_match, &route_ctx)?;
-            }
-        }
-
-        if !vhost.default_backends.is_empty() {
-            validate_backends(&format!("{} default_backends", hostname), &vhost.default_backends)?;
-        }
-    }
-
-    if let Some(ref default) = config.default {
-        validate_backends("default", &default.backends)?;
-    }
-
-    Ok(())
-}
 
 /// Validate path match configuration
 fn validate_path_match(path_match: &PathMatch, context: &str) -> Result<(), String> {
@@ -293,11 +224,10 @@ mod tests {
 
     #[test]
     fn test_load_minimal_config() {
-        let file = write_config(r#"{"version": 1}"#);
+        let file = write_config(r#"{"version": 2}"#);
         let config = load(file.path()).unwrap();
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
         assert!(config.vhosts.is_empty());
-        assert!(config.default.is_none());
     }
 
     #[test]
@@ -305,51 +235,58 @@ mod tests {
         // Loading a non-existent file should return an empty config
         let path = Path::new("/nonexistent/ghost.json");
         let config = load(path).unwrap();
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
         assert!(config.vhosts.is_empty());
-        assert!(config.default.is_none());
     }
 
     #[test]
     fn test_load_full_config() {
         let file = write_config(
             r#"{
-            "version": 1,
+            "version": 2,
             "vhosts": {
                 "api.example.com": {
-                    "backends": [
-                        {"address": "10.0.0.1", "port": 8080, "weight": 100},
-                        {"address": "10.0.0.2", "port": 8080, "weight": 50}
+                    "routes": [
+                        {
+                            "path_match": {"type": "PathPrefix", "value": "/api"},
+                            "backends": [
+                                {"address": "10.0.0.1", "port": 8080, "weight": 100},
+                                {"address": "10.0.0.2", "port": 8080, "weight": 50}
+                            ],
+                            "priority": 100
+                        }
                     ]
                 },
                 "*.staging.example.com": {
-                    "backends": [
-                        {"address": "10.0.1.1", "port": 80}
+                    "routes": [
+                        {
+                            "backends": [
+                                {"address": "10.0.1.1", "port": 80}
+                            ],
+                            "priority": 100
+                        }
                     ]
                 }
-            },
-            "default": {
-                "backends": [
-                    {"address": "10.0.99.1", "port": 80}
-                ]
             }
         }"#,
         );
 
         let config = load(file.path()).unwrap();
-        assert_eq!(config.version, 1);
+        assert_eq!(config.version, 2);
         assert_eq!(config.vhosts.len(), 2);
         assert!(config.vhosts.contains_key("api.example.com"));
         assert!(config.vhosts.contains_key("*.staging.example.com"));
 
         let api = &config.vhosts["api.example.com"];
-        assert_eq!(api.backends.len(), 2);
-        assert_eq!(api.backends[0].weight, 100);
-        assert_eq!(api.backends[1].weight, 50);
+        assert_eq!(api.routes.len(), 1);
+        assert_eq!(api.routes[0].backends.len(), 2);
+        assert_eq!(api.routes[0].backends[0].weight, 100);
+        assert_eq!(api.routes[0].backends[1].weight, 50);
 
         let staging = &config.vhosts["*.staging.example.com"];
-        assert_eq!(staging.backends.len(), 1);
-        assert_eq!(staging.backends[0].weight, 100); // default weight
+        assert_eq!(staging.routes.len(), 1);
+        assert_eq!(staging.routes[0].backends.len(), 1);
+        assert_eq!(staging.routes[0].backends[0].weight, 100); // default weight
     }
 
     #[test]
@@ -363,7 +300,7 @@ mod tests {
     #[test]
     fn test_invalid_wildcard_middle() {
         let file =
-            write_config(r#"{"version": 1, "vhosts": {"foo.*.example.com": {"backends": []}}}"#);
+            write_config(r#"{"version": 2, "vhosts": {"foo.*.example.com": {"routes": []}}}"#);
         let result = load(file.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("wildcard must be at start"));
@@ -372,7 +309,7 @@ mod tests {
     #[test]
     fn test_invalid_wildcard_double() {
         let file =
-            write_config(r#"{"version": 1, "vhosts": {"*.*.example.com": {"backends": []}}}"#);
+            write_config(r#"{"version": 2, "vhosts": {"*.*.example.com": {"routes": []}}}"#);
         let result = load(file.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only single leading wildcard"));
@@ -381,7 +318,7 @@ mod tests {
     #[test]
     fn test_invalid_backend_empty_address() {
         let file = write_config(
-            r#"{"version": 1, "vhosts": {"foo.com": {"backends": [{"address": "", "port": 80}]}}}"#,
+            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backends": [{"address": "", "port": 80}], "priority": 100}]}}}"#,
         );
         let result = load(file.path());
         assert!(result.is_err());
@@ -391,7 +328,7 @@ mod tests {
     #[test]
     fn test_invalid_backend_zero_port() {
         let file = write_config(
-            r#"{"version": 1, "vhosts": {"foo.com": {"backends": [{"address": "1.2.3.4", "port": 0}]}}}"#,
+            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backends": [{"address": "1.2.3.4", "port": 0}], "priority": 100}]}}}"#,
         );
         let result = load(file.path());
         assert!(result.is_err());
@@ -401,7 +338,7 @@ mod tests {
     #[test]
     fn test_invalid_backend_zero_weight() {
         let file = write_config(
-            r#"{"version": 1, "vhosts": {"foo.com": {"backends": [{"address": "1.2.3.4", "port": 80, "weight": 0}]}}}"#,
+            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backends": [{"address": "1.2.3.4", "port": 80, "weight": 0}], "priority": 100}]}}}"#,
         );
         let result = load(file.path());
         assert!(result.is_err());
