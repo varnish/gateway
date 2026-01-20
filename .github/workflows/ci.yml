@@ -41,5 +41,8 @@ jobs:
           cache: true
           working-directory: ghost
 
+      - name: Build ghost VMOD
+        run: cd ghost && cargo build
+
       - name: Run Rust tests
         run: cd ghost && cargo test --lib
