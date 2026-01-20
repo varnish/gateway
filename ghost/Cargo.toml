@@ -6,7 +6,7 @@ license = "BSD-2-Clause"
 description = "Varnish vmod for Gateway API routing"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 varnish = { git = "https://github.com/perbu/varnish-rs", features = ["ffi"] }
