@@ -30,10 +30,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install Varnish
+        run: |
+          curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
+          sudo apt-get install -y varnish-dev
+
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
+          working-directory: ghost
 
       - name: Run Rust tests
-        run: cd ghost && cargo test
+        run: cd ghost && cargo test --lib
