@@ -10,7 +10,46 @@ env:
   IMAGE_PREFIX: ghcr.io/varnish
 
 jobs:
+  test-go:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run Go tests
+        run: go test ./...
+
+  test-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Varnish
+        run: |
+          curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
+          sudo apt-get install -y varnish-dev
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          working-directory: ghost
+
+      - name: Build ghost VMOD
+        run: cd ghost && cargo build
+
+      - name: Run Rust tests
+        run: cd ghost && cargo test --lib
+
   build-operator:
+    needs: [test-go, test-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -57,6 +96,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-chaperone:
+    needs: [test-go, test-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -103,6 +143,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-varnish:
+    needs: [test-go, test-rust]
     runs-on: ubuntu-latest
     permissions:
       contents: read
