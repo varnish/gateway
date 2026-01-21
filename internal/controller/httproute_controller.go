@@ -219,9 +219,17 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	userVCL := r.getUserVCL(ctx, gateway)
 	finalVCL := vcl.Merge(generatedVCL, userVCL)
 
-	// Generate routing.json for ghost
-	routeBackends := vcl.CollectHTTPRouteBackends(routes, gateway.Namespace)
-	routingConfig := ghost.GenerateRoutingConfig(routeBackends, nil)
+	// Generate v2 routing.json for ghost with path-based routing
+	collectedRoutes := vcl.CollectHTTPRouteBackendsV2(routes, gateway.Namespace)
+
+	// Group routes by hostname
+	routesByHost := make(map[string][]ghost.Route)
+	for _, route := range collectedRoutes {
+		routesByHost[route.Hostname] = append(routesByHost[route.Hostname], route)
+	}
+
+	// Generate v2 routing config
+	routingConfig := ghost.GenerateRoutingConfigV2(routesByHost, nil)
 	routingJSON, err := json.MarshalIndent(routingConfig, "", "  ")
 	if err != nil {
 		return fmt.Errorf("json.MarshalIndent: %w", err)
@@ -248,7 +256,7 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	r.Logger.Info("updated ConfigMap",
 		"configmap", cmName,
 		"routes", len(routes),
-		"backends", len(routeBackends))
+		"backends", len(collectedRoutes))
 
 	return nil
 }

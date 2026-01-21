@@ -2,9 +2,11 @@ package ghost
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -48,7 +50,8 @@ type Watcher struct {
 	// Internal state protected by mutex
 	mu              sync.RWMutex
 	initialSyncDone bool                      // true after initial EndpointSlice sync
-	routingConfig   *RoutingConfig            // current routing rules
+	routingConfig   *RoutingConfig            // current routing rules (v1)
+	routingConfigV2 *RoutingConfigV2          // v2 routing config with path-based routing
 	endpoints       map[string][]Endpoint     // service key -> endpoints
 	serviceWatch    map[string]struct{}       // services we care about (namespace/name)
 }
@@ -245,18 +248,57 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 }
 
 // loadRoutingConfig reads and parses the routing configuration.
+// Supports both v1 (hostname-only) and v2 (path-based) formats.
 func (w *Watcher) loadRoutingConfig() error {
-	config, err := LoadRoutingConfig(w.routingConfigPath)
+	data, err := os.ReadFile(w.routingConfigPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("os.ReadFile(%s): %w", w.routingConfigPath, err)
+	}
+
+	// Detect version
+	var versionCheck struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &versionCheck); err != nil {
+		return fmt.Errorf("json.Unmarshal version: %w", err)
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	w.routingConfig = config
+	switch versionCheck.Version {
+	case 2:
+		config, err := ParseRoutingConfigV2(data)
+		if err != nil {
+			return err
+		}
+		w.routingConfigV2 = config
+		w.routingConfig = nil
+		w.updateServiceWatchV2(config)
 
-	// Update the set of services we care about
+	case 1:
+		config, err := ParseRoutingConfig(data)
+		if err != nil {
+			return err
+		}
+		w.routingConfig = config
+		w.routingConfigV2 = nil
+		w.updateServiceWatchV1(config)
+
+	default:
+		return fmt.Errorf("unsupported routing config version: %d", versionCheck.Version)
+	}
+
+	w.logger.Info("routing config loaded",
+		"version", versionCheck.Version,
+		"vhosts", w.getVHostCount(),
+	)
+
+	return nil
+}
+
+// updateServiceWatchV1 updates the service watch map for v1 routing config.
+func (w *Watcher) updateServiceWatchV1(config *RoutingConfig) {
 	w.serviceWatch = make(map[string]struct{})
 	for _, rule := range config.VHosts {
 		key := ServiceKey(rule.Namespace, rule.Service)
@@ -266,13 +308,32 @@ func (w *Watcher) loadRoutingConfig() error {
 		key := ServiceKey(config.Default.Namespace, config.Default.Service)
 		w.serviceWatch[key] = struct{}{}
 	}
+}
 
-	w.logger.Info("routing config loaded",
-		"vhosts", len(config.VHosts),
-		"hasDefault", config.Default != nil,
-	)
+// updateServiceWatchV2 updates the service watch map for v2 routing config.
+func (w *Watcher) updateServiceWatchV2(config *RoutingConfigV2) {
+	w.serviceWatch = make(map[string]struct{})
+	for _, vhost := range config.VHosts {
+		for _, route := range vhost.Routes {
+			key := ServiceKey(route.Namespace, route.Service)
+			w.serviceWatch[key] = struct{}{}
+		}
+	}
+	if config.Default != nil {
+		key := ServiceKey(config.Default.Namespace, config.Default.Service)
+		w.serviceWatch[key] = struct{}{}
+	}
+}
 
-	return nil
+// getVHostCount returns the number of vhosts in the current routing config.
+func (w *Watcher) getVHostCount() int {
+	if w.routingConfigV2 != nil {
+		return len(w.routingConfigV2.VHosts)
+	}
+	if w.routingConfig != nil {
+		return len(w.routingConfig.VHosts)
+	}
+	return 0
 }
 
 // handleEndpointSliceUpdate processes an EndpointSlice add or update event.
@@ -393,7 +454,7 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 // regenerateConfig generates and writes ghost.json, then triggers a reload.
 func (w *Watcher) regenerateConfig(ctx context.Context) error {
 	w.mu.RLock()
-	if w.routingConfig == nil {
+	if w.routingConfig == nil && w.routingConfigV2 == nil {
 		w.mu.RUnlock()
 		return fmt.Errorf("no routing config loaded")
 	}
@@ -402,21 +463,32 @@ func (w *Watcher) regenerateConfig(ctx context.Context) error {
 	endpoints := make(ServiceEndpoints, len(w.endpoints))
 	maps.Copy(endpoints, w.endpoints)
 
-	routingConfig := w.routingConfig
+	routingConfigV1 := w.routingConfig
+	routingConfigV2 := w.routingConfigV2
 	w.mu.RUnlock()
 
-	// Generate ghost config
-	config := Generate(routingConfig, endpoints)
-
-	// Write ghost.json atomically
-	if err := WriteConfig(w.ghostConfigPath, config); err != nil {
-		return fmt.Errorf("WriteConfig: %w", err)
+	// Generate ghost config based on version
+	if routingConfigV2 != nil {
+		// V2 path
+		config := GenerateV2(routingConfigV2, endpoints)
+		if err := WriteConfigV2(w.ghostConfigPath, config); err != nil {
+			return fmt.Errorf("WriteConfigV2: %w", err)
+		}
+		w.logger.Info("ghost.json v2 regenerated",
+			"vhosts", len(config.VHosts),
+			"path", w.ghostConfigPath,
+		)
+	} else {
+		// V1 path (backward compatibility)
+		config := Generate(routingConfigV1, endpoints)
+		if err := WriteConfig(w.ghostConfigPath, config); err != nil {
+			return fmt.Errorf("WriteConfig: %w", err)
+		}
+		w.logger.Info("ghost.json v1 regenerated",
+			"vhosts", len(config.VHosts),
+			"path", w.ghostConfigPath,
+		)
 	}
-
-	w.logger.Info("ghost.json regenerated",
-		"vhosts", len(config.VHosts),
-		"path", w.ghostConfigPath,
-	)
 
 	// Trigger ghost reload
 	if err := w.reloadClient.TriggerReload(ctx); err != nil {
