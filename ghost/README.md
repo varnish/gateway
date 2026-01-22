@@ -65,64 +65,27 @@ return (deliver);
 
 ### Configuration File Format (ghost.json)
 
-The configuration uses version 2 format with path-based routing:
-
-- **vhosts**: Map of hostname patterns to routing configurations
-- **routes**: Array of route rules for each vhost, evaluated by priority (highest first)
-- **path_match**: Optional path matching rule (Exact, PathPrefix, or RegularExpression)
-- **backends**: Array of backend endpoints for the route
-- **default_backends**: Optional fallback backends for the vhost when no routes match
-- **priority**: Integer priority for route ordering (higher = evaluated first)
-
 ```json
 {
-  "version": 2,
-  "vhosts": {
-    "api.example.com": {
-      "routes": [
-        {
-          "path_match": {
-            "type": "PathPrefix",
-            "value": "/api"
-          },
-          "backends": [
-            {
-              "address": "10.0.0.1",
-              "port": 8080,
-              "weight": 100
-            },
-            {
-              "address": "10.0.0.2",
-              "port": 8080,
-              "weight": 50
-            }
-          ],
-          "priority": 100
-        }
-      ],
-      "default_backends": [
-        {
-          "address": "10.0.0.99",
-          "port": 8080,
-          "weight": 100
-        }
-      ]
-    },
-    "*.staging.example.com": {
-      "routes": [
-        {
-          "backends": [
-            {
-              "address": "10.0.2.1",
-              "port": 8080,
-              "weight": 100
-            }
-          ],
-          "priority": 100
-        }
-      ]
-    }
-  }
+"version": 1,
+"vhosts": {
+"api.example.com": {
+"backends": [
+{"address": "10.0.0.1", "port": 8080, "weight": 100},
+{"address": "10.0.0.2", "port": 8080, "weight": 100}
+]
+},
+"*.staging.example.com": {
+"backends": [
+{"address": "10.0.2.1", "port": 8080, "weight": 100}
+]
+}
+},
+"default": {
+"backends": [
+{"address": "10.0.99.1", "port": 80, "weight": 100}
+]
+}
 }
 ```
 

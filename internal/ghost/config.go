@@ -57,15 +57,40 @@ type PathMatch struct {
 	Value string        `json:"value"`
 }
 
+// MatchType defines the type of matching for headers and query params.
+type MatchType string
+
+const (
+	MatchTypeExact             MatchType = "Exact"
+	MatchTypeRegularExpression MatchType = "RegularExpression"
+)
+
+// HeaderMatch represents a header matching rule.
+type HeaderMatch struct {
+	Name  string    `json:"name"`
+	Value string    `json:"value"`
+	Type  MatchType `json:"type"`
+}
+
+// QueryParamMatch represents a query parameter matching rule.
+type QueryParamMatch struct {
+	Name  string    `json:"name"`
+	Value string    `json:"value"`
+	Type  MatchType `json:"type"`
+}
+
 // Route represents a path-based routing rule (v2 config).
 type Route struct {
-	Hostname  string     `json:"hostname,omitempty"` // Used when collecting from HTTPRoutes
-	PathMatch *PathMatch `json:"path_match,omitempty"`
-	Service   string     `json:"service"`
-	Namespace string     `json:"namespace"`
-	Port      int        `json:"port"`
-	Weight    int        `json:"weight"`
-	Priority  int        `json:"priority"`
+	Hostname    string            `json:"hostname,omitempty"` // Used when collecting from HTTPRoutes
+	PathMatch   *PathMatch        `json:"path_match,omitempty"`
+	Method      *string           `json:"method,omitempty"`
+	Headers     []HeaderMatch     `json:"headers,omitempty"`
+	QueryParams []QueryParamMatch `json:"query_params,omitempty"`
+	Service     string            `json:"service"`
+	Namespace   string            `json:"namespace"`
+	Port        int               `json:"port"`
+	Weight      int               `json:"weight"`
+	Priority    int               `json:"priority"`
 }
 
 // VHostRouting represents routing configuration for a vhost with path-based rules (v2).
@@ -83,9 +108,12 @@ type RoutingConfigV2 struct {
 
 // RouteBackends represents a route with resolved backend IPs (v2 ghost.json).
 type RouteBackends struct {
-	PathMatch *PathMatch `json:"path_match,omitempty"`
-	Backends  []Backend  `json:"backends"`
-	Priority  int        `json:"priority"`
+	PathMatch   *PathMatch        `json:"path_match,omitempty"`
+	Method      *string           `json:"method,omitempty"`
+	Headers     []HeaderMatch     `json:"headers,omitempty"`
+	QueryParams []QueryParamMatch `json:"query_params,omitempty"`
+	Backends    []Backend         `json:"backends"`
+	Priority    int               `json:"priority"`
 }
 
 // VHostV2 represents a virtual host with path-based routing (v2 ghost.json).

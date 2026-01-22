@@ -36,10 +36,42 @@ pub struct PathMatch {
     pub value: String,
 }
 
+/// Match type for headers and query parameters
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub enum MatchType {
+    Exact,
+    RegularExpression,
+}
+
+/// Header matching rule
+#[derive(Debug, Clone, Deserialize)]
+pub struct HeaderMatch {
+    pub name: String,
+    pub value: String,
+    #[serde(rename = "type")]
+    pub match_type: MatchType,
+}
+
+/// Query parameter matching rule
+#[derive(Debug, Clone, Deserialize)]
+pub struct QueryParamMatch {
+    pub name: String,
+    pub value: String,
+    #[serde(rename = "type")]
+    pub match_type: MatchType,
+}
+
 /// Route with path-based matching (v2)
 #[derive(Debug, Clone, Deserialize)]
 pub struct Route {
     pub path_match: Option<PathMatch>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<HeaderMatch>,
+    #[serde(default)]
+    pub query_params: Vec<QueryParamMatch>,
     pub backends: Vec<Backend>,
     pub priority: i32,
 }
@@ -109,6 +141,20 @@ fn validate(config: &Config) -> Result<(), String> {
 
             if let Some(ref path_match) = route.path_match {
                 validate_path_match(path_match, &route_ctx)?;
+            }
+
+            if let Some(ref method) = route.method {
+                validate_method(method, &route_ctx)?;
+            }
+
+            for (j, header) in route.headers.iter().enumerate() {
+                let header_ctx = format!("{} header {}", route_ctx, j);
+                validate_header_match(header, &header_ctx)?;
+            }
+
+            for (j, qp) in route.query_params.iter().enumerate() {
+                let qp_ctx = format!("{} query_param {}", route_ctx, j);
+                validate_query_param_match(qp, &qp_ctx)?;
             }
         }
 
@@ -205,6 +251,63 @@ fn validate_path_match(path_match: &PathMatch, context: &str) -> Result<(), Stri
                     context, path_match.value, e
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Validate HTTP method
+fn validate_method(method: &str, context: &str) -> Result<(), String> {
+    const VALID_METHODS: &[&str] = &[
+        "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+    ];
+    if !VALID_METHODS.contains(&method) {
+        return Err(format!("{}: invalid method '{}'", context, method));
+    }
+    Ok(())
+}
+
+/// Validate header match configuration
+fn validate_header_match(header: &HeaderMatch, context: &str) -> Result<(), String> {
+    if header.name.is_empty() {
+        return Err(format!("{}: header name cannot be empty", context));
+    }
+    if header.value.is_empty() {
+        return Err(format!("{}: header value cannot be empty", context));
+    }
+    if header.value.len() > 4096 {
+        return Err(format!(
+            "{}: header value too long ({} chars, max 4096)",
+            context,
+            header.value.len()
+        ));
+    }
+    if header.match_type == MatchType::RegularExpression {
+        if let Err(e) = regex::Regex::new(&header.value) {
+            return Err(format!("{}: invalid regex: {}", context, e));
+        }
+    }
+    Ok(())
+}
+
+/// Validate query parameter match configuration
+fn validate_query_param_match(qp: &QueryParamMatch, context: &str) -> Result<(), String> {
+    if qp.name.is_empty() {
+        return Err(format!("{}: query param name cannot be empty", context));
+    }
+    if qp.value.is_empty() {
+        return Err(format!("{}: query param value cannot be empty", context));
+    }
+    if qp.value.len() > 1024 {
+        return Err(format!(
+            "{}: query param value too long ({} chars, max 1024)",
+            context,
+            qp.value.len()
+        ));
+    }
+    if qp.match_type == MatchType::RegularExpression {
+        if let Err(e) = regex::Regex::new(&qp.value) {
+            return Err(format!("{}: invalid regex: {}", context, e));
         }
     }
     Ok(())
