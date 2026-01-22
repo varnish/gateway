@@ -1,5 +1,23 @@
-# ClusterRole for chaperone pods to watch EndpointSlices
-# This role is bound to chaperone ServiceAccounts created by the operator
+# NOTE: This file is kept for reference and backward compatibility.
+#
+# As of the automatic RBAC implementation, the operator now creates
+# namespace-scoped Role and RoleBinding resources automatically for each Gateway.
+# This means chaperone pods get permissions to watch EndpointSlices and Services
+# in their namespace without requiring manual RBAC setup.
+#
+# The ClusterRole below is defined for reference, showing what permissions
+# chaperone needs. The static ClusterRoleBinding to the default namespace
+# is deprecated and can be removed if you're not using it.
+#
+# For each Gateway, the operator automatically creates:
+# - Role: {gateway-name}-chaperone (in the Gateway's namespace)
+# - RoleBinding: {gateway-name}-chaperone (linking the Role to the ServiceAccount)
+#
+# These resources are owned by the Gateway and cleaned up automatically when
+# the Gateway is deleted.
+
+# ClusterRole for reference - shows permissions needed by chaperone
+# (Operator creates namespace-scoped Roles with these same permissions)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -17,8 +35,10 @@ rules:
     resources: ["services"]
     verbs: ["get", "list", "watch"]
 ---
-# ClusterRoleBinding for chaperone in the default namespace
-# Add additional bindings for other namespaces where you deploy Gateways
+# DEPRECATED: Static ClusterRoleBinding for default namespace only
+# This binding is kept for backward compatibility but is no longer needed.
+# The operator now creates RoleBindings automatically for each Gateway.
+# You can safely delete this if you're not relying on it.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:

@@ -53,6 +53,10 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # RBAC resources for chaperone
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Leader election
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -102,14 +106,14 @@ spec:
       serviceAccountName: varnish-gateway-operator
       containers:
         - name: operator
-          image: ghcr.io/varnish/gateway-operator:v0.3.1
+          image: ghcr.io/varnish/gateway-operator:0.4.2
           args:
             - --leader-elect=true
           env:
             - name: GATEWAY_CLASS_NAME
               value: "varnish"
             - name: GATEWAY_IMAGE
-              value: "ghcr.io/varnish/gateway-chaperone:v0.3.1"
+              value: "ghcr.io/varnish/gateway-chaperone:0.4.2"
           ports:
             - name: metrics
               containerPort: 8080
