@@ -97,17 +97,21 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// 5. Reconcile child resources
 	if err := r.reconcileResources(ctx, &gateway); err != nil {
+		// Use Server-Side Apply for status update to avoid conflicts
 		r.setConditions(&gateway, false, err.Error())
-		if statusErr := r.Status().Update(ctx, &gateway); statusErr != nil {
+		if statusErr := r.Status().Patch(ctx, &gateway, client.Apply,
+			client.FieldOwner("varnish-gateway-controller")); statusErr != nil {
 			log.Error("failed to update status", "error", statusErr)
 		}
 		return ctrl.Result{}, err
 	}
 
 	// 6. Update status to Accepted/Programmed
+	// Use Server-Side Apply for status update - no conflicts with other controllers
 	r.setConditions(&gateway, true, "")
-	if err := r.Status().Update(ctx, &gateway); err != nil {
-		return ctrl.Result{}, fmt.Errorf("r.Status().Update: %w", err)
+	if err := r.Status().Patch(ctx, &gateway, client.Apply,
+		client.FieldOwner("varnish-gateway-controller")); err != nil {
+		return ctrl.Result{}, fmt.Errorf("r.Status().Patch: %w", err)
 	}
 
 	log.Debug("gateway reconciliation complete")
