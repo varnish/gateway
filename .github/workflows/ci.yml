@@ -44,7 +44,6 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-          working-directory: ghost
 
       - name: Build ghost VMOD
         run: cd ghost && cargo build
