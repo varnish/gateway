@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -30,12 +31,20 @@ type HTTPRouteReconciler struct {
 	Scheme *runtime.Scheme
 	Config Config
 	Logger *slog.Logger
+
+	// ConfigMap content tracking for change detection
+	configMapHashes map[string]string // key: namespace/name -> hash of Data
 }
 
 // Reconcile handles HTTPRoute reconciliation.
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Logger.With("httproute", req.NamespacedName)
-	log.Info("reconciling HTTPRoute")
+	log.Debug("reconciling HTTPRoute")
+
+	// Initialize configMapHashes if nil
+	if r.configMapHashes == nil {
+		r.configMapHashes = make(map[string]string)
+	}
 
 	// 1. Fetch the HTTPRoute
 	var route gatewayv1.HTTPRoute
@@ -70,7 +79,7 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, fmt.Errorf("r.Status().Update: %w", err)
 	}
 
-	log.Info("HTTPRoute reconciliation complete")
+	log.Debug("HTTPRoute reconciliation complete")
 	return ctrl.Result{}, nil
 }
 
@@ -242,6 +251,11 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", cmName, err)
 	}
 
+	// Compute hash of new ConfigMap data
+	cmKey := fmt.Sprintf("%s/%s", gateway.Namespace, cmName)
+	oldHash := r.configMapHashes[cmKey]
+	newHash := r.computeConfigMapHash(finalVCL, string(routingJSON))
+
 	// Update ConfigMap data
 	if cm.Data == nil {
 		cm.Data = make(map[string]string)
@@ -253,12 +267,31 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Update(%s): %w", cmName, err)
 	}
 
-	r.Logger.Info("updated ConfigMap",
-		"configmap", cmName,
-		"routes", len(routes),
-		"backends", len(collectedRoutes))
+	// Store new hash
+	r.configMapHashes[cmKey] = newHash
+
+	// Only log if content actually changed
+	if oldHash != newHash {
+		r.Logger.Info("updated ConfigMap",
+			"configmap", cmName,
+			"routes", len(routes),
+			"backends", len(collectedRoutes))
+	} else {
+		r.Logger.Debug("reconciled ConfigMap (no content change)",
+			"configmap", cmName,
+			"routes", len(routes),
+			"backends", len(collectedRoutes))
+	}
 
 	return nil
+}
+
+// computeConfigMapHash computes a hash of the ConfigMap content
+func (r *HTTPRouteReconciler) computeConfigMapHash(vcl, routingJSON string) string {
+	h := sha256.New()
+	h.Write([]byte(vcl))
+	h.Write([]byte(routingJSON))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // getUserVCL returns user-provided VCL from GatewayClassParameters.
@@ -385,7 +418,7 @@ func (r *HTTPRouteReconciler) findHTTPRoutesForGateway(ctx context.Context, obj 
 	}
 
 	if len(requests) > 0 {
-		r.Logger.Info("Gateway changed, re-reconciling attached HTTPRoutes",
+		r.Logger.Debug("Gateway changed, re-reconciling attached HTTPRoutes",
 			"gateway", gateway.Name,
 			"routes", len(requests))
 	}

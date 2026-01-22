@@ -64,7 +64,7 @@ func (r *Reloader) Run(ctx context.Context) error {
 		return fmt.Errorf("watcher.Add(%s): %w", dir, err)
 	}
 
-	r.logger.Info("VCL reloader started", "path", r.vclPath, "keepCount", r.keepCount)
+	r.logger.Debug("VCL reloader started", "path", r.vclPath, "keepCount", r.keepCount)
 
 	var debounceTimer *time.Timer
 	filename := filepath.Base(r.vclPath)
@@ -115,7 +115,7 @@ func (r *Reloader) Run(ctx context.Context) error {
 func (r *Reloader) Reload() error {
 	name := r.generateVCLName()
 
-	r.logger.Info("loading VCL", "name", name, "path", r.vclPath)
+	r.logger.Debug("loading VCL", "name", name, "path", r.vclPath)
 
 	// Load the new VCL
 	resp, err := r.varnishadm.VCLLoad(name, r.vclPath)
@@ -132,7 +132,7 @@ func (r *Reloader) Reload() error {
 	}
 
 	// Switch to the new VCL
-	r.logger.Info("activating VCL", "name", name)
+	r.logger.Debug("activating VCL", "name", name)
 	resp, err = r.varnishadm.VCLUse(name)
 	if err != nil {
 		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
@@ -146,7 +146,7 @@ func (r *Reloader) Reload() error {
 		return fmt.Errorf("VCL activation failed: %s", resp.Payload())
 	}
 
-	r.logger.Info("VCL reload complete", "name", name)
+	r.logger.Debug("VCL reload complete", "name", name)
 
 	// Garbage collect old VCLs
 	if err := r.garbageCollect(); err != nil {

@@ -49,11 +49,11 @@ type Watcher struct {
 
 	// Internal state protected by mutex
 	mu              sync.RWMutex
-	initialSyncDone bool                      // true after initial EndpointSlice sync
-	routingConfig   *RoutingConfig            // current routing rules (v1)
-	routingConfigV2 *RoutingConfigV2          // v2 routing config with path-based routing
-	endpoints       map[string][]Endpoint     // service key -> endpoints
-	serviceWatch    map[string]struct{}       // services we care about (namespace/name)
+	initialSyncDone bool                  // true after initial EndpointSlice sync
+	routingConfig   *RoutingConfig        // current routing rules (v1)
+	routingConfigV2 *RoutingConfigV2      // v2 routing config with path-based routing
+	endpoints       map[string][]Endpoint // service key -> endpoints
+	serviceWatch    map[string]struct{}   // services we care about (namespace/name)
 }
 
 // NewWatcher creates a new ghost configuration watcher.
@@ -113,7 +113,7 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		return fmt.Errorf("fsWatcher.Add(%s): %w", dir, err)
 	}
 
-	w.logger.Info("ghost watcher started",
+	w.logger.Debug("ghost watcher started",
 		"routingConfigPath", w.routingConfigPath,
 		"ghostConfigPath", w.ghostConfigPath,
 		"varnishAddr", w.varnishAddr,
@@ -122,7 +122,7 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 
 	// Wait for Varnish to be ready before setting up informers and triggering reload
 	if varnishReady != nil {
-		w.logger.Info("waiting for varnish to be ready")
+		w.logger.Debug("waiting for varnish to be ready")
 		select {
 		case <-varnishReady:
 			w.logger.Debug("varnish is ready")
@@ -172,7 +172,19 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	// Mark initial sync complete - subsequent endpoint changes will trigger reloads
 	w.mu.Lock()
 	w.initialSyncDone = true
+
+	// Log initial endpoints summary
+	totalServices := len(w.endpoints)
+	totalBackends := 0
+	for _, eps := range w.endpoints {
+		totalBackends += len(eps)
+	}
 	w.mu.Unlock()
+
+	w.logger.Info("initial endpoints discovered",
+		"services", totalServices,
+		"backends", totalBackends,
+	)
 
 	// Generate ghost.json with all backends and trigger single reload
 	if err := w.regenerateConfig(ctx); err != nil {
@@ -369,17 +381,23 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 	w.mu.Unlock()
 
 	// Log the specific changes
-	w.logger.Info("endpoints changed",
+	// During initial sync, just log at DEBUG; after sync, log at INFO
+	logLevel := slog.LevelDebug
+	if shouldReload {
+		logLevel = slog.LevelInfo
+	}
+
+	w.logger.Log(context.Background(), logLevel, "endpoints changed",
 		"service", key,
 		"added", len(added),
 		"removed", len(removed),
 		"total", len(newEndpoints),
 	)
 	for _, ep := range added {
-		w.logger.Info("backend added", "service", key, "address", ep.IP, "port", ep.Port)
+		w.logger.Debug("backend added", "service", key, "address", ep.IP, "port", ep.Port)
 	}
 	for _, ep := range removed {
-		w.logger.Info("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
+		w.logger.Debug("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
 	}
 
 	// Skip reload during initial sync - we'll do one reload after sync completes
@@ -428,12 +446,18 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 	w.mu.Unlock()
 
 	// Log the specific changes
-	w.logger.Info("endpoints deleted",
+	// During initial sync, just log at DEBUG; after sync, log at INFO
+	logLevel := slog.LevelDebug
+	if shouldReload {
+		logLevel = slog.LevelInfo
+	}
+
+	w.logger.Log(context.Background(), logLevel, "endpoints deleted",
 		"service", key,
 		"removed", len(oldEndpoints),
 	)
 	for _, ep := range oldEndpoints {
-		w.logger.Info("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
+		w.logger.Debug("backend removed", "service", key, "address", ep.IP, "port", ep.Port)
 	}
 
 	// Skip reload during initial sync - we'll do one reload after sync completes

@@ -44,9 +44,9 @@ const (
 
 // Config holds controller configuration from environment.
 type Config struct {
-	GatewayClassName  string // Which GatewayClass this operator manages
-	GatewayImage      string // Combined varnish+ghost+chaperone image
-	ImagePullSecrets  string // Comma-separated list of image pull secret names
+	GatewayClassName string // Which GatewayClass this operator manages
+	GatewayImage     string // Combined varnish+ghost+chaperone image
+	ImagePullSecrets string // Comma-separated list of image pull secret names
 }
 
 // GatewayReconciler reconciles Gateway objects.
@@ -60,7 +60,7 @@ type GatewayReconciler struct {
 // Reconcile handles Gateway reconciliation.
 func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Logger.With("gateway", req.NamespacedName)
-	log.Info("reconciling Gateway")
+	log.Debug("reconciling Gateway")
 
 	// 1. Fetch the Gateway
 	var gateway gatewayv1.Gateway
@@ -109,7 +109,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("r.Status().Update: %w", err)
 	}
 
-	log.Info("gateway reconciliation complete")
+	log.Debug("gateway reconciliation complete")
 	return ctrl.Result{}, nil
 }
 

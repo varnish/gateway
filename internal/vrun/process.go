@@ -105,7 +105,7 @@ func (m *Manager) Start(ctx context.Context, varnishCmd string, args []string) (
 	m.cmd.Stdout = newLogWriter(m.logger, "varnishd", ready)
 	m.cmd.Stderr = newLogWriter(m.logger, "varnishd", ready)
 
-	m.logger.Info("Starting Varnish")
+	m.logger.Debug("Starting Varnish")
 
 	// Start Varnish
 	if err := m.cmd.Start(); err != nil {
