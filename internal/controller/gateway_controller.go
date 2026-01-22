@@ -139,12 +139,13 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	}
 
 	// Create resources in order (some depend on others existing)
+	// ConfigMap must be created first so HTTPRoute controller can process routes immediately
 	resources := []client.Object{
+		r.buildVCLConfigMap(gateway),
 		r.buildAdminSecret(gateway),
 		r.buildServiceAccount(gateway),
 		r.buildChaperoneRole(gateway),
 		r.buildChaperoneRoleBinding(gateway),
-		r.buildVCLConfigMap(gateway),
 		r.buildDeployment(gateway, varnishdExtraArgs),
 		r.buildService(gateway),
 	}
