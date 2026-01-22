@@ -1,0 +1,174 @@
+varnishtest "PathPrefix matching with trailing slashes"
+
+# Test PathPrefix matching behavior with prefixes that have trailing slashes.
+# This is a common pattern in path-based routing where prefixes like "/api/v2/"
+# should match paths like "/api/v2/products".
+#
+# Tests the priority-based routing with multiple overlapping prefixes:
+#   /api/v1/health (exact match, priority 10000)
+#   /api/v2/ (prefix match, priority 1080)
+#   /api/v1/ (prefix match, priority 1080)
+#   /api/ (prefix match, priority 1050)
+#   / (default route, priority 1010)
+#
+# Verifies that:
+# 1. Exact matches take precedence over prefix matches
+# 2. More specific prefixes match before less specific ones
+# 3. Prefixes with trailing slashes correctly match paths
+# 4. Default route catches unmatched paths
+
+# Backend servers
+server s_alpha {
+    loop 2 {
+        rxreq
+        txresp -body "app-alpha"
+    }
+} -start
+
+server s_beta {
+    rxreq
+    txresp -body "app-beta"
+} -start
+
+server s_gamma {
+    rxreq
+    txresp -body "app-gamma"
+} -start
+
+server s_delta {
+    rxreq
+    txresp -body "app-delta"
+} -start
+
+server s_epsilon {
+    loop 3 {
+        rxreq
+        txresp -body "app-epsilon"
+    }
+} -start
+
+# Write v2 config with overlapping path prefixes
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "api.example.com": {
+            "routes": [
+                {
+                    "path_match": {
+                        "type": "Exact",
+                        "value": "/api/v1/health"
+                    },
+                    "backends": [
+                        {"address": "${s_alpha_addr}", "port": ${s_alpha_port}, "weight": 1}
+                    ],
+                    "priority": 10000
+                },
+                {
+                    "path_match": {
+                        "type": "PathPrefix",
+                        "value": "/api/v2/"
+                    },
+                    "backends": [
+                        {"address": "${s_beta_addr}", "port": ${s_beta_port}, "weight": 1}
+                    ],
+                    "priority": 1080
+                },
+                {
+                    "path_match": {
+                        "type": "PathPrefix",
+                        "value": "/api/v1/"
+                    },
+                    "backends": [
+                        {"address": "${s_gamma_addr}", "port": ${s_gamma_port}, "weight": 1}
+                    ],
+                    "priority": 1080
+                },
+                {
+                    "path_match": {
+                        "type": "PathPrefix",
+                        "value": "/api/"
+                    },
+                    "backends": [
+                        {"address": "${s_delta_addr}", "port": ${s_delta_port}, "weight": 1}
+                    ],
+                    "priority": 1050
+                },
+                {
+                    "path_match": {
+                        "type": "PathPrefix",
+                        "value": "/"
+                    },
+                    "backends": [
+                        {"address": "${s_epsilon_addr}", "port": ${s_epsilon_port}, "weight": 1}
+                    ],
+                    "priority": 1010
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+varnish v1 -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            return (pass);
+        }
+    }
+
+    sub vcl_backend_fetch {
+        set bereq.backend = router.backend();
+    }
+} -start
+
+# Test 1: Exact match should take priority over prefix matches
+client c1 {
+    txreq -url "/api/v1/health" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "app-alpha"
+} -run
+
+# Test 2: PathPrefix /api/v2/ should match /api/v2/products
+client c2 {
+    txreq -url "/api/v2/products" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "app-beta"
+} -run
+
+# Test 3: PathPrefix /api/v1/ should match /api/v1/status
+client c3 {
+    txreq -url "/api/v1/status" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "app-gamma"
+} -run
+
+# Test 4: PathPrefix /api/ should match paths not covered by more specific prefixes
+client c4 {
+    txreq -url "/api/other" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "app-delta"
+} -run
+
+# Test 5: Default route should catch paths that don't match any prefix
+client c5 {
+    txreq -url "/other" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "app-epsilon"
+} -run

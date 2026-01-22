@@ -496,6 +496,7 @@ fn extract_path(url: &str) -> &str {
 ///
 /// Gateway API PathPrefix matching is element-wise, not simple string prefix:
 /// - "/api" matches "/api" and "/api/v2" but NOT "/api2"
+/// - "/api/" matches "/api/" and "/api/v2" (prefix already includes trailing /)
 /// - Matching is done on path element boundaries (/)
 fn matches_path_prefix(prefix: &str, path: &str) -> bool {
     if prefix == "/" {
@@ -508,14 +509,20 @@ fn matches_path_prefix(prefix: &str, path: &str) -> bool {
         return true;
     }
 
-    // Check if path starts with prefix followed by /
-    if path.starts_with(prefix) {
-        let remainder = &path[prefix.len()..];
-        // Must be followed by / for element-wise matching
-        return remainder.starts_with('/');
+    // Check if path starts with prefix
+    if !path.starts_with(prefix) {
+        return false;
     }
 
-    false
+    let remainder = &path[prefix.len()..];
+
+    // If prefix ends with /, we're already at element boundary
+    if prefix.ends_with('/') {
+        return true;
+    }
+
+    // Otherwise, remainder must start with / for element-wise matching
+    remainder.starts_with('/')
 }
 
 #[cfg(test)]
@@ -622,6 +629,32 @@ mod tests {
 
         // Different path
         assert!(!matches_path_prefix("/api", "/web"));
+    }
+
+    #[test]
+    fn test_matches_path_prefix_with_trailing_slash() {
+        // Prefix with trailing slash - matches production config pattern
+        assert!(matches_path_prefix("/api/", "/api/"));
+        assert!(matches_path_prefix("/api/", "/api/users"));
+        assert!(matches_path_prefix("/api/", "/api/v2/products"));
+
+        // More specific prefixes with trailing slashes
+        assert!(matches_path_prefix("/api/v2/", "/api/v2/"));
+        assert!(matches_path_prefix("/api/v2/", "/api/v2/products"));
+        assert!(matches_path_prefix("/api/v2/", "/api/v2/users/123"));
+
+        assert!(matches_path_prefix("/api/v1/", "/api/v1/"));
+        assert!(matches_path_prefix("/api/v1/", "/api/v1/status"));
+        assert!(matches_path_prefix("/api/v1/", "/api/v1/health/check"));
+
+        // Should NOT match different paths
+        assert!(!matches_path_prefix("/api/v2/", "/api/v1/products"));
+        assert!(!matches_path_prefix("/api/v1/", "/api/v2/status"));
+        assert!(!matches_path_prefix("/api/", "/web/api"));
+
+        // Should NOT match if path doesn't include the trailing slash
+        assert!(!matches_path_prefix("/api/v2/", "/api/v2"));
+        assert!(!matches_path_prefix("/api/v1/", "/api/v1"));
     }
 
     #[test]
