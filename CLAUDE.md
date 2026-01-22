@@ -13,6 +13,10 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 
 ## Progress
 
+### Phase 3 Complete
+
+Advanced request matching (method, header, query parameter) is now fully implemented across all components.
+
 ### Phase 1 Complete
 
 All three components (operator, chaperone, ghost) are now at Phase 1 completion.
@@ -61,9 +65,14 @@ All three components (operator, chaperone, ghost) are now at Phase 1 completion.
 - Start() is non-blocking; returns ready channel, call Wait() to block until exit
 - VCL not loaded at startup (`-f ""`); load via admin socket after start
 
-**Ghost VMOD** (`ghost/`) - Phase 1 Complete:
+**Ghost VMOD** (`ghost/`) - Phase 3 Complete:
 - Rust-based VMOD handling virtual host routing with native backends
 - Hot-reload via `/.varnish-ghost/reload` endpoint
+- Path-based routing with exact, prefix, and regex matching
+- HTTP method matching
+- Header matching (exact and regex)
+- Query parameter matching (exact and regex)
+- Priority-based route selection with additive specificity bonuses
 - See `ghost/CLAUDE.md` and `ghost/README.md` for details
 
 ### Not Yet Implemented

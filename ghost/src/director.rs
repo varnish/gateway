@@ -658,20 +658,6 @@ fn get_host_header(http: &HttpHeaders) -> Option<String> {
     Some(host.to_lowercase())
 }
 
-/// Extract path from URL (without query string)
-fn extract_path(url: &str) -> &str {
-    // Remove query string and fragment
-    let path_end = url.find('?').or_else(|| url.find('#')).unwrap_or(url.len());
-    let path = &url[..path_end];
-
-    // Path should start with /
-    if path.is_empty() {
-        "/"
-    } else {
-        path
-    }
-}
-
 /// Extract path and query string from URL
 /// Returns (path, Some(query_string)) or (path, None)
 fn extract_path_and_query(url: &str) -> (&str, Option<&str>) {
@@ -819,12 +805,22 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_path() {
-        assert_eq!(extract_path("/api/users"), "/api/users");
-        assert_eq!(extract_path("/api/users?foo=bar"), "/api/users");
-        assert_eq!(extract_path("/api/users#fragment"), "/api/users");
-        assert_eq!(extract_path("/api/users?foo=bar#fragment"), "/api/users");
-        assert_eq!(extract_path(""), "/");
+    fn test_extract_path_and_query() {
+        assert_eq!(extract_path_and_query("/api/users"), ("/api/users", None));
+        assert_eq!(
+            extract_path_and_query("/api/users?foo=bar"),
+            ("/api/users", Some("foo=bar"))
+        );
+        assert_eq!(
+            extract_path_and_query("/api/users#fragment"),
+            ("/api/users", None)
+        );
+        assert_eq!(
+            extract_path_and_query("/api/users?foo=bar#fragment"),
+            ("/api/users", Some("foo=bar"))
+        );
+        assert_eq!(extract_path_and_query(""), ("/", None));
+        assert_eq!(extract_path_and_query("?query"), ("/", Some("query")));
     }
 
     #[test]

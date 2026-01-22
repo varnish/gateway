@@ -59,6 +59,7 @@ test: test-go test-ghost
 build-go: dist/operator dist/chaperone
 
 test-go:
+	go vet ./...
 	go test ./...
 
 dist/operator:
@@ -100,6 +101,7 @@ build-ghost:
 	cd ghost && cargo build --release
 
 test-ghost:
+	cd ghost && cargo clippy -- -D warnings
 	cd ghost && cargo test
 
 # ============================================================================
