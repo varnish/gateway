@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/varnish/gateway/internal/filechange"
 	"github.com/varnish/gateway/internal/reload"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,6 +55,9 @@ type Watcher struct {
 	routingConfigV2 *RoutingConfigV2      // v2 routing config with path-based routing
 	endpoints       map[string][]Endpoint // service key -> endpoints
 	serviceWatch    map[string]struct{}   // services we care about (namespace/name)
+
+	// File change tracking to avoid spurious reloads
+	fileDetector filechange.Detector
 }
 
 // NewWatcher creates a new ghost configuration watcher.
@@ -198,7 +202,6 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	})
 
 	var debounceTimer *time.Timer
-	filename := filepath.Base(w.routingConfigPath)
 
 	for {
 		select {
@@ -216,17 +219,24 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 				return nil
 			}
 
-			// Only react to changes to our specific file
-			if filepath.Base(event.Name) != filename {
-				continue
-			}
-
 			// React to Write, Create, and Rename events
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
 
-			w.logger.Debug("routing config changed", "event", event.Op.String())
+			// Check if the routing config file actually changed
+			// This handles Kubernetes ConfigMap atomic swaps (..data symlinks)
+			// and avoids spurious reloads from unrelated directory events
+			if !w.fileDetector.HasChanged(w.routingConfigPath, w.logger) {
+				continue
+			}
+
+			mtime, inode := w.fileDetector.GetMetadata()
+			w.logger.Debug("routing config file changed",
+				"event", event.Op.String(),
+				"mtime", mtime,
+				"inode", inode,
+			)
 
 			// Debounce rapid changes
 			if debounceTimer != nil {
