@@ -32,26 +32,38 @@ jobs:
             const sha = context.payload.workflow_run.head_sha;
             core.info(`Checking for tags on commit ${sha}`);
 
-            // Get all tags pointing to this commit
+            // Get all version tags
             const { data: refs } = await github.rest.git.listMatchingRefs({
               owner: context.repo.owner,
               repo: context.repo.repo,
               ref: 'tags/v'
             });
 
-            const tagForCommit = refs.find(ref => {
-              return ref.object.sha === sha;
-            });
+            // Check each tag - need to handle annotated tags
+            for (const ref of refs) {
+              let commitSha = ref.object.sha;
 
-            if (tagForCommit) {
-              const tagName = tagForCommit.ref.replace('refs/tags/', '');
-              core.info(`Found tag: ${tagName}`);
-              core.setOutput('is_tag', 'true');
-              core.setOutput('tag_name', tagName);
-            } else {
-              core.info('No version tag found for this commit');
-              core.setOutput('is_tag', 'false');
+              // If it's an annotated tag, dereference to get the commit
+              if (ref.object.type === 'tag') {
+                const { data: tag } = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: ref.object.sha
+                });
+                commitSha = tag.object.sha;
+              }
+
+              if (commitSha === sha) {
+                const tagName = ref.ref.replace('refs/tags/', '');
+                core.info(`Found tag: ${tagName}`);
+                core.setOutput('is_tag', 'true');
+                core.setOutput('tag_name', tagName);
+                return;
+              }
             }
+
+            core.info('No version tag found for this commit');
+            core.setOutput('is_tag', 'false');
 
   build-operator:
     needs: [check-tag]
