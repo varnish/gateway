@@ -57,7 +57,6 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
 	}
-
 	// 2. Skip if no parentRefs
 	if len(route.Spec.ParentRefs) == 0 {
 		log.Debug("HTTPRoute has no parentRefs, skipping")
@@ -75,8 +74,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// 4. Update HTTPRoute status using Server-Side Apply - no conflicts with other controllers
+	// Prepare for SSA: set GVK and ensure managedFields is cleared
+	route.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute"))
+	route.SetManagedFields(nil)
 	if err := r.Status().Patch(ctx, &route, client.Apply,
-		client.FieldOwner("varnish-httproute-controller")); err != nil {
+		client.FieldOwner("varnish-httproute-controller"),
+		client.ForceOwnership); err != nil {
 		return ctrl.Result{}, fmt.Errorf("r.Status().Patch: %w", err)
 	}
 
@@ -377,8 +380,12 @@ func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, g
 
 	// Use Server-Side Apply - HTTPRoute controller owns AttachedRoutes field
 	// Gateway controller owns conditions - no conflicts!
+	// Prepare for SSA: set GVK and ensure managedFields is cleared
+	gateway.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("Gateway"))
+	gateway.SetManagedFields(nil)
 	if err := r.Status().Patch(ctx, gateway, client.Apply,
-		client.FieldOwner("varnish-httproute-controller")); err != nil {
+		client.FieldOwner("varnish-httproute-controller"),
+		client.ForceOwnership); err != nil {
 		return fmt.Errorf("r.Status().Patch: %w", err)
 	}
 

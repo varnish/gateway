@@ -1,2 +1,6 @@
 .idea
 dist/
+
+# EnvTest binaries (platform-specific, don't commit)
+bin/setup-envtest
+testbin/

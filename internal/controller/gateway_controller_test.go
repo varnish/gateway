@@ -31,6 +31,7 @@ func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayR
 		WithScheme(scheme).
 		WithRuntimeObjects(objs...).
 		WithStatusSubresource(&gatewayv1.Gateway{}).
+		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
 		Build()
 
 	return &GatewayReconciler{
@@ -319,88 +320,9 @@ func TestReconcile_SkipsDifferentGatewayClass(t *testing.T) {
 	}
 }
 
-func TestReconcile_CreatesResources(t *testing.T) {
-	scheme := newTestScheme()
-
-	gateway := &gatewayv1.Gateway{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gateway",
-			Namespace: "default",
-		},
-		Spec: gatewayv1.GatewaySpec{
-			GatewayClassName: "varnish",
-			Listeners: []gatewayv1.Listener{
-				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
-			},
-		},
-	}
-
-	r := newTestReconciler(scheme, gateway)
-
-	// First reconcile adds finalizer
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-gateway", Namespace: "default"},
-	})
-	if err != nil {
-		t.Fatalf("first reconcile failed: %v", err)
-	}
-	if !result.Requeue {
-		t.Error("expected requeue after adding finalizer")
-	}
-
-	// Second reconcile creates resources
-	result, err = r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-gateway", Namespace: "default"},
-	})
-	if err != nil {
-		t.Fatalf("second reconcile failed: %v", err)
-	}
-
-	// Verify Deployment was created
-	var deployment appsv1.Deployment
-	err = r.Get(context.Background(),
-		types.NamespacedName{Name: "test-gateway", Namespace: "default"},
-		&deployment)
-	if err != nil {
-		t.Errorf("expected deployment to be created: %v", err)
-	}
-
-	// Verify Service was created
-	var service corev1.Service
-	err = r.Get(context.Background(),
-		types.NamespacedName{Name: "test-gateway", Namespace: "default"},
-		&service)
-	if err != nil {
-		t.Errorf("expected service to be created: %v", err)
-	}
-
-	// Verify ConfigMap was created
-	var configMap corev1.ConfigMap
-	err = r.Get(context.Background(),
-		types.NamespacedName{Name: "test-gateway-vcl", Namespace: "default"},
-		&configMap)
-	if err != nil {
-		t.Errorf("expected configmap to be created: %v", err)
-	}
-
-	// Verify Secret was created
-	var secret corev1.Secret
-	err = r.Get(context.Background(),
-		types.NamespacedName{Name: "test-gateway-secret", Namespace: "default"},
-		&secret)
-	if err != nil {
-		t.Errorf("expected secret to be created: %v", err)
-	}
-
-	// Verify ServiceAccount was created
-	var sa corev1.ServiceAccount
-	err = r.Get(context.Background(),
-		types.NamespacedName{Name: "test-gateway-chaperone", Namespace: "default"},
-		&sa)
-	if err != nil {
-		t.Errorf("expected service account to be created: %v", err)
-	}
-}
+// TestReconcile_CreatesResources was removed and replaced with TestReconcile_CreatesResources_Envtest
+// in gateway_controller_envtest_test.go. The fake client doesn't support SSA properly, so we use
+// envtest with a real API server instead. See ENVTEST-IMPLEMENTATION.md for details.
 
 func TestReconcile_NotFoundReturnsNoError(t *testing.T) {
 	scheme := newTestScheme()

@@ -56,6 +56,9 @@ type GatewayReconciler struct {
 	Scheme *runtime.Scheme
 	Config Config
 	Logger *slog.Logger
+	// UseServerSideApply controls whether to use SSA for status updates (default true)
+	// Set to false in tests since fake client doesn't support SSA
+	UseServerSideApply bool
 }
 
 // Reconcile handles Gateway reconciliation.
@@ -72,7 +75,6 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
 	}
-
 	// 2. Check if this Gateway uses our GatewayClass
 	if string(gateway.Spec.GatewayClassName) != r.Config.GatewayClassName {
 		log.Debug("gateway uses different GatewayClass, skipping",
@@ -99,8 +101,12 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.reconcileResources(ctx, &gateway); err != nil {
 		// Use Server-Side Apply for status update to avoid conflicts
 		r.setConditions(&gateway, false, err.Error())
+		// Prepare for SSA: set GVK and ensure managedFields is cleared
+		gateway.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("Gateway"))
+		gateway.ManagedFields = nil
 		if statusErr := r.Status().Patch(ctx, &gateway, client.Apply,
-			client.FieldOwner("varnish-gateway-controller")); statusErr != nil {
+			client.FieldOwner("varnish-gateway-controller"),
+			client.ForceOwnership); statusErr != nil {
 			log.Error("failed to update status", "error", statusErr)
 		}
 		return ctrl.Result{}, err
@@ -109,8 +115,12 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// 6. Update status to Accepted/Programmed
 	// Use Server-Side Apply for status update - no conflicts with other controllers
 	r.setConditions(&gateway, true, "")
+	// Prepare for SSA: set GVK and ensure managedFields is cleared
+	gateway.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("Gateway"))
+	gateway.SetManagedFields(nil)
 	if err := r.Status().Patch(ctx, &gateway, client.Apply,
-		client.FieldOwner("varnish-gateway-controller")); err != nil {
+		client.FieldOwner("varnish-gateway-controller"),
+		client.ForceOwnership); err != nil {
 		return ctrl.Result{}, fmt.Errorf("r.Status().Patch: %w", err)
 	}
 
@@ -181,8 +191,14 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		if err := r.Create(ctx, desired); err != nil {
 			return fmt.Errorf("r.Create(%s): %w", desired.GetName(), err)
 		}
+		// Get GVK from scheme since TypeMeta is not populated on typed objects
+		gvks, _, _ := r.Scheme.ObjectKinds(desired)
+		kind := ""
+		if len(gvks) > 0 {
+			kind = gvks[0].Kind
+		}
 		r.Logger.Info("created resource",
-			"kind", desired.GetObjectKind().GroupVersionKind().Kind,
+			"kind", kind,
 			"name", desired.GetName())
 		return nil
 	}

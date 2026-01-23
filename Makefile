@@ -5,14 +5,16 @@ CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 
 .PHONY: help test build build-linux docker clean vendor
-.PHONY: build-go test-go build-ghost test-ghost
+.PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
 	@echo ""
 	@echo "Go targets:"
 	@echo "  make build-go         Build Go binaries for current platform"
-	@echo "  make test-go          Run Go tests"
+	@echo "  make test-go          Run Go tests (includes envtest)"
+	@echo "  make test-envtest     Run only envtest integration tests"
+	@echo "  make envtest          Setup envtest binaries (kube-apiserver, etcd)"
 	@echo "  make build-linux      Build Linux Go binaries for amd64 and arm64"
 	@echo ""
 	@echo "Rust targets:"
@@ -58,9 +60,30 @@ test: test-go test-ghost
 
 build-go: dist/operator dist/chaperone
 
-test-go:
+# EnvTest Configuration
+ENVTEST_K8S_VERSION = 1.31.0
+ENVTEST := $(shell pwd)/bin/setup-envtest
+ENVTEST_ASSETS_DIR := $(shell pwd)/testbin
+
+# Install setup-envtest tool
+install-envtest:
+	@mkdir -p bin
+	GOBIN=$(shell pwd)/bin go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+
+# Download and setup envtest binaries (kube-apiserver, etcd)
+envtest: install-envtest
+	@mkdir -p $(ENVTEST_ASSETS_DIR)
+	$(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path
+
+# Run only envtest-based integration tests
+test-envtest: envtest
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
+		go test -v ./internal/controller/...
+
+test-go: envtest
 	go vet ./...
-	go test ./...
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
+		go test ./...
 
 dist/operator:
 	@mkdir -p dist
