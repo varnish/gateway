@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -342,12 +343,11 @@ func TestWatcherReloadFailureFatal(t *testing.T) {
 	}))
 	defer reloadServer.Close()
 
-	// Create temp directory for config files
+	// Create temp directory for ghost.json
 	tmpDir := t.TempDir()
-	routingConfigPath := filepath.Join(tmpDir, "routing.json")
 	ghostConfigPath := filepath.Join(tmpDir, "ghost.json")
 
-	// Write initial routing config
+	// Prepare routing config data
 	routingConfig := &RoutingConfig{
 		Version: 1,
 		VHosts: map[string]RoutingRule{
@@ -363,12 +363,20 @@ func TestWatcherReloadFailureFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if err := os.WriteFile(routingConfigPath, data, 0644); err != nil {
-		t.Fatalf("os.WriteFile: %v", err)
+
+	// Create ConfigMap with routing.json
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-configmap",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"routing.json": string(data),
+		},
 	}
 
-	// Create fake Kubernetes client
-	client := fake.NewSimpleClientset()
+	// Create fake Kubernetes client with ConfigMap
+	client := fake.NewSimpleClientset(configMap)
 
 	// Create watcher pointing at our fake server
 	// Extract host:port from the test server URL (strip http://)
@@ -377,10 +385,10 @@ func TestWatcherReloadFailureFatal(t *testing.T) {
 
 	watcher := NewWatcher(
 		client,
-		routingConfigPath,
 		ghostConfigPath,
 		varnishAddr,
 		"default",
+		"test-configmap",
 		logger,
 	)
 
@@ -464,12 +472,11 @@ func TestWatcherReloadSuccessDoesNotExit(t *testing.T) {
 	}))
 	defer reloadServer.Close()
 
-	// Create temp directory for config files
+	// Create temp directory for ghost.json
 	tmpDir := t.TempDir()
-	routingConfigPath := filepath.Join(tmpDir, "routing.json")
 	ghostConfigPath := filepath.Join(tmpDir, "ghost.json")
 
-	// Write initial routing config
+	// Prepare routing config data
 	routingConfig := &RoutingConfig{
 		Version: 1,
 		VHosts: map[string]RoutingRule{
@@ -485,12 +492,20 @@ func TestWatcherReloadSuccessDoesNotExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if err := os.WriteFile(routingConfigPath, data, 0644); err != nil {
-		t.Fatalf("os.WriteFile: %v", err)
+
+	// Create ConfigMap with routing.json
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-configmap",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"routing.json": string(data),
+		},
 	}
 
-	// Create fake Kubernetes client
-	client := fake.NewSimpleClientset()
+	// Create fake Kubernetes client with ConfigMap
+	client := fake.NewSimpleClientset(configMap)
 
 	// Create watcher
 	varnishAddr := strings.TrimPrefix(reloadServer.URL, "http://")
@@ -498,10 +513,10 @@ func TestWatcherReloadSuccessDoesNotExit(t *testing.T) {
 
 	watcher := NewWatcher(
 		client,
-		routingConfigPath,
 		ghostConfigPath,
 		varnishAddr,
 		"default",
+		"test-configmap",
 		logger,
 	)
 

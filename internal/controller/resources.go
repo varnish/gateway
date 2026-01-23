@@ -115,6 +115,11 @@ func (r *GatewayReconciler) buildChaperoneRole(gateway *gatewayv1.Gateway) *rbac
 				Resources: []string{"services"},
 				Verbs:     []string{"get", "list", "watch"},
 			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
 		},
 	}
 }
@@ -244,7 +249,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		{Name: "VARNISH_LISTEN", Value: fmt.Sprintf(":%d,http", varnishHTTPPort)},
 		{Name: "VARNISH_STORAGE", Value: "malloc,256m"},
 		{Name: "VCL_PATH", Value: "/etc/varnish/main.vcl"},
-		{Name: "ROUTING_CONFIG_PATH", Value: "/etc/varnish/routing.json"},
+		{Name: "CONFIGMAP_NAME", Value: fmt.Sprintf("%s-vcl", gateway.Name)},
 		{Name: "GHOST_CONFIG_PATH", Value: "/var/run/varnish/ghost.json"},
 		{Name: "WORK_DIR", Value: "/var/run/varnish"},
 		{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},

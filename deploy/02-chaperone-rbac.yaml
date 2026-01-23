@@ -34,6 +34,10 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # Watch ConfigMaps for routing.json updates
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
 ---
 # DEPRECATED: Static ClusterRoleBinding for default namespace only
 # This binding is kept for backward compatibility but is no longer needed.

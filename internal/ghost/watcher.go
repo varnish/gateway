@@ -6,14 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-	"github.com/varnish/gateway/internal/filechange"
 	"github.com/varnish/gateway/internal/reload"
+	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -23,9 +20,6 @@ import (
 )
 
 const (
-	// debounceDelay is the time to wait after a change before regenerating config
-	debounceDelay = 100 * time.Millisecond
-
 	// serviceLabelKey is the label used by Kubernetes to identify the service
 	serviceLabelKey = "kubernetes.io/service-name"
 )
@@ -33,13 +27,12 @@ const (
 // Watcher watches routing configuration and Kubernetes EndpointSlices,
 // regenerating ghost.json when endpoints or routing rules change.
 type Watcher struct {
-	routingConfigPath string // path to routing.json from operator
-	ghostConfigPath   string // path to write ghost.json
-	varnishAddr       string // varnish HTTP address for reload trigger
-	namespace         string
-	client            kubernetes.Interface
-	logger            *slog.Logger
-	reloadClient      *reload.Client
+	ghostConfigPath string // path to write ghost.json
+	varnishAddr     string // varnish HTTP address for reload trigger
+	namespace       string
+	client          kubernetes.Interface
+	logger          *slog.Logger
+	reloadClient    *reload.Client
 
 	// Ready signaling
 	readyCh   chan struct{}
@@ -56,34 +49,35 @@ type Watcher struct {
 	endpoints       map[string][]Endpoint // service key -> endpoints
 	serviceWatch    map[string]struct{}   // services we care about (namespace/name)
 
-	// File change tracking to avoid spurious reloads
-	fileDetector filechange.Detector
+	// ConfigMap watching
+	configMapName   string // name of ConfigMap to watch
+	lastConfigMapRV string // last seen ResourceVersion for deduplication
 }
 
 // NewWatcher creates a new ghost configuration watcher.
 func NewWatcher(
 	client kubernetes.Interface,
-	routingConfigPath string,
 	ghostConfigPath string,
 	varnishAddr string,
 	namespace string,
+	configMapName string,
 	logger *slog.Logger,
 ) *Watcher {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Watcher{
-		routingConfigPath: routingConfigPath,
-		ghostConfigPath:   ghostConfigPath,
-		varnishAddr:       varnishAddr,
-		namespace:         namespace,
-		client:            client,
-		logger:            logger,
-		reloadClient:      reload.NewClient(varnishAddr),
-		readyCh:           make(chan struct{}),
-		fatalErrCh:        make(chan error, 1), // buffered to avoid blocking
-		endpoints:         make(map[string][]Endpoint),
-		serviceWatch:      make(map[string]struct{}),
+		ghostConfigPath: ghostConfigPath,
+		varnishAddr:     varnishAddr,
+		namespace:       namespace,
+		configMapName:   configMapName,
+		client:          client,
+		logger:          logger,
+		reloadClient:    reload.NewClient(varnishAddr),
+		readyCh:         make(chan struct{}),
+		fatalErrCh:      make(chan error, 1), // buffered to avoid blocking
+		endpoints:       make(map[string][]Endpoint),
+		serviceWatch:    make(map[string]struct{}),
 	}
 }
 
@@ -99,26 +93,8 @@ func (w *Watcher) Ready() <-chan struct{} {
 // The varnishReady channel should close when Varnish is ready to accept reload requests.
 // If nil, the initial reload is attempted immediately (may fail if Varnish isn't ready).
 func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
-	// Load initial routing config
-	if err := w.loadRoutingConfig(); err != nil {
-		return fmt.Errorf("initial loadRoutingConfig: %w", err)
-	}
-
-	// Set up fsnotify for routing config
-	fsWatcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return fmt.Errorf("fsnotify.NewWatcher: %w", err)
-	}
-	defer fsWatcher.Close()
-
-	// Watch the directory containing routing config
-	dir := filepath.Dir(w.routingConfigPath)
-	if err := fsWatcher.Add(dir); err != nil {
-		return fmt.Errorf("fsWatcher.Add(%s): %w", dir, err)
-	}
-
 	w.logger.Debug("ghost watcher started",
-		"routingConfigPath", w.routingConfigPath,
+		"configMapName", w.configMapName,
 		"ghostConfigPath", w.ghostConfigPath,
 		"varnishAddr", w.varnishAddr,
 		"namespace", w.namespace,
@@ -143,7 +119,7 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	)
 
 	endpointSliceInformer := factory.Discovery().V1().EndpointSlices().Informer()
-	_, err = endpointSliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err := endpointSliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if slice, ok := obj.(*discoveryv1.EndpointSlice); ok {
 				w.handleEndpointSliceUpdate(ctx, slice)
@@ -164,14 +140,51 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		return fmt.Errorf("endpointSliceInformer.AddEventHandler: %w", err)
 	}
 
+	// Set up ConfigMap informer
+	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
+	_, err = configMapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			if cm, ok := obj.(*corev1.ConfigMap); ok {
+				w.handleConfigMapUpdate(ctx, cm)
+			}
+		},
+		UpdateFunc: func(_, newObj any) {
+			if cm, ok := newObj.(*corev1.ConfigMap); ok {
+				w.handleConfigMapUpdate(ctx, cm)
+			}
+		},
+		DeleteFunc: func(obj any) {
+			if cm, ok := obj.(*corev1.ConfigMap); ok {
+				w.handleConfigMapDelete(ctx, cm)
+			}
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("configMapInformer.AddEventHandler: %w", err)
+	}
+
 	// Start the informer
 	factory.Start(ctx.Done())
 
-	// Wait for cache sync - all EndpointSlice events will be processed during this
-	// but handlers won't trigger reloads until initialSyncDone is set
-	if !cache.WaitForCacheSync(ctx.Done(), endpointSliceInformer.HasSynced) {
-		return fmt.Errorf("failed to sync EndpointSlice cache")
+	// Wait for both informers to sync
+	if !cache.WaitForCacheSync(ctx.Done(),
+		endpointSliceInformer.HasSynced,
+		configMapInformer.HasSynced) {
+		return fmt.Errorf("failed to sync caches")
 	}
+
+	// Give informers a moment to process initial resources
+	// This is particularly important for fake clients in tests
+	time.Sleep(50 * time.Millisecond)
+
+	// Load initial routing config from ConfigMap explicitly
+	// The informer may have already loaded it, but we ensure it's available
+	cm, err := w.client.CoreV1().ConfigMaps(w.namespace).Get(ctx, w.configMapName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get ConfigMap %s: %w", w.configMapName, err)
+	}
+	// Process it to load routing config (handleConfigMapUpdate is idempotent)
+	w.handleConfigMapUpdate(ctx, cm)
 
 	// Mark initial sync complete - subsequent endpoint changes will trigger reloads
 	w.mu.Lock()
@@ -201,122 +214,17 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		close(w.readyCh)
 	})
 
-	var debounceTimer *time.Timer
-
-	for {
-		select {
-		case <-ctx.Done():
-			w.logger.Info("ghost watcher stopping")
-			return ctx.Err()
-
-		case err := <-w.fatalErrCh:
-			// Fatal reload error - routing is out of sync
-			w.logger.Error("fatal ghost reload error, exiting", "error", err)
-			return fmt.Errorf("fatal ghost reload: %w", err)
-
-		case event, ok := <-fsWatcher.Events:
-			if !ok {
-				return nil
-			}
-
-			// React to Write, Create, and Rename events
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
-				continue
-			}
-
-			// Check if the routing config file actually changed
-			// This handles Kubernetes ConfigMap atomic swaps (..data symlinks)
-			// and avoids spurious reloads from unrelated directory events
-			if !w.fileDetector.HasChanged(w.routingConfigPath, w.logger) {
-				continue
-			}
-
-			mtime, inode := w.fileDetector.GetMetadata()
-			w.logger.Debug("routing config file changed",
-				"event", event.Op.String(),
-				"mtime", mtime,
-				"inode", inode,
-			)
-
-			// Debounce rapid changes
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			debounceTimer = time.AfterFunc(debounceDelay, func() {
-				if err := w.loadRoutingConfig(); err != nil {
-					w.logger.Error("failed to reload routing config", "error", err)
-					select {
-					case w.fatalErrCh <- fmt.Errorf("loadRoutingConfig: %w", err):
-					default:
-					}
-					return
-				}
-				if err := w.regenerateConfig(ctx); err != nil {
-					w.logger.Error("failed to regenerate ghost config", "error", err)
-					select {
-					case w.fatalErrCh <- err:
-					default:
-					}
-				}
-			})
-
-		case err, ok := <-fsWatcher.Errors:
-			if !ok {
-				return nil
-			}
-			w.logger.Error("fsnotify error", "error", err)
-		}
+	// Wait for context cancellation or fatal error
+	// ConfigMap and EndpointSlice updates are handled by informer callbacks
+	select {
+	case <-ctx.Done():
+		w.logger.Info("ghost watcher stopping")
+		return ctx.Err()
+	case err := <-w.fatalErrCh:
+		// Fatal reload error - routing is out of sync
+		w.logger.Error("fatal ghost reload error, exiting", "error", err)
+		return fmt.Errorf("fatal ghost reload: %w", err)
 	}
-}
-
-// loadRoutingConfig reads and parses the routing configuration.
-// Supports both v1 (hostname-only) and v2 (path-based) formats.
-func (w *Watcher) loadRoutingConfig() error {
-	data, err := os.ReadFile(w.routingConfigPath)
-	if err != nil {
-		return fmt.Errorf("os.ReadFile(%s): %w", w.routingConfigPath, err)
-	}
-
-	// Detect version
-	var versionCheck struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(data, &versionCheck); err != nil {
-		return fmt.Errorf("json.Unmarshal version: %w", err)
-	}
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	switch versionCheck.Version {
-	case 2:
-		config, err := ParseRoutingConfigV2(data)
-		if err != nil {
-			return err
-		}
-		w.routingConfigV2 = config
-		w.routingConfig = nil
-		w.updateServiceWatchV2(config)
-
-	case 1:
-		config, err := ParseRoutingConfig(data)
-		if err != nil {
-			return err
-		}
-		w.routingConfig = config
-		w.routingConfigV2 = nil
-		w.updateServiceWatchV1(config)
-
-	default:
-		return fmt.Errorf("unsupported routing config version: %d", versionCheck.Version)
-	}
-
-	w.logger.Info("routing config loaded",
-		"version", versionCheck.Version,
-		"vhosts", w.getVHostCount(),
-	)
-
-	return nil
 }
 
 // updateServiceWatchV1 updates the service watch map for v1 routing config.
@@ -596,4 +504,106 @@ func (w *Watcher) ListEndpointSlices(ctx context.Context, namespace, serviceName
 	return w.client.DiscoveryV1().EndpointSlices(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector.String(),
 	})
+}
+
+// handleConfigMapUpdate processes ConfigMap add/update events.
+func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMap) {
+	// Filter: only our ConfigMap
+	if cm.Name != w.configMapName {
+		return
+	}
+
+	w.mu.Lock()
+
+	// Deduplicate via ResourceVersion (but allow first update even if empty)
+	if cm.ResourceVersion != "" && cm.ResourceVersion == w.lastConfigMapRV {
+		w.mu.Unlock()
+		w.logger.Debug("skipping duplicate ConfigMap update", "resourceVersion", cm.ResourceVersion)
+		return
+	}
+
+	w.logger.Info("ConfigMap updated",
+		"name", cm.Name,
+		"resourceVersion", cm.ResourceVersion,
+	)
+
+	w.lastConfigMapRV = cm.ResourceVersion
+	shouldReload := w.initialSyncDone
+	w.mu.Unlock()
+
+	// Extract and validate routing config
+	data, err := ExtractRoutingConfig(cm)
+	if err != nil {
+		w.logger.Error("failed to extract routing config", "error", err)
+		return
+	}
+
+	if err := ValidateRoutingConfig(data); err != nil {
+		w.logger.Error("invalid routing config", "error", err)
+		return
+	}
+
+	// Parse routing config (v1 or v2)
+	w.mu.Lock()
+	var versionCheck struct {
+		Version int `json:"version"`
+	}
+	json.Unmarshal(data, &versionCheck)
+
+	switch versionCheck.Version {
+	case 2:
+		config, err := ParseRoutingConfigV2(data)
+		if err != nil {
+			w.mu.Unlock()
+			w.logger.Error("failed to parse routing config v2", "error", err)
+			return
+		}
+		w.routingConfigV2 = config
+		w.routingConfig = nil
+		w.updateServiceWatchV2(config)
+	case 1:
+		config, err := ParseRoutingConfig(data)
+		if err != nil {
+			w.mu.Unlock()
+			w.logger.Error("failed to parse routing config v1", "error", err)
+			return
+		}
+		w.routingConfig = config
+		w.routingConfigV2 = nil
+		w.updateServiceWatchV1(config)
+	}
+	w.mu.Unlock()
+
+	w.logger.Info("routing config loaded from ConfigMap",
+		"version", versionCheck.Version,
+	)
+
+	// Skip reload during initial sync
+	if !shouldReload {
+		return
+	}
+
+	// Regenerate ghost.json and trigger reload
+	if err := w.regenerateConfig(ctx); err != nil {
+		w.logger.Error("failed to regenerate ghost config", "error", err)
+		select {
+		case w.fatalErrCh <- err:
+		default:
+		}
+	}
+}
+
+// handleConfigMapDelete processes ConfigMap delete events.
+func (w *Watcher) handleConfigMapDelete(ctx context.Context, cm *corev1.ConfigMap) {
+	if cm.Name != w.configMapName {
+		return
+	}
+
+	w.logger.Error("ConfigMap deleted - fatal error", "name", cm.Name)
+
+	// Fatal: can't operate without routing config
+	select {
+	case w.fatalErrCh <- fmt.Errorf("ConfigMap %s deleted", cm.Name):
+	default:
+	}
 }

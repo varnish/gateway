@@ -76,14 +76,14 @@ type Config struct {
 	VarnishdExtraArgs []string // additional command-line arguments for varnishd
 
 	// Ghost configuration
-	RoutingConfigPath string // path to routing.json from operator
-	GhostConfigPath   string // path to write ghost.json
+	GhostConfigPath string // path to write ghost.json
 
 	// VCL configuration
 	VCLPath string // path to watch for VCL changes
 
 	// Kubernetes
-	Namespace string // kubernetes namespace to watch
+	Namespace     string // kubernetes namespace to watch
+	ConfigMapName string // name of ConfigMap containing routing.json and main.vcl
 
 	// Health endpoint
 	HealthAddr string // address for health endpoint
@@ -103,10 +103,10 @@ func loadConfig() (*Config, error) {
 		VarnishListen:     parseList(getEnvOrDefault("VARNISH_LISTEN", ":80,http")),
 		VarnishStorage:    parseList(getEnvOrDefault("VARNISH_STORAGE", "malloc,256m")),
 		VarnishdExtraArgs: parseList(os.Getenv("VARNISHD_EXTRA_ARGS")), // no default, optional
-		RoutingConfigPath: getEnvOrDefault("ROUTING_CONFIG_PATH", "/etc/varnish/routing.json"),
 		GhostConfigPath:   getEnvOrDefault("GHOST_CONFIG_PATH", "/var/run/varnish/ghost.json"),
 		VCLPath:           getEnvOrDefault("VCL_PATH", "/var/run/varnish/main.vcl"),
 		Namespace:         getEnvOrDefault("NAMESPACE", "default"),
+		ConfigMapName:     getEnvOrDefault("CONFIGMAP_NAME", "gateway-vcl"),
 		HealthAddr:        getEnvOrDefault("HEALTH_ADDR", ":8080"),
 	}
 
@@ -177,10 +177,10 @@ func run() error {
 		"varnishDir", cfg.VarnishDir,
 		"adminPort", cfg.AdminPort,
 		"varnishHTTPAddr", cfg.VarnishHTTPAddr,
-		"routingConfigPath", cfg.RoutingConfigPath,
 		"ghostConfigPath", cfg.GhostConfigPath,
 		"vclPath", cfg.VCLPath,
 		"namespace", cfg.Namespace,
+		"configMapName", cfg.ConfigMapName,
 	)
 
 	// Create Kubernetes client - try in-cluster first, fall back to kubeconfig
@@ -246,10 +246,10 @@ func run() error {
 	// 2. ghost watcher - watches routing config and EndpointSlices
 	ghostWatcher := ghost.NewWatcher(
 		k8sClient,
-		cfg.RoutingConfigPath,
 		cfg.GhostConfigPath,
 		cfg.VarnishHTTPAddr,
 		cfg.Namespace,
+		cfg.ConfigMapName,
 		logger.With("component", "ghost"),
 	)
 
