@@ -25,8 +25,22 @@ jobs:
       - name: Run Go vet
         run: go vet ./...
 
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: testbin
+          key: envtest-1.31.0-${{ runner.os }}
+
+      - name: Setup envtest binaries
+        run: |
+          make install-envtest
+          mkdir -p testbin
+          ./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path
+
       - name: Run Go tests
-        run: go test ./...
+        run: |
+          KUBEBUILDER_ASSETS="$(pwd)/$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
+            go test -tags=integration ./...
 
   test-rust:
     runs-on: ubuntu-latest
@@ -34,16 +48,34 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache Varnish packages
+        uses: actions/cache@v4
+        id: varnish-cache
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: varnish-dev-${{ runner.os }}-${{ hashFiles('.github/workflows/docker.yml') }}
+
       - name: Install Varnish
+        if: steps.varnish-cache.outputs.cache-hit != 'true'
         run: |
           curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
           sudo apt-get install -y varnish-dev
+
+      - name: Install cached Varnish
+        if: steps.varnish-cache.outputs.cache-hit == 'true'
+        run: |
+          sudo apt-get install -y varnish-dev || {
+            curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
+            sudo apt-get install -y varnish-dev
+          }
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-          working-directory: ghost
+          cache-workspaces: ghost
 
       - name: Build ghost VMOD
         run: cd ghost && cargo build
