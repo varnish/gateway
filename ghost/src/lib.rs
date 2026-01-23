@@ -174,9 +174,10 @@ mod ghost {
     pub fn init(path: &str) -> Result<(), VclError> {
         let config_path = PathBuf::from(path);
 
-        // Validate config file exists and is parseable
-        let _config = config::load(&config_path)
-            .map_err(|e| VclError::new(format!("ghost.init: {}", e)))?;
+        // Don't load config here - it may not exist yet during startup.
+        // Config will be loaded when ghost_backend is created in vcl_init,
+        // after chaperone has generated the initial ghost.json file.
+        // This avoids race conditions during pod startup.
 
         let state = GhostState { config_path };
 
