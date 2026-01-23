@@ -25,11 +25,16 @@ jobs:
       - name: Run Go vet
         run: go vet ./...
 
-      - name: Setup envtest
-        run: make envtest
+      - name: Setup envtest binaries
+        run: |
+          make install-envtest
+          mkdir -p testbin
+          ./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path
 
       - name: Run Go tests
-        run: make test-go
+        run: |
+          KUBEBUILDER_ASSETS="$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
+            go test ./...
 
   test-rust:
     runs-on: ubuntu-latest

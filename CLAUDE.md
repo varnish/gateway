@@ -274,12 +274,49 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 kubectl apply -f deploy/
 ```
 
+## Testing
+
+### Test Infrastructure
+
+The project uses **envtest** for controller integration tests. Envtest provides a real Kubernetes API server and etcd, allowing us to test Server-Side Apply (SSA) and other features that don't work with fake clients.
+
+**Test files:**
+- `internal/controller/*_test.go` - Unit tests using fake clients
+- `internal/controller/*_envtest_test.go` - Integration tests using envtest
+- `internal/controller/testdata/` - Gateway API CRDs for envtest
+
+### Running Tests
+
+```bash
+# Run all tests (Go + Rust)
+make test
+
+# Run only Go tests (includes envtest setup)
+make test-go
+
+# Run only envtest integration tests
+make test-envtest
+
+# Run tests manually with envtest
+make envtest  # Downloads kubebuilder binaries (etcd, kube-apiserver)
+KUBEBUILDER_ASSETS="$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
+  go test ./...
+```
+
+**Note:** Envtest downloads ~50MB of binaries (kube-apiserver, etcd) to `testbin/` on first run. These are cached for subsequent test runs.
+
+### Why Envtest?
+
+The Gateway controller uses **Server-Side Apply (SSA)** to manage resources. SSA requires a real API server to compute field ownership and handle conflicts. The fake client doesn't support SSA, so we use envtest for integration tests that verify:
+- Resource creation with proper field managers
+- Conflict resolution between multiple controllers
+- Status updates on Gateway and HTTPRoute resources
+
+See `internal/controller/gateway_controller_envtest_test.go` for examples.
+
 ## Running Locally
 
 ```bash
-# Run tests
-go test ./...
-
 # Build binaries
 make build-go
 
@@ -336,6 +373,16 @@ make docker-push
 - Vendor dependencies (`go mod vendor`)
 - Format with `gofmt`
 - Error returns should follow this pattern: `fmt.Errorf("io.Open(%s): %w", filename, err)`
+
+### Testing Conventions
+- **Unit tests**: Use fake clients for simple logic tests (`*_test.go`)
+- **Integration tests**: Use envtest for tests requiring real API server (`*_envtest_test.go`)
+- Use envtest when testing:
+  - Server-Side Apply (SSA)
+  - Field manager conflicts
+  - Status subresource updates
+  - Complex API server behavior
+- Add `//go:build !race` to envtest files (envtest doesn't work with race detector)
 
 ### Ghost VMOD (Rust)
 See `ghost/CLAUDE.md` for Rust-specific conventions, build instructions, and testing details.
