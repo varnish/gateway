@@ -387,13 +387,23 @@ func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, g
 		},
 	}
 
-	// Build listener statuses with only AttachedRoutes field (no conditions)
+	// Build listener statuses with only AttachedRoutes field
+	// We must include SupportedKinds even though Gateway controller owns it,
+	// because it's a required field for validation
 	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Status.Listeners))
 	for i, listener := range gateway.Status.Listeners {
 		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
 			Name:           listener.Name,
 			AttachedRoutes: attachedCount,
-			// DO NOT set Conditions or SupportedKinds - those are owned by Gateway controller
+			// Include SupportedKinds to satisfy API validation (required field)
+			// Gateway controller is the field owner, but we need to set it to avoid null
+			SupportedKinds: []gatewayv1.RouteGroupKind{
+				{
+					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
+					Kind:  "HTTPRoute",
+				},
+			},
+			// DO NOT set Conditions - those are owned by Gateway controller
 		}
 	}
 

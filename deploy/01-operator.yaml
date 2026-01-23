@@ -57,6 +57,10 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # EndpointSlices access (needed to grant to chaperone)
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
   # Leader election
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
@@ -106,14 +110,14 @@ spec:
       serviceAccountName: varnish-gateway-operator
       containers:
         - name: operator
-          image: ghcr.io/varnish/gateway-operator:0.4.2
+          image: ghcr.io/varnish/gateway-operator:0.4.10
           args:
             - --leader-elect=true
           env:
             - name: GATEWAY_CLASS_NAME
               value: "varnish"
             - name: GATEWAY_IMAGE
-              value: "ghcr.io/varnish/gateway-chaperone:0.4.2"
+              value: "ghcr.io/varnish/gateway-chaperone:0.4.10"
           ports:
             - name: metrics
               containerPort: 8080
