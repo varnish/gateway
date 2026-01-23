@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -48,6 +49,8 @@ func SetupEnvtest() (*EnvtestEnvironment, error) {
 		},
 		ErrorIfCRDPathMissing: true,
 		Scheme:                scheme,
+		// Use KUBEBUILDER_ASSETS env var if set, otherwise use default
+		BinaryAssetsDirectory: os.Getenv("KUBEBUILDER_ASSETS"),
 	}
 
 	// Start the test environment (kube-apiserver + etcd)
