@@ -42,6 +42,17 @@ func SetupEnvtest() (*EnvtestEnvironment, error) {
 	// CRDDirectoryPaths points to directories containing CRDs:
 	// - testdata: Gateway API CRDs (downloaded for testing)
 	// - deploy: Our custom CRDs (GatewayClassParameters)
+	//
+	// BinaryAssetsDirectory: If KUBEBUILDER_ASSETS is set, convert to absolute path
+	// (envtest requires absolute paths, but setup-envtest may return relative paths)
+	binaryAssetsDir := os.Getenv("KUBEBUILDER_ASSETS")
+	if binaryAssetsDir != "" && !filepath.IsAbs(binaryAssetsDir) {
+		absDir, err := filepath.Abs(binaryAssetsDir)
+		if err == nil {
+			binaryAssetsDir = absDir
+		}
+	}
+
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths: []string{
 			filepath.Join("testdata"),         // Gateway API CRDs
@@ -49,8 +60,7 @@ func SetupEnvtest() (*EnvtestEnvironment, error) {
 		},
 		ErrorIfCRDPathMissing: true,
 		Scheme:                scheme,
-		// Use KUBEBUILDER_ASSETS env var if set, otherwise use default
-		BinaryAssetsDirectory: os.Getenv("KUBEBUILDER_ASSETS"),
+		BinaryAssetsDirectory: binaryAssetsDir,
 	}
 
 	// Start the test environment (kube-apiserver + etcd)
