@@ -1,5 +1,8 @@
 name: Build and Push Docker Images
 
+# This workflow builds and pushes Docker images on version tags.
+# It verifies that CI tests passed on the tagged commit before building.
+
 on:
   push:
     tags:
@@ -10,84 +13,54 @@ env:
   IMAGE_PREFIX: ghcr.io/varnish
 
 jobs:
-  test-go:
+  verify-ci:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - name: Check if CI passed for this commit
+        uses: actions/github-script@v7
         with:
-          go-version-file: go.mod
-          cache: true
+          script: |
+            // Get the commit SHA for this tag
+            const tagRef = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.ref.replace('refs/', '')
+            });
+            const commitSha = tagRef.data.object.sha;
+            core.info(`Tag ${context.ref} points to commit ${commitSha}`);
 
-      - name: Run Go vet
-        run: go vet ./...
+            // Find CI workflow runs for this commit
+            const { data: runs } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'ci.yml',
+              head_sha: commitSha,
+              per_page: 1
+            });
 
-      - name: Cache envtest binaries
-        uses: actions/cache@v4
-        with:
-          path: testbin
-          key: envtest-1.31.0-${{ runner.os }}
+            if (runs.total_count === 0) {
+              core.setFailed(`No CI workflow run found for commit ${commitSha}. Did CI run when this commit was pushed to main?`);
+              return;
+            }
 
-      - name: Setup envtest binaries
-        run: |
-          make install-envtest
-          mkdir -p testbin
-          ./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path
+            const run = runs.workflow_runs[0];
+            core.info(`Found CI run: ${run.html_url}`);
+            core.info(`Status: ${run.status}, Conclusion: ${run.conclusion}`);
 
-      - name: Run Go tests
-        run: |
-          KUBEBUILDER_ASSETS="$(pwd)/$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
-            go test -tags=integration ./...
+            if (run.status !== 'completed') {
+              core.setFailed(`CI workflow is still ${run.status}. Wait for it to complete before tagging.`);
+              return;
+            }
 
-  test-rust:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+            if (run.conclusion !== 'success') {
+              core.setFailed(`CI workflow failed with conclusion: ${run.conclusion}. Fix tests before tagging.`);
+              return;
+            }
 
-      - name: Cache Varnish packages
-        uses: actions/cache@v4
-        id: varnish-cache
-        with:
-          path: |
-            /var/cache/apt/archives
-            /var/lib/apt/lists
-          key: varnish-dev-${{ runner.os }}-${{ hashFiles('.github/workflows/docker.yml') }}
-
-      - name: Install Varnish
-        if: steps.varnish-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
-          sudo apt-get install -y varnish-dev
-
-      - name: Install cached Varnish
-        if: steps.varnish-cache.outputs.cache-hit == 'true'
-        run: |
-          sudo apt-get install -y varnish-dev || {
-            curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
-            sudo apt-get install -y varnish-dev
-          }
-
-      - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: true
-          cache-workspaces: ghost
-
-      - name: Build ghost VMOD
-        run: cd ghost && cargo build
-
-      - name: Run clippy (warnings as errors)
-        run: cd ghost && cargo clippy -- -D warnings
-
-      - name: Run Rust tests
-        run: cd ghost && cargo test --lib
+            core.info('✓ CI workflow passed successfully');
 
   build-operator:
-    needs: [test-go, test-rust]
+    needs: [verify-ci]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -134,7 +107,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-chaperone:
-    needs: [test-go, test-rust]
+    needs: [verify-ci]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -181,7 +154,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-varnish:
-    needs: [test-go, test-rust]
+    needs: [verify-ci]
     runs-on: ubuntu-latest
     permissions:
       contents: read
