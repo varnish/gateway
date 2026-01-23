@@ -10,11 +10,12 @@
 - Route ordering by specificity
 - Extended ghost.json format with path rules
 
-## Phase 3: Advanced Request Matching
+## Phase 3: Complete
 
 - Header matching (`rule.Matches[].Headers`)
 - Method matching (`rule.Matches[].Method`)
 - Query parameter matching (`rule.Matches[].QueryParams`)
+- Priority-based route selection with additive specificity bonuses
 
 ## Phase 4: Traffic Management
 
@@ -190,11 +191,95 @@ http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 - **MAIN.backend_conn** - Backend connections (prometheus)
 - **MAIN.backend_fail** - Backend failures (prometheus)
 
+## Infrastructure & RBAC
+
+### Per-Gateway ClusterRoleBinding (OPEN ISSUE)
+
+**Problem**: Chaperone pods need permissions to watch EndpointSlices, but the current RBAC setup only grants permissions to the `default` namespace. When deploying a Gateway to other namespaces, chaperone cannot discover backends.
+
+**Root Cause**:
+- Operator creates namespace-specific ServiceAccounts for each Gateway
+- Existing ClusterRoleBinding only grants to `system:serviceaccounts:default` group
+- ServiceAccounts in other namespaces don't have permissions
+
+**Recommended Solution** (Option 1 from RBAC.md):
+- Operator creates a ClusterRoleBinding for each Gateway's ServiceAccount
+- Binding references the existing `varnish-gateway-chaperone` ClusterRole
+- Use label-based tracking for cleanup (`gateway.networking.k8s.io/gateway-name`)
+- On Gateway deletion, query and delete ClusterRoleBindings with matching labels
+
+**Implementation**:
+```go
+// In Gateway reconciler
+func (r *GatewayReconciler) createChaperoneCRB(ctx context.Context, gw *gatewayv1.Gateway) error {
+    crb := &rbacv1.ClusterRoleBinding{
+        ObjectMeta: metav1.ObjectMeta{
+            Name: fmt.Sprintf("varnish-gateway-chaperone-%s-%s", gw.Namespace, gw.Name),
+            Labels: map[string]string{
+                "gateway.networking.k8s.io/gateway-name": gw.Name,
+            },
+        },
+        RoleRef: rbacv1.RoleRef{
+            APIGroup: "rbac.authorization.k8s.io",
+            Kind:     "ClusterRole",
+            Name:     "varnish-gateway-chaperone",
+        },
+        Subjects: []rbacv1.Subject{
+            {
+                Kind:      "ServiceAccount",
+                Name:      fmt.Sprintf("%s-chaperone", gw.Name),
+                Namespace: gw.Namespace,
+            },
+        },
+    }
+    return r.Create(ctx, crb)
+}
+```
+
+**Workaround**: Manually create ClusterRoleBinding for each namespace until this is implemented.
+
+## Gateway API Conformance
+
+### Conflict Resolution
+
+Implement spec-defined conflict resolution for overlapping routes (e.g., two HTTPRoutes claiming the same hostname):
+
+**Precedence Rules** (from [GEP-713](https://gateway-api.sigs.k8s.io/geps/gep-713/)):
+1. **Oldest** resource (by `CreationTimestamp`) wins
+2. If still tied, **Alphabetical** order (by `Namespace/Name`) wins
+
+**Critical**: Follow the spec exactly to ensure conformance.
+
+### ReferenceGrant Validation
+
+Implement the ReferenceGrant pattern for cross-namespace Secret access (TLS certificates):
+
+- Gateway in Namespace A referencing Secret in Namespace B requires ReferenceGrant in Namespace B
+- Prevents "Secret data exfiltration" where users steal certificates from namespaces they don't own
+- Required for Gateway API conformance
+
+### Conformance Testing
+
+Use the Gateway API Conformance Suite to validate implementation:
+
+- Package: `sigs.k8s.io/gateway-api/conformance`
+- Runs battery of tests for hostname handling, path matching, status updates
+- Gold standard for idiomatic implementation
+- Should be integrated into CI pipeline
+
+### Policy Attachment Pattern
+
+Use Policy Attachment instead of GatewayClass-specific fields for Varnish configuration:
+
+- **Direct Policy**: Affects only the object it's attached to (e.g., `VarnishRetryPolicy` on HTTPRoute)
+- **Inherited Policy**: Defined at Gateway level, flows down to all HTTPRoutes
+- Use `metav1.Hierarchy` logic to traverse from Service to Gateway to find applicable policies
+
 ## Gateway Features
 
 - Listener hostname filtering
 - sectionName matching (`parentRef.SectionName`)
-- Cross-namespace routes (ReferenceGrant validation)
+- Cross-namespace routes (requires ReferenceGrant validation - see above)
 
 ## Observability
 
@@ -209,6 +294,6 @@ http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 
 ## Open Questions
 
-- Cross-namespace services: Chaperone needs RBAC to watch EndpointSlices across namespaces
-- Config size limits: ghost.json in ConfigMap has 1MB limit
+- Config size limits: ghost.json in ConfigMap has 1MB limit (consider using multiple ConfigMaps or custom storage)
 - Reload rate limiting: Add debouncing for rapid HTTPRoute changes?
+- Cross-namespace backend discovery: When ReferenceGrant support is added, chaperone will need cluster-wide EndpointSlice watch permissions
