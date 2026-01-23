@@ -185,13 +185,12 @@ set bereq.backend = router.backend();
 Create a new ghost backend instance.
 
 Must be called after `ghost.init()` has been called. This creates
-a director that manages native Varnish backends for all endpoints
-in the configuration.
+a director with empty routing state. Backends will be populated
+on the first `reload()` call after chaperone generates ghost.json.
 
 ##### Errors
 
-Returns an error if `ghost.init()` has not been called first, or if
-any backend creation fails.
+Returns an error if `ghost.init()` has not been called first.
 
 #### Method `BACKEND <object>.backend()`
 
