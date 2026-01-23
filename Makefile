@@ -124,8 +124,9 @@ build-ghost:
 	cd ghost && cargo build --release
 
 test-ghost:
-	cd ghost && cargo clippy -- -D warnings
-	cd ghost && cargo test --lib
+	cd ghost && cargo clippy --release -- -D warnings
+	cd ghost && cargo build --release
+	cd ghost && cargo test --release --lib
 	cd ghost && cargo test --release run_vtc_tests
 
 # ============================================================================

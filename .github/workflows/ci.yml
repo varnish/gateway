@@ -82,20 +82,26 @@ jobs:
             sudo apt-get install -y varnish-dev
           }
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev llvm-dev clang
+
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
           cache-workspaces: ghost
-
-      - name: Build ghost VMOD
-        run: cd ghost && cargo build
+          components: clippy
 
       - name: Run clippy (warnings as errors)
-        run: cd ghost && cargo clippy -- -D warnings
+        run: cd ghost && cargo clippy --release -- -D warnings
 
-      - name: Run Rust unit tests
-        run: cd ghost && cargo test --lib
+      - name: Build ghost VMOD in release mode
+        run: cd ghost && cargo build --release
+
+      - name: Run Rust unit tests in release mode
+        run: cd ghost && cargo test --release --lib
 
       - name: Run VTC integration tests
         run: cd ghost && cargo test --release run_vtc_tests
