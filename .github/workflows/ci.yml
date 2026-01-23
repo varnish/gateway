@@ -33,7 +33,7 @@ jobs:
 
       - name: Run Go tests
         run: |
-          KUBEBUILDER_ASSETS="$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
+          KUBEBUILDER_ASSETS="$(pwd)/$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
             go test -tags=integration ./...
 
   test-rust:

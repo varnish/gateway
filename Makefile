@@ -77,12 +77,12 @@ envtest: install-envtest
 
 # Run only envtest-based integration tests
 test-envtest: envtest
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
+	KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS_DIR)/$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
 		go test -v -tags=integration ./internal/controller/...
 
 test-go: envtest
 	go vet ./...
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
+	KUBEBUILDER_ASSETS="$(ENVTEST_ASSETS_DIR)/$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
 		go test -tags=integration ./...
 
 dist/operator:
