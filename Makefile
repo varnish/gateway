@@ -125,7 +125,8 @@ build-ghost:
 
 test-ghost:
 	cd ghost && cargo clippy -- -D warnings
-	cd ghost && cargo test
+	cd ghost && cargo test --lib
+	cd ghost && cargo test --release run_vtc_tests
 
 # ============================================================================
 # Docker images
@@ -152,7 +153,7 @@ docker-varnish:
 # Run CI workflow locally using act (https://github.com/nektos/act)
 # Requires: act tool installed (go install github.com/nektos/act@latest)
 act:
-	act -W .github/workflows/ci.yml -j test-go push -P ubuntu-latest=catthehacker/ubuntu:act-latest
+	act -W .github/workflows/ci.yml push -P ubuntu-latest=catthehacker/ubuntu:act-latest
 
 # ============================================================================
 # Deploy

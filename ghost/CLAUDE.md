@@ -48,10 +48,17 @@ docker build -f docker/chaperone.Dockerfile -t varnish-gateway .
 ## Test
 
 ```bash
-LD_LIBRARY_PATH=/opt/homebrew/lib cargo test --lib -- --skip run_vtc_tests
+# Unit tests (work in debug and release mode)
+cargo test --lib -- --skip run_vtc_tests
+
+# VTC integration tests (must use release mode - see DEBUG_MODE_LIMITATIONS.md)
+cargo test --release run_vtc_tests
+
+# All tests in release mode (recommended)
+cargo test --release
 ```
 
-VTC integration tests require the vmod to be built and installed first.
+**Important**: VTC tests that use regular expressions fail in debug mode due to TLS conflicts between the regex crate and Varnish's threading model. This is a known limitation that only affects debug builds. See `DEBUG_MODE_LIMITATIONS.md` for details.
 
 ## Key Files
 

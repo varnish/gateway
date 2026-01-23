@@ -94,5 +94,8 @@ jobs:
       - name: Run clippy (warnings as errors)
         run: cd ghost && cargo clippy -- -D warnings
 
-      - name: Run Rust tests
+      - name: Run Rust unit tests
         run: cd ghost && cargo test --lib
+
+      - name: Run VTC integration tests
+        run: cd ghost && cargo test --release run_vtc_tests

@@ -92,6 +92,13 @@ varnish v1 -vcl {
     }
 } -start
 
+# Initial reload to load configuration
+client c_init {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
 # Test 1: All three hosts should work with initial config
 client c1 {
     txreq -url "/?v=1" -hdr "Host: host1.example.com"

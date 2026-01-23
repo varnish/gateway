@@ -124,7 +124,11 @@ varnish v1 -vcl {
 
     sub vcl_recv {
         if (req.url == "/.varnish-ghost/reload") {
-            return (pass);
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
         }
     }
 
@@ -132,6 +136,13 @@ varnish v1 -vcl {
         set bereq.backend = router.backend();
     }
 } -start
+
+# Initial reload to load configuration
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
 
 # Test 1: Exact match should take priority over prefix matches
 client c1 {

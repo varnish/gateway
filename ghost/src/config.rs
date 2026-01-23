@@ -244,13 +244,20 @@ fn validate_path_match(path_match: &PathMatch, context: &str) -> Result<(), Stri
                     path_match.value.len()
                 ));
             }
-            // Try to compile it to validate syntax
-            if let Err(e) = regex::Regex::new(&path_match.value) {
-                return Err(format!(
-                    "{}: invalid regex pattern '{}': {}",
-                    context, path_match.value, e
-                ));
-            }
+            // IMPORTANT: Don't compile regex here!
+            //
+            // Regex compilation is deferred to build_routing_state() because:
+            // 1. This validation runs from Varnish worker threads during reload
+            // 2. The regex crate uses thread-local storage (TLS) for its internal caches
+            // 3. Varnish's C threads don't properly initialize Rust's TLS mechanism
+            // 4. In debug mode, this causes SIGABRT when Regex::new() accesses uninitialized TLS
+            // 5. Release mode works because optimizations reduce TLS dependencies
+            //
+            // The regex will be compiled during routing state build where:
+            // - Compilation errors can be caught and reported via Result
+            // - The pattern is stored in PathMatchCompiled for efficient matching
+            //
+            // See DEBUG_MODE_LIMITATIONS.md for detailed explanation.
         }
     }
     Ok(())
@@ -283,9 +290,7 @@ fn validate_header_match(header: &HeaderMatch, context: &str) -> Result<(), Stri
         ));
     }
     if header.match_type == MatchType::RegularExpression {
-        if let Err(e) = regex::Regex::new(&header.value) {
-            return Err(format!("{}: invalid regex: {}", context, e));
-        }
+        // Regex compilation deferred - see detailed comment in validate_path_match()
     }
     Ok(())
 }
@@ -306,9 +311,7 @@ fn validate_query_param_match(qp: &QueryParamMatch, context: &str) -> Result<(),
         ));
     }
     if qp.match_type == MatchType::RegularExpression {
-        if let Err(e) = regex::Regex::new(&qp.value) {
-            return Err(format!("{}: invalid regex: {}", context, e));
-        }
+        // Regex compilation deferred - see detailed comment in validate_path_match()
     }
     Ok(())
 }

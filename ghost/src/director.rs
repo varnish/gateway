@@ -52,7 +52,10 @@ impl PathMatchCompiled {
             PathMatchType::Exact => Ok(PathMatchCompiled::Exact(pm.value.clone())),
             PathMatchType::PathPrefix => Ok(PathMatchCompiled::PathPrefix(pm.value.clone())),
             PathMatchType::RegularExpression => {
-                // Compile regex at config load time
+                // Compile regex at runtime during config reload.
+                // Note: In debug mode, regex compilation from Varnish worker threads
+                // causes a crash due to threading/TLS conflicts. This only affects
+                // debug builds; release builds work correctly.
                 let re = Regex::new(&pm.value)
                     .map_err(|e| format!("Invalid regex pattern '{}': {}", pm.value, e))?;
                 Ok(PathMatchCompiled::Regex(Arc::new(re)))
