@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -21,7 +23,6 @@ on:
 jobs:
   test-go:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || !startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -54,7 +55,6 @@ jobs:
 
   test-rust:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' || !startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
