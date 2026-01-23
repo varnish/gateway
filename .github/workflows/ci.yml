@@ -34,7 +34,7 @@ jobs:
       - name: Run Go tests
         run: |
           KUBEBUILDER_ASSETS="$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
-            go test ./...
+            go test -tags=integration ./...
 
   test-rust:
     runs-on: ubuntu-latest
