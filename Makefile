@@ -4,7 +4,7 @@ OPERATOR_IMAGE := $(REGISTRY)/gateway-operator
 CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 
-.PHONY: help test build build-linux docker clean vendor
+.PHONY: help test build build-linux docker clean vendor act
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
 
 help:
@@ -30,9 +30,9 @@ help:
 	@echo "  make docker-operator  Build operator image"
 	@echo "  make docker-chaperone Build chaperone image"
 	@echo "  make docker-varnish   Build Varnish+Ghost image"
-	@echo "  make docker-push      Build and push single-arch images"
-	@echo "  make docker-buildx    Build and push images via buildx (amd64)"
-	@echo "  make docker-buildx-setup  Create buildx builder for multi-arch (run once)"
+	@echo ""
+	@echo "CI/Testing:"
+	@echo "  make act              Run CI workflow locally with act (requires act tool)"
 	@echo ""
 	@echo "Deploy:"
 	@echo "  make deploy-update    Update deploy/ manifests with current version"
@@ -145,42 +145,14 @@ docker-varnish:
 	docker build -t $(VARNISH_IMAGE):$(VERSION) -f docker/varnish.Dockerfile .
 	docker tag $(VARNISH_IMAGE):$(VERSION) $(VARNISH_IMAGE):latest
 
-# Push images (single arch)
-docker-push: docker
-	docker push $(OPERATOR_IMAGE):$(VERSION)
-	docker push $(OPERATOR_IMAGE):latest
-	docker push $(CHAPERONE_IMAGE):$(VERSION)
-	docker push $(CHAPERONE_IMAGE):latest
-	docker push $(VARNISH_IMAGE):$(VERSION)
-	docker push $(VARNISH_IMAGE):latest
+# ============================================================================
+# CI/Testing
+# ============================================================================
 
-# Multi-arch build and push (amd64 only for now)
-PLATFORMS := linux/amd64
-BUILDX_BUILDER := varnish-gateway
-
-docker-buildx-setup:
-	docker buildx create --name $(BUILDX_BUILDER) --use || docker buildx use $(BUILDX_BUILDER)
-	docker buildx inspect --bootstrap
-
-docker-buildx: docker-buildx-operator docker-buildx-chaperone docker-buildx-varnish
-
-docker-buildx-operator:
-	docker buildx build --platform $(PLATFORMS) \
-		-t $(OPERATOR_IMAGE):$(VERSION) \
-		-t $(OPERATOR_IMAGE):latest \
-		-f docker/operator.Dockerfile --push .
-
-docker-buildx-chaperone:
-	docker buildx build --platform $(PLATFORMS) \
-		-t $(CHAPERONE_IMAGE):$(VERSION) \
-		-t $(CHAPERONE_IMAGE):latest \
-		-f docker/chaperone.Dockerfile --push .
-
-docker-buildx-varnish:
-	docker buildx build --platform $(PLATFORMS) \
-		-t $(VARNISH_IMAGE):$(VERSION) \
-		-t $(VARNISH_IMAGE):latest \
-		-f docker/varnish.Dockerfile --push .
+# Run CI workflow locally using act (https://github.com/nektos/act)
+# Requires: act tool installed (go install github.com/nektos/act@latest)
+act:
+	act -W .github/workflows/ci.yml -j test-go push -P ubuntu-latest=catthehacker/ubuntu:act-latest
 
 # ============================================================================
 # Deploy
