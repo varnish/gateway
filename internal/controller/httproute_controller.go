@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -369,21 +370,36 @@ func (r *HTTPRouteReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1
 }
 
 // updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.
+// Creates a minimal patch object to avoid conflicts with Gateway controller.
 func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
 	// Count routes per listener
 	attachedCount := int32(len(routes))
 
-	// Update each listener's AttachedRoutes count
-	for i := range gateway.Status.Listeners {
-		gateway.Status.Listeners[i].AttachedRoutes = attachedCount
+	// Create minimal Gateway object for SSA patch - only include fields we own
+	patch := &gatewayv1.Gateway{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: gatewayv1.GroupVersion.String(),
+			Kind:       "Gateway",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gateway.Name,
+			Namespace: gateway.Namespace,
+		},
+	}
+
+	// Build listener statuses with only AttachedRoutes field (no conditions)
+	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Status.Listeners))
+	for i, listener := range gateway.Status.Listeners {
+		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
+			Name:           listener.Name,
+			AttachedRoutes: attachedCount,
+			// DO NOT set Conditions or SupportedKinds - those are owned by Gateway controller
+		}
 	}
 
 	// Use Server-Side Apply - HTTPRoute controller owns AttachedRoutes field
 	// Gateway controller owns conditions - no conflicts!
-	// Prepare for SSA: set GVK and ensure managedFields is cleared
-	gateway.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("Gateway"))
-	gateway.SetManagedFields(nil)
-	if err := r.Status().Patch(ctx, gateway, client.Apply,
+	if err := r.Status().Patch(ctx, patch, client.Apply,
 		client.FieldOwner("varnish-httproute-controller"),
 		client.ForceOwnership); err != nil {
 		return fmt.Errorf("r.Status().Patch: %w", err)

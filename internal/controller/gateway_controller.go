@@ -99,14 +99,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// 5. Reconcile child resources
 	if err := r.reconcileResources(ctx, &gateway); err != nil {
-		// Use Server-Side Apply for status update to avoid conflicts
-		r.setConditions(&gateway, false, err.Error())
-		// Prepare for SSA: set GVK and ensure managedFields is cleared
-		gateway.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("Gateway"))
-		gateway.ManagedFields = nil
-		if statusErr := r.Status().Patch(ctx, &gateway, client.Apply,
-			client.FieldOwner("varnish-gateway-controller"),
-			client.ForceOwnership); statusErr != nil {
+		// Update status to reflect error
+		if statusErr := r.updateGatewayStatus(ctx, &gateway, false, err.Error()); statusErr != nil {
 			log.Error("failed to update status", "error", statusErr)
 		}
 		return ctrl.Result{}, err
@@ -114,14 +108,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// 6. Update status to Accepted/Programmed
 	// Use Server-Side Apply for status update - no conflicts with other controllers
-	r.setConditions(&gateway, true, "")
-	// Prepare for SSA: set GVK and ensure managedFields is cleared
-	gateway.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("Gateway"))
-	gateway.SetManagedFields(nil)
-	if err := r.Status().Patch(ctx, &gateway, client.Apply,
-		client.FieldOwner("varnish-gateway-controller"),
-		client.ForceOwnership); err != nil {
-		return ctrl.Result{}, fmt.Errorf("r.Status().Patch: %w", err)
+	if err := r.updateGatewayStatus(ctx, &gateway, true, ""); err != nil {
+		return ctrl.Result{}, fmt.Errorf("r.updateGatewayStatus: %w", err)
 	}
 
 	log.Debug("gateway reconciliation complete")
@@ -237,6 +225,51 @@ func needsDeploymentUpdate(existing, desired *appsv1.Deployment) bool {
 		desired.Spec.Template.Spec.Containers[0].Image
 }
 
+// updateGatewayStatus updates Gateway status using Server-Side Apply.
+// Creates a minimal patch object to avoid conflicts with HTTPRoute controller.
+func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *gatewayv1.Gateway, success bool, errMsg string) error {
+	// Create minimal Gateway object for SSA patch - only include fields we own
+	patch := &gatewayv1.Gateway{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: gatewayv1.GroupVersion.String(),
+			Kind:       "Gateway",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gateway.Name,
+			Namespace: gateway.Namespace,
+		},
+	}
+
+	// Set gateway-level conditions
+	if success {
+		status.SetGatewayAccepted(patch, true,
+			string(gatewayv1.GatewayReasonAccepted),
+			"Gateway accepted by controller")
+		status.SetGatewayProgrammed(patch, true,
+			string(gatewayv1.GatewayReasonProgrammed),
+			"Gateway configuration programmed")
+	} else {
+		status.SetGatewayAccepted(patch, false,
+			string(gatewayv1.GatewayReasonInvalid),
+			errMsg)
+		status.SetGatewayProgrammed(patch, false,
+			string(gatewayv1.GatewayReasonInvalid),
+			errMsg)
+	}
+
+	// Set listener statuses (conditions and SupportedKinds only, not AttachedRoutes)
+	r.setListenerStatusesForPatch(patch, gateway)
+
+	// Apply the patch
+	if err := r.Status().Patch(ctx, patch, client.Apply,
+		client.FieldOwner("varnish-gateway-controller"),
+		client.ForceOwnership); err != nil {
+		return fmt.Errorf("r.Status().Patch: %w", err)
+	}
+
+	return nil
+}
+
 // setConditions updates Gateway status conditions.
 func (r *GatewayReconciler) setConditions(gateway *gatewayv1.Gateway, success bool, errMsg string) {
 	if success {
@@ -257,6 +290,66 @@ func (r *GatewayReconciler) setConditions(gateway *gatewayv1.Gateway, success bo
 
 	// Set listener statuses
 	r.setListenerStatuses(gateway)
+}
+
+// setListenerStatusesForPatch sets listener statuses for SSA patch.
+// Only sets fields owned by Gateway controller (conditions, SupportedKinds).
+// Does NOT set AttachedRoutes (owned by HTTPRoute controller).
+func (r *GatewayReconciler) setListenerStatusesForPatch(patch *gatewayv1.Gateway, original *gatewayv1.Gateway) {
+	// Build map of existing listener statuses to preserve condition times
+	existingStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
+	for _, ls := range original.Status.Listeners {
+		existingStatuses[ls.Name] = ls
+	}
+
+	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(original.Spec.Listeners))
+
+	for i, listener := range original.Spec.Listeners {
+		existing, hasExisting := existingStatuses[listener.Name]
+
+		// Preserve existing condition times if status unchanged
+		acceptedTime := metav1.Now()
+		programmedTime := metav1.Now()
+		if hasExisting {
+			for _, c := range existing.Conditions {
+				if c.Type == string(gatewayv1.ListenerConditionAccepted) && c.Status == metav1.ConditionTrue {
+					acceptedTime = c.LastTransitionTime
+				}
+				if c.Type == string(gatewayv1.ListenerConditionProgrammed) && c.Status == metav1.ConditionTrue {
+					programmedTime = c.LastTransitionTime
+				}
+			}
+		}
+
+		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
+			Name: listener.Name,
+			SupportedKinds: []gatewayv1.RouteGroupKind{
+				{
+					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
+					Kind:  "HTTPRoute",
+				},
+			},
+			// DO NOT set AttachedRoutes - that's owned by HTTPRoute controller
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(gatewayv1.ListenerConditionAccepted),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: original.Generation,
+					LastTransitionTime: acceptedTime,
+					Reason:             string(gatewayv1.ListenerReasonAccepted),
+					Message:            "Listener accepted",
+				},
+				{
+					Type:               string(gatewayv1.ListenerConditionProgrammed),
+					Status:             metav1.ConditionTrue,
+					ObservedGeneration: original.Generation,
+					LastTransitionTime: programmedTime,
+					Reason:             string(gatewayv1.ListenerReasonProgrammed),
+					Message:            "Listener programmed",
+				},
+			},
+		}
+	}
 }
 
 // setListenerStatuses updates status for each Gateway listener.
