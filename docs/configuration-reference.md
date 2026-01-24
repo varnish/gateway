@@ -44,12 +44,15 @@ Additional command-line arguments passed to varnishd. Each array element is a se
 
 | Args | Description |
 |------|-------------|
+| `-p thread_pool_stack=160k` | Worker thread stack size (recommended for ghost VMOD, default: 80k) |
 | `-p thread_pools=N` | Number of thread pools (default: 2) |
 | `-p thread_pool_min=N` | Min threads per pool |
 | `-p thread_pool_max=N` | Max threads per pool |
 | `-p workspace_client=N` | Client workspace size (e.g., `256k`) |
 | `-s malloc,SIZE` | Additional malloc storage (e.g., `512m`, `2g`) |
 | `-s file,PATH,SIZE` | File-based storage |
+
+**Note:** The ghost VMOD uses Rust regex which benefits from increased stack size (160k vs default 80k), especially in debug builds. This is safe and adds minimal memory overhead (~16MB for typical thread pool configurations).
 
 **Varnish Enterprise:**
 
@@ -110,6 +113,8 @@ metadata:
   name: varnish-params
 spec:
   varnishdExtraArgs:
+    - "-p"
+    - "thread_pool_stack=160k"
     - "-s"
     - "malloc,1g"
     - "-p"
@@ -152,6 +157,8 @@ spec:
     name: my-vcl
     namespace: default
   varnishdExtraArgs:
+    - "-p"
+    - "thread_pool_stack=160k"
     - "-p"
     - "thread_pools=2"
 ```

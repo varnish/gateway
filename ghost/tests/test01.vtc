@@ -46,7 +46,7 @@ shell {
 EOF
 }
 
-varnish v1 -vcl {
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
     import ghost from "${vmod}";
 
     backend dummy none;

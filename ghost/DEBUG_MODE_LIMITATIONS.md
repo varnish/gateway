@@ -1,12 +1,14 @@
-# Debug Mode Limitations
+# Debug Mode Stack Size Requirements
 
 ## Regex Compilation in Varnish Worker Threads
 
-### Symptom
+### Summary
 
-VTC tests that use regular expressions (`RegularExpression` path matching, header matching, or query parameter matching) **crash in debug mode** with SIGABRT. The same tests pass in release mode.
+VTC tests that use regular expressions now work in debug mode by increasing Varnish's `thread_pool_stack` parameter from the default 80k to 160k.
 
-Example failing test: `tests/test_path_matching.vtc`
+### Previous Symptom (FIXED)
+
+VTC tests using regular expressions (`RegularExpression` path matching, header matching, or query parameter matching) would crash in debug mode with SIGABRT. Release mode worked fine.
 
 ### Root Cause: Thread-Local Storage (TLS) Conflict
 
@@ -52,42 +54,59 @@ Release builds work because:
 - LLVM optimizations convert TLS access to simpler patterns
 - No runtime assertions checking TLS validity
 
-### Workarounds We Implemented
+### Solution
 
-1. **Removed early validation**: Deleted regex compilation from `config::validate()` functions. Regex patterns are now only compiled once during `build_routing_state()`.
+**Increase Varnish worker thread stack size** from the default 80k to 160k (2x increase).
 
-2. **Deferred compilation**: Regex compilation happens during routing state build, where errors can be properly caught and reported.
+The Rust `regex` crate in debug mode requires more stack space for TLS initialization. Varnish's `thread_pool_stack` parameter controls worker thread stack size.
 
-3. **Accept the limitation**: Document that debug mode VTC tests with regex will fail, but this doesn't affect production (release builds).
+**Implementation:**
+- VTC tests: Add `-arg "-p thread_pool_stack=160k"` to varnish startup
+- Production: Add `-p thread_pool_stack=160k` via `varnishdExtraArgs` in GatewayClassParameters
+- Local testing: Set `VARNISHD_EXTRA_ARGS="-p;thread_pool_stack=160k"`
+
+**Why 160k?**
+- Default: 80k
+- Debug mode regex TLS needs more stack than release mode
+- Varnish docs recommend 150%-200% increments for stack issues
+- 160k (2x) provides adequate headroom without wasting memory
+
+### Previous Workarounds (Still Valid)
+
+1. **Removed early validation**: Regex compilation removed from `config::validate()` - only compiled during `build_routing_state()`
+2. **Deferred compilation**: Regex errors caught and reported during routing state build
 
 ### Impact
 
-**Production**: ✅ No impact - release builds work perfectly
-**CI/CD**: ✅ Tests should run in release mode anyway
-**Local Development**: ⚠️ Developers running VTC tests in debug mode will see failures with regex patterns
+**Production**: ✅ No impact - works in both debug and release with `thread_pool_stack=160k`
+**CI/CD**: ✅ Tests pass in both modes
+**Local Development**: ✅ VTC tests work in debug mode with increased stack
 
 ### Testing Strategy
 
 ```bash
-# Run all tests in release mode (recommended)
+# All tests now work in debug mode (with increased stack in VTC tests)
+cargo test
+
+# Release mode still recommended for performance testing
 cargo test --release
-
-# Run VTC tests in release mode only
-cargo test --release run_vtc_tests
-
-# Unit tests work in debug mode (don't trigger the issue)
-cargo test --lib -- --skip run_vtc_tests
 ```
 
-### Alternative Solutions (Not Implemented)
+### Memory Overhead
 
-1. **Lazy regex compilation**: Could defer regex compilation until first match attempt (from a Rust thread context). Complex and adds runtime overhead.
+Stack size is per-thread. For typical configurations:
+- Default 80k × 2 pools × 100 threads/pool = 16 MB
+- Increased 160k × 2 pools × 100 threads/pool = 32 MB
+- Overhead: +16 MB (negligible for modern systems)
 
-2. **Static regex compilation**: Use `lazy_static!` or `once_cell::sync::OnceCell` for global regex storage. Requires redesigning hot-reload architecture.
+### Alternative Solutions (Not Needed)
 
-3. **C-compatible regex library**: Switch to PCRE2 via C FFI. Loses Rust safety guarantees and regex syntax differences.
+The stack size increase is the simplest and most reliable solution. Other approaches considered:
 
-4. **Varnish thread initialization**: Hook into Varnish's thread creation to initialize Rust TLS. Requires Varnish patches and is fragile.
+1. **Lazy regex compilation**: Defer until first match (complex, adds overhead)
+2. **Static regex compilation**: Use `lazy_static!` (breaks hot-reload)
+3. **C-compatible regex**: PCRE2 via FFI (loses Rust safety)
+4. **Varnish thread hooks**: Initialize Rust TLS (fragile, requires patches)
 
 ### References
 

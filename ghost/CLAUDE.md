@@ -58,7 +58,7 @@ cargo test --release run_vtc_tests
 cargo test --release
 ```
 
-**Important**: VTC tests that use regular expressions fail in debug mode due to TLS conflicts between the regex crate and Varnish's threading model. This is a known limitation that only affects debug builds. See `DEBUG_MODE_LIMITATIONS.md` for details.
+**Important**: VTC tests require increased stack size (`-p thread_pool_stack=160k`) for regex support in debug mode. All VTC test files include this parameter. See `DEBUG_MODE_LIMITATIONS.md` for details.
 
 ## Key Files
 

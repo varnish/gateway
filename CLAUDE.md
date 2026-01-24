@@ -90,6 +90,7 @@ See TODO.md for details.
 - Go 1.21+
 - Rancher Desktop (or any local k8s)
 - kubectl configured to talk to your cluster
+- Rust 1.75+ (for ghost VMOD development)
 
 ### Install Gateway API CRDs
 
@@ -329,6 +330,7 @@ GATEWAY_IMAGE=varnish-gateway:local \
 ./dist/operator
 
 # Run chaperone standalone (uses ~/.kube/config)
+# Note: Set thread_pool_stack for regex support in debug builds
 NAMESPACE=default \
 VARNISH_ADMIN_PORT=6082 \
 VARNISH_HTTP_ADDR=localhost:8080 \
@@ -337,6 +339,7 @@ ROUTING_CONFIG_PATH=/tmp/routing.json \
 GHOST_CONFIG_PATH=/tmp/ghost.json \
 WORK_DIR=/tmp/varnish \
 HEALTH_ADDR=:8081 \
+VARNISHD_EXTRA_ARGS="-p;thread_pool_stack=160k" \
 ./dist/chaperone
 ```
 
