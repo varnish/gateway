@@ -1,0 +1,75 @@
+varnishtest "ghost with empty configuration (0 vhosts)"
+
+# Test that ghost correctly handles an empty configuration with no vhosts defined.
+# This is a valid scenario during startup before any routes are configured.
+# Expected behavior: all requests should return 404.
+
+# Write config file with 0 vhosts
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {}
+}
+EOF
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        # Intercept reload requests and bypass cache
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+    }
+
+    sub vcl_backend_fetch {
+        set bereq.backend = router.backend();
+    }
+} -start
+
+# Initial reload to load empty configuration
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# Test 1: Any vhost should return 404 with JSON error
+client c1 {
+    txreq -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.Content-Type == "application/json"
+    expect resp.body == "{\"error\": \"vhost not found\"}"
+} -run
+
+# Test 2: Another vhost should also return 404
+client c2 {
+    txreq -hdr "Host: www.example.com"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.Content-Type == "application/json"
+    expect resp.body == "{\"error\": \"vhost not found\"}"
+} -run
+
+# Test 3: Wildcard-style hostname should also return 404
+client c3 {
+    txreq -hdr "Host: anything.staging.example.com"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.Content-Type == "application/json"
+    expect resp.body == "{\"error\": \"vhost not found\"}"
+} -run

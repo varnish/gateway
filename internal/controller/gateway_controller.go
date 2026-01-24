@@ -134,10 +134,12 @@ func (r *GatewayReconciler) reconcileDelete(ctx context.Context, gateway *gatewa
 
 // reconcileResources creates or updates all child resources for a Gateway.
 func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gatewayv1.Gateway) error {
-	// Fetch GatewayClassParameters for extra args
+	// Fetch GatewayClassParameters for extra args and logging config
 	var varnishdExtraArgs []string
+	var logging *gatewayparamsv1alpha1.VarnishLogging
 	if params := r.getGatewayClassParameters(ctx, gateway); params != nil {
 		varnishdExtraArgs = params.Spec.VarnishdExtraArgs
+		logging = params.Spec.Logging
 	}
 
 	// Create resources in order (some depend on others existing)
@@ -148,7 +150,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		r.buildServiceAccount(gateway),
 		r.buildChaperoneRole(gateway),
 		r.buildChaperoneRoleBinding(gateway),
-		r.buildDeployment(gateway, varnishdExtraArgs),
+		r.buildDeployment(gateway, varnishdExtraArgs, logging),
 		r.buildService(gateway),
 	}
 

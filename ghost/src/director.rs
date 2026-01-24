@@ -10,9 +10,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
+use parking_lot::RwLock;
 use regex::Regex;
 use varnish::ffi::VCL_BACKEND;
-use varnish::vcl::{Backend, Buffer, Ctx, HttpHeaders, StrOrBytes, VclDirector, VclError};
+use varnish::vcl::{Backend, Buffer, Ctx, HttpHeaders, LogTag, StrOrBytes, VclDirector, VclError};
 
 use crate::backend_pool::BackendPool;
 use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
@@ -349,6 +350,8 @@ pub struct GhostDirector {
     config_path: PathBuf,
     /// Synthetic 404 backend for undefined vhosts (stored backend must outlive this director)
     not_found_backend: SendSyncBackend,
+    /// Last reload error message (for debugging)
+    last_error: RwLock<Option<String>>,
 }
 
 impl GhostDirector {
@@ -371,6 +374,7 @@ impl GhostDirector {
             backends: ArcSwap::new(Arc::new(backends)),
             config_path,
             not_found_backend: not_found_ptr,
+            last_error: RwLock::new(None),
         };
 
         Ok((director, not_found_backend))
@@ -383,9 +387,23 @@ impl GhostDirector {
         let mut backend_pool = (**current_backends).clone();
 
         // Load config
-        let config = crate::config::load(&self.config_path)?;
-        let new_routing = build_routing_state(&config, &mut backend_pool, ctx)
-            .map_err(|e| format!("Failed to build routing state: {}", e))?;
+        let config = crate::config::load(&self.config_path).map_err(|e| {
+            let error_msg = format!("Ghost reload failed: {}", e);
+            // Log to VSL for visibility in varnishlog
+            ctx.log(LogTag::Error, &error_msg);
+            // Store for VCL access
+            *self.last_error.write() = Some(error_msg.clone());
+            error_msg
+        })?;
+
+        let new_routing = build_routing_state(&config, &mut backend_pool, ctx).map_err(|e| {
+            let error_msg = format!("Ghost reload failed: {}", e);
+            // Log to VSL for visibility in varnishlog
+            ctx.log(LogTag::Error, &error_msg);
+            // Store for VCL access
+            *self.last_error.write() = Some(error_msg.clone());
+            error_msg
+        })?;
 
         // Collect all backend keys referenced in the new routing state
         let referenced_keys = collect_referenced_backends(&new_routing);
@@ -397,7 +415,15 @@ impl GhostDirector {
         self.routing.store(Arc::new(new_routing));
         self.backends.store(Arc::new(backend_pool));
 
+        // Clear error on success
+        *self.last_error.write() = None;
+
         Ok(())
+    }
+
+    /// Get the last reload error message (if any)
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.read().clone()
     }
 }
 

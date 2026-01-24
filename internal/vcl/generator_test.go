@@ -110,6 +110,11 @@ func TestGenerate_GhostReloadHandler(t *testing.T) {
 		t.Error("expected vcl_recv to return synth(200) on successful reload")
 	}
 
+	// Should call router.last_error() on failure
+	if !strings.Contains(result, "set req.http.X-Ghost-Error = router.last_error()") {
+		t.Error("expected vcl_recv to call router.last_error() and store in req.http.X-Ghost-Error on failed reload")
+	}
+
 	// Should return synth(500) on failure
 	if !strings.Contains(result, `return (synth(500, "Reload failed"))`) {
 		t.Error("expected vcl_recv to return synth(500) on failed reload")
@@ -118,6 +123,30 @@ func TestGenerate_GhostReloadHandler(t *testing.T) {
 	// Should NOT have vcl_backend_error (reload handled in vcl_recv)
 	if strings.Contains(result, "sub vcl_backend_error {") {
 		t.Error("should not have vcl_backend_error (reload handled in vcl_recv)")
+	}
+}
+
+func TestGenerate_GhostErrorSurfacing(t *testing.T) {
+	result := Generate(nil, GeneratorConfig{})
+
+	// Check vcl_synth is generated
+	if !strings.Contains(result, "sub vcl_synth {") {
+		t.Error("expected vcl_synth subroutine to be generated")
+	}
+
+	// Check vcl_synth copies error header for reload endpoint
+	if !strings.Contains(result, `if (req.url == "/.varnish-ghost/reload")`) {
+		t.Error("expected vcl_synth to check for reload endpoint")
+	}
+
+	// Check vcl_synth copies req.http.X-Ghost-Error to resp.http.x-ghost-error
+	if !strings.Contains(result, "set resp.http.x-ghost-error = req.http.X-Ghost-Error") {
+		t.Error("expected vcl_synth to copy X-Ghost-Error from request to response header")
+	}
+
+	// Check comment explaining purpose
+	if !strings.Contains(result, "Surface ghost reload errors") {
+		t.Error("expected comment explaining error surfacing in vcl_synth")
 	}
 }
 

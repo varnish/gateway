@@ -45,7 +45,18 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("        if (router.reload()) {\n")
 	sb.WriteString("            return (synth(200, \"OK\"));\n")
 	sb.WriteString("        } else {\n")
+	sb.WriteString("            set req.http.X-Ghost-Error = router.last_error();\n")
 	sb.WriteString("            return (synth(500, \"Reload failed\"));\n")
+	sb.WriteString("        }\n")
+	sb.WriteString("    }\n")
+	sb.WriteString("}\n\n")
+
+	// Generate vcl_synth - surface reload errors
+	sb.WriteString("sub vcl_synth {\n")
+	sb.WriteString("    # Surface ghost reload errors to chaperone via header\n")
+	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\") {\n")
+	sb.WriteString("        if (req.http.X-Ghost-Error) {\n")
+	sb.WriteString("            set resp.http.x-ghost-error = req.http.X-Ghost-Error;\n")
 	sb.WriteString("        }\n")
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")

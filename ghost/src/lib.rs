@@ -313,10 +313,12 @@ mod ghost {
         /// New backends are created as needed, existing backends are preserved
         /// for connection pooling.
         ///
+        /// Errors are logged to VSL (varnishlog) and can be retrieved via `last_error()`.
+        ///
         /// # Returns
         ///
         /// - `true` on success
-        /// - `false` on failure
+        /// - `false` on failure (check `last_error()` for details)
         ///
         /// # Example
         ///
@@ -326,6 +328,7 @@ mod ghost {
         ///         if (router.reload()) {
         ///             return (synth(200, "OK"));
         ///         } else {
+        ///             set req.http.X-Ghost-Error = router.last_error();
         ///             return (synth(500, "Reload failed"));
         ///         }
         ///     }
@@ -333,6 +336,32 @@ mod ghost {
         /// ```
         pub fn reload(&self, ctx: &mut Ctx) -> bool {
             self.ghost_director.reload(ctx).is_ok()
+        }
+
+        /// Get the last reload error message.
+        ///
+        /// Returns the error message from the most recent failed reload attempt,
+        /// or an empty string if the last reload succeeded or no reload has been attempted.
+        ///
+        /// # Returns
+        ///
+        /// The error message as a string, or empty string if no error.
+        ///
+        /// # Example
+        ///
+        /// ```vcl
+        /// sub vcl_recv {
+        ///     if (req.url == "/.varnish-ghost/reload") {
+        ///         if (!router.reload()) {
+        ///             set req.http.X-Ghost-Error = router.last_error();
+        ///             return (synth(500, req.http.X-Ghost-Error));
+        ///         }
+        ///         return (synth(200, "OK"));
+        ///     }
+        /// }
+        /// ```
+        pub fn last_error(&self) -> String {
+            self.ghost_director.last_error().unwrap_or_default()
         }
     }
 }

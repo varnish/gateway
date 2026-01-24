@@ -33,6 +33,38 @@ type GatewayClassParametersSpec struct {
 	// controlled by the operator.
 	// +optional
 	VarnishdExtraArgs []string `json:"varnishdExtraArgs,omitempty"`
+
+	// Logging configures varnish log output via a sidecar container.
+	// When enabled, a sidecar container runs varnishlog or varnishncsa,
+	// streaming logs to stdout where they're captured by Kubernetes.
+	// +optional
+	Logging *VarnishLogging `json:"logging,omitempty"`
+}
+
+// VarnishLogging configures varnish logging via a sidecar container.
+type VarnishLogging struct {
+	// Mode determines which varnish logging tool to use.
+	// Valid values: "varnishlog", "varnishncsa"
+	// Future: "varnishlog-json" when available
+	// +kubebuilder:validation:Enum=varnishlog;varnishncsa
+	Mode string `json:"mode"`
+
+	// Format specifies the output format for varnishncsa.
+	// Only used when mode is "varnishncsa".
+	// Example: "%h %l %u %t \"%r\" %s %b"
+	// See varnishncsa(1) for format specification.
+	// +optional
+	Format string `json:"format,omitempty"`
+
+	// ExtraArgs specifies additional arguments to pass to the logging tool.
+	// Each element is a separate argument (e.g., ["-g", "request", "-q", "ReqURL ~ \"/api\""])
+	// +optional
+	ExtraArgs []string `json:"extraArgs,omitempty"`
+
+	// Image specifies the container image containing varnish logging tools.
+	// Defaults to the same image as the gateway if not specified.
+	// +optional
+	Image string `json:"image,omitempty"`
 }
 
 // ConfigMapReference is a reference to a ConfigMap in a specific namespace.

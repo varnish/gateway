@@ -9,10 +9,12 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/vcl"
 )
 
@@ -27,6 +29,16 @@ const (
 	// Chaperone health port
 	chaperoneHealthPort = 8081
 )
+
+// mustParseQuantity parses a resource quantity string and panics on error.
+// Used for hardcoded resource values that should never fail.
+func mustParseQuantity(s string) resource.Quantity {
+	q, err := resource.ParseQuantity(s)
+	if err != nil {
+		panic(fmt.Sprintf("invalid resource quantity %q: %v", s, err))
+	}
+	return q
+}
 
 // buildVCLConfigMap creates the ConfigMap containing VCL and routing.json.
 func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway) *corev1.ConfigMap {
@@ -153,7 +165,8 @@ func (r *GatewayReconciler) buildChaperoneRoleBinding(gateway *gatewayv1.Gateway
 
 // buildDeployment creates the Deployment containing the combined varnish-gateway container.
 // The container runs chaperone which manages the varnishd process internally.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string) *appsv1.Deployment {
+// If logging is configured, a sidecar container is added to stream varnish logs.
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -205,9 +218,7 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
-					Containers: []corev1.Container{
-						r.buildGatewayContainer(gateway, varnishdExtraArgs),
-					},
+					Containers:                    r.buildContainers(gateway, varnishdExtraArgs, logging),
 					Volumes: []corev1.Volume{
 						{
 							Name: volumeVCLConfig,
@@ -230,6 +241,20 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 			},
 		},
 	}
+}
+
+// buildContainers creates the pod containers: main gateway container and optional logging sidecar.
+func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging) []corev1.Container {
+	containers := []corev1.Container{
+		r.buildGatewayContainer(gateway, varnishdExtraArgs),
+	}
+
+	// Add logging sidecar if configured
+	if logging != nil && logging.Mode != "" {
+		containers = append(containers, r.buildLoggingSidecar(gateway, logging))
+	}
+
+	return containers
 }
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
@@ -369,6 +394,57 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway) *corev1.Ser
 			Type:     corev1.ServiceTypeLoadBalancer,
 			Selector: labels,
 			Ports:    ports,
+		},
+	}
+}
+
+// buildLoggingSidecar creates a sidecar container for varnish logging.
+// The sidecar runs varnishlog or varnishncsa, streaming logs to stdout
+// where they're captured by Kubernetes logging infrastructure.
+func (r *GatewayReconciler) buildLoggingSidecar(gateway *gatewayv1.Gateway, logging *gatewayparamsv1alpha1.VarnishLogging) corev1.Container {
+	// Use the same image as the gateway unless logging.Image is specified
+	image := r.Config.GatewayImage
+	if logging.Image != "" {
+		image = logging.Image
+	}
+
+	// Build command arguments
+	args := []string{logging.Mode}
+
+	// Add varnish working directory to connect to the same varnishd instance
+	// The varnish working directory is shared via the varnish-run volume
+	args = append(args, "-n", "/var/run/varnish")
+
+	// Add format for varnishncsa
+	if logging.Mode == "varnishncsa" && logging.Format != "" {
+		args = append(args, "-F", logging.Format)
+	}
+
+	// Add extra args
+	args = append(args, logging.ExtraArgs...)
+
+	return corev1.Container{
+		Name:  "varnish-log",
+		Image: image,
+		Args:  args,
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      volumeVarnishRun,
+				MountPath: "/var/run/varnish",
+				ReadOnly:  true, // Sidecar only reads varnishd shared memory
+			},
+		},
+		// Resource limits for the logging sidecar
+		// Logging is typically lightweight but can spike with high traffic
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    mustParseQuantity("10m"),
+				corev1.ResourceMemory: mustParseQuantity("32Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    mustParseQuantity("100m"),
+				corev1.ResourceMemory: mustParseQuantity("128Mi"),
+			},
 		},
 	}
 }

@@ -1,0 +1,56 @@
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: varnish-with-logging
+spec:
+  # Example 1: Basic varnishlog - outputs all log entries
+  logging:
+    mode: varnishlog
+
+---
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: varnish-ncsa-format
+spec:
+  # Example 2: varnishncsa with custom format (Apache combined log format)
+  logging:
+    mode: varnishncsa
+    format: '%h %l %u %t "%r" %s %b "%{Referer}i" "%{User-agent}i"'
+
+---
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: varnish-filtered-logs
+spec:
+  # Example 3: varnishlog with filtering for only client requests
+  logging:
+    mode: varnishlog
+    extraArgs:
+      - "-g"
+      - "request"
+      - "-q"
+      - "ReqMethod eq 'GET'"
+
+---
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: varnish-ncsa-with-user-vcl
+spec:
+  # Example 4: Combining logging with user VCL and extra varnishd args
+  logging:
+    mode: varnishncsa
+    format: '%h %t "%r" %s %b'
+
+  userVCLConfigMapRef:
+    name: my-custom-vcl
+    namespace: default
+    key: user.vcl
+
+  varnishdExtraArgs:
+    - "-p"
+    - "thread_pools=4"
+    - "-p"
+    - "workspace_backend=128k"

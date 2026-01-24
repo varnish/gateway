@@ -283,14 +283,30 @@ Use Policy Attachment instead of GatewayClass-specific fields for Varnish config
 
 ## Observability
 
-- Add varnishlog-json subprocess to chaperone for access logging to stdout
-- Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency
-- Both log streams intermingled on stdout with distinguishing fields
-- Logging policy configuration:
-  - Add logging defaults to GatewayClassParameters (format, query, verbosity)
-  - Create VarnishLoggingPolicy CRD using Gateway API policy attachment pattern
+- ✅ Varnish logging via sidecar container (varnishlog/varnishncsa)
+- ✅ Add logging configuration to GatewayClassParameters (format, mode, extraArgs)
+- ✅ Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency
+- Future: Add varnishlog-json support when available
+- Future: Create VarnishLoggingPolicy CRD using Gateway API policy attachment pattern
   - Policy targets Gateway via `targetRef`, overrides class defaults when present
   - Enables per-gateway logging config (e.g., verbose for staging, minimal for prod)
+
+## Development Workflow
+
+### CRD Generation
+
+**Problem**: Currently maintaining CRD schema manually in `deploy/00-prereqs.yaml`, which can drift from Go types in `api/v1alpha1/`.
+
+**Solution**: Set up controller-gen workflow:
+1. Add `make manifests` target to regenerate CRDs from Go types
+2. Auto-copy generated CRD into `deploy/00-prereqs.yaml` (preserving namespace header)
+3. Make Go types the source of truth for schema
+4. Run `make manifests` before commits that change CRD types
+
+**Benefits**:
+- Prevents schema drift
+- Kubebuilder markers (validation, defaults) automatically applied
+- Less error-prone than manual YAML editing
 
 ## Open Questions
 

@@ -162,10 +162,8 @@ act:
 
 deploy-update:
 	@echo "Updating deploy/01-operator.yaml to version $(VERSION)"
-	@# Strip 'v' prefix for image tags (Docker registry uses 0.3.3, not v0.3.3)
-	$(eval IMAGE_VERSION := $(shell echo $(VERSION) | sed 's/^v//'))
-	@sed -i 's|gateway-operator:[v0-9.]*|gateway-operator:$(IMAGE_VERSION)|' deploy/01-operator.yaml
-	@sed -i 's|gateway-chaperone:[v0-9.]*"|gateway-chaperone:$(IMAGE_VERSION)"|' deploy/01-operator.yaml
+	@sed -i 's|gateway-operator:[v0-9.]*|gateway-operator:$(VERSION)|' deploy/01-operator.yaml
+	@sed -i 's|gateway-chaperone:[v0-9.]*"|gateway-chaperone:$(VERSION)"|' deploy/01-operator.yaml
 
 deploy: deploy-update
 	kubectl apply -f deploy/

@@ -71,6 +71,43 @@ spec:
                     Protected arguments (-M, -S, -F, -f, -n) cannot be overridden.
                   items:
                     type: string
+                logging:
+                  type: object
+                  description: |
+                    Logging configures varnish log output via a sidecar container.
+                    When enabled, a sidecar container runs varnishlog or varnishncsa,
+                    streaming logs to stdout where they're captured by Kubernetes.
+                  required:
+                    - mode
+                  properties:
+                    mode:
+                      type: string
+                      description: |
+                        Mode determines which varnish logging tool to use.
+                        Valid values: "varnishlog", "varnishncsa"
+                        Future: "varnishlog-json" when available
+                      enum:
+                        - varnishlog
+                        - varnishncsa
+                    format:
+                      type: string
+                      description: |
+                        Format specifies the output format for varnishncsa.
+                        Only used when mode is "varnishncsa".
+                        Example: "%h %l %u %t \"%r\" %s %b"
+                        See varnishncsa(1) for format specification.
+                    extraArgs:
+                      type: array
+                      description: |
+                        ExtraArgs specifies additional arguments to pass to the logging tool.
+                        Each element is a separate argument (e.g., ["-g", "request", "-q", "ReqURL ~ \"/api\""])
+                      items:
+                        type: string
+                    image:
+                      type: string
+                      description: |
+                        Image specifies the container image containing varnish logging tools.
+                        Defaults to the same image as the gateway if not specified.
       additionalPrinterColumns:
         - name: Age
           type: date

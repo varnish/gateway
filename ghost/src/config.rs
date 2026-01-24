@@ -464,4 +464,37 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("weight cannot be 0"));
     }
+
+    #[test]
+    fn test_vhost_with_empty_routes() {
+        // Vhosts with empty routes arrays should be accepted
+        // This can happen when a vhost is configured but has no backends ready yet
+        let file = write_config(
+            r#"{
+                "version": 2,
+                "vhosts": {
+                    "alpha.example.com": {
+                        "routes": []
+                    },
+                    "api.example.com": {
+                        "routes": []
+                    }
+                }
+            }"#,
+        );
+        let config = load(file.path()).unwrap();
+        assert_eq!(config.version, 2);
+        assert_eq!(config.vhosts.len(), 2);
+        assert!(config.vhosts.contains_key("alpha.example.com"));
+        assert!(config.vhosts.contains_key("api.example.com"));
+
+        // Verify routes are empty
+        let alpha = &config.vhosts["alpha.example.com"];
+        assert_eq!(alpha.routes.len(), 0);
+        assert_eq!(alpha.default_backends.len(), 0);
+
+        let api = &config.vhosts["api.example.com"];
+        assert_eq!(api.routes.len(), 0);
+        assert_eq!(api.default_backends.len(), 0);
+    }
 }
