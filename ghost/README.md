@@ -67,41 +67,27 @@ return (deliver);
 
 ```json
 {
-  "version": 2,
-  "vhosts": {
-    "api.example.com": {
-      "routes": [
-        {
-          "path_match": {"type": "PathPrefix", "value": "/v1"},
-          "backends": [
-            {"address": "10.0.0.1", "port": 8080, "weight": 100},
-            {"address": "10.0.0.2", "port": 8080, "weight": 100}
-          ],
-          "priority": 100
-        },
-        {
-          "backends": [
-            {"address": "10.0.0.3", "port": 8080, "weight": 100}
-          ],
-          "priority": 0
-        }
-      ]
-    },
-    "*.staging.example.com": {
-      "routes": [
-        {
-          "backends": [
-            {"address": "10.0.2.1", "port": 8080, "weight": 100}
-          ],
-          "priority": 100
-        }
-      ]
-    }
-  }
+"version": 1,
+"vhosts": {
+"api.example.com": {
+"backends": [
+{"address": "10.0.0.1", "port": 8080, "weight": 100},
+{"address": "10.0.0.2", "port": 8080, "weight": 100}
+]
+},
+"*.staging.example.com": {
+"backends": [
+{"address": "10.0.2.1", "port": 8080, "weight": 100}
+]
+}
+},
+"default": {
+"backends": [
+{"address": "10.0.99.1", "port": 80, "weight": 100}
+]
+}
 }
 ```
-
-Routes are evaluated by priority (highest first). Path matching supports `Exact`, `PathPrefix`, and `RegularExpression` types. A route without `path_match` matches all paths for that vhost.
 
 ### Error Handling
 
