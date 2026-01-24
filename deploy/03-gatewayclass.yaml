@@ -4,6 +4,10 @@ kind: GatewayClassParameters
 metadata:
   name: varnish-params
 spec:
+  # Enable varnishlog for debugging
+  logging:
+    mode: varnishlog
+
   varnishdExtraArgs:
     - "-p"
     - "thread_pools=2"

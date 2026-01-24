@@ -277,6 +277,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		{Name: "CONFIGMAP_NAME", Value: fmt.Sprintf("%s-vcl", gateway.Name)},
 		{Name: "GHOST_CONFIG_PATH", Value: "/var/run/varnish/ghost.json"},
 		{Name: "WORK_DIR", Value: "/var/run/varnish"},
+		{Name: "VARNISH_DIR", Value: "/var/run/varnish/vsm"},  // VSM subdirectory on shared volume
 		{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
 	}
 
@@ -408,25 +409,29 @@ func (r *GatewayReconciler) buildLoggingSidecar(gateway *gatewayv1.Gateway, logg
 		image = logging.Image
 	}
 
-	// Build command arguments
-	args := []string{logging.Mode}
-
-	// Add varnish working directory to connect to the same varnishd instance
-	// The varnish working directory is shared via the varnish-run volume
-	args = append(args, "-n", "/var/run/varnish")
-
-	// Add format for varnishncsa
+	// Build command string with all arguments
+	// Use shell wrapper with startup delay to wait for varnishd to be ready
+	var cmdStr string
 	if logging.Mode == "varnishncsa" && logging.Format != "" {
-		args = append(args, "-F", logging.Format)
+		// Quote format string to handle spaces and special characters
+		cmdStr = fmt.Sprintf("%s -n /var/run/varnish/vsm -F %q", logging.Mode, logging.Format)
+	} else {
+		cmdStr = fmt.Sprintf("%s -n /var/run/varnish/vsm", logging.Mode)
 	}
 
-	// Add extra args
-	args = append(args, logging.ExtraArgs...)
+	// Add extra args (user responsible for proper quoting)
+	if len(logging.ExtraArgs) > 0 {
+		cmdStr = cmdStr + " " + strings.Join(logging.ExtraArgs, " ")
+	}
+
+	command := []string{"sh", "-c"}
+	args := []string{fmt.Sprintf("sleep 5 && exec %s", cmdStr)}
 
 	return corev1.Container{
-		Name:  "varnish-log",
-		Image: image,
-		Args:  args,
+		Name:    "varnish-log",
+		Image:   image,
+		Command: command,
+		Args:    args,
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      volumeVarnishRun,

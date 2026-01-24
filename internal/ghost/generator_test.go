@@ -1,6 +1,7 @@
 package ghost
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -217,4 +218,103 @@ func TestGenerateRoutingConfigNoDefault(t *testing.T) {
 	if config.Default != nil {
 		t.Error("expected no default rule")
 	}
+}
+
+func TestGenerateV2NoEndpoints(t *testing.T) {
+	// Test that GenerateV2 produces empty arrays instead of null when no endpoints are available
+	routingConfig := &RoutingConfigV2{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
+			"api.example.com": {
+				Routes: []Route{
+					{
+						PathMatch: &PathMatch{
+							Type:  PathMatchPathPrefix,
+							Value: "/api",
+						},
+						Service:   "api-service",
+						Namespace: "default",
+						Port:      8080,
+						Weight:    100,
+						Priority:  100,
+					},
+				},
+			},
+		},
+	}
+
+	// No endpoints discovered yet
+	endpoints := ServiceEndpoints{}
+
+	config := GenerateV2(routingConfig, endpoints)
+
+	// Verify structure exists
+	vhost, ok := config.VHosts["api.example.com"]
+	if !ok {
+		t.Fatal("api.example.com vhost not found")
+	}
+
+	// Routes should be empty array, not nil
+	if vhost.Routes == nil {
+		t.Error("Routes should be empty array, not nil")
+	}
+	if len(vhost.Routes) != 0 {
+		t.Errorf("expected 0 routes (no endpoints), got %d", len(vhost.Routes))
+	}
+
+	// DefaultBackends should be empty array, not nil
+	if vhost.DefaultBackends == nil {
+		t.Error("DefaultBackends should be empty array, not nil")
+	}
+	if len(vhost.DefaultBackends) != 0 {
+		t.Errorf("expected 0 default backends, got %d", len(vhost.DefaultBackends))
+	}
+
+	// Marshal to JSON and verify it produces [] not null
+	jsonData, err := json.Marshal(config)
+	if err != nil {
+		t.Fatalf("failed to marshal config: %v", err)
+	}
+
+	// Check the JSON string contains [] not null
+	jsonStr := string(jsonData)
+	// The JSON should contain "routes":[] and "default_backends":[]
+	// NOT "routes":null or "default_backends":null
+
+	// Parse back to map to check raw JSON values
+	var rawConfig map[string]interface{}
+	if err := json.Unmarshal(jsonData, &rawConfig); err != nil {
+		t.Fatalf("failed to parse marshaled config: %v", err)
+	}
+
+	vhosts, ok := rawConfig["vhosts"].(map[string]interface{})
+	if !ok {
+		t.Fatal("vhosts not found in JSON")
+	}
+
+	apiVhost, ok := vhosts["api.example.com"].(map[string]interface{})
+	if !ok {
+		t.Fatal("api.example.com not found in vhosts")
+	}
+
+	// Check that routes is an array (slice), not nil
+	// This is critical - routes doesn't have #[serde(default)] in Rust, so it must be present
+	routes, ok := apiVhost["routes"].([]interface{})
+	if !ok {
+		t.Errorf("routes is not an array in JSON, got type %T: %v", apiVhost["routes"], apiVhost["routes"])
+	} else if routes == nil {
+		t.Error("routes should be empty array [], not null")
+	}
+
+	// default_backends can be omitted (has #[serde(default)] in Rust)
+	// But if present, it should be an array, not null
+	if dbVal, exists := apiVhost["default_backends"]; exists {
+		if db, ok := dbVal.([]interface{}); !ok {
+			t.Errorf("default_backends is not an array in JSON, got type %T: %v", dbVal, dbVal)
+		} else if db == nil {
+			t.Error("default_backends should be empty array [], not null")
+		}
+	}
+
+	t.Logf("Generated JSON: %s", jsonStr)
 }

@@ -155,7 +155,8 @@ func GenerateV2(routingConfig *RoutingConfigV2, endpoints ServiceEndpoints) *Con
 
 	// Process each vhost
 	for hostname, vhostRouting := range routingConfig.VHosts {
-		var routeBackends []RouteBackends
+		// Initialize to empty slice, not nil - nil marshals to null in JSON
+		routeBackends := make([]RouteBackends, 0)
 
 		// Process each route in this vhost
 		for _, route := range vhostRouting.Routes {
@@ -173,7 +174,8 @@ func GenerateV2(routingConfig *RoutingConfigV2, endpoints ServiceEndpoints) *Con
 		}
 
 		// Process default route if present
-		var defaultBackends []Backend
+		// Initialize to empty slice, not nil - nil marshals to null in JSON
+		defaultBackends := make([]Backend, 0)
 		if vhostRouting.DefaultRoute != nil {
 			defaultBackends = endpointsToBackends(*vhostRouting.DefaultRoute, endpoints)
 		}
