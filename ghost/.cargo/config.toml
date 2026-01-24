@@ -1,5 +1,11 @@
+# Treat all warnings as errors to catch issues early in development.
+# This ensures local builds match CI behavior.
+[build]
+rustflags = ["-D", "warnings"]
+
+# macOS requires special linker flags for dynamic library loading
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup", "-D", "warnings"]
 
 [target.x86_64-apple-darwin]
-rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup", "-D", "warnings"]

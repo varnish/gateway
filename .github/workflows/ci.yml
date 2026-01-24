@@ -4,14 +4,85 @@ on:
   push:
     branches:
       - main
-    tags-ignore:
-      - '**'
+    tags:
+      - 'v*'
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
+  check-if-tagged:
+    runs-on: ubuntu-latest
+    outputs:
+      has-tag: ${{ steps.check.outputs.has_tag }}
+    steps:
+      - name: Check if commit is tagged
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Only check for tags on main branch pushes
+            if (context.eventName !== 'push' || context.ref !== 'refs/heads/main') {
+              core.info('Not a main branch push, skipping tag check');
+              core.setOutput('has_tag', 'false');
+              return;
+            }
+
+            const sha = context.sha;
+            core.info(`Checking if commit ${sha} has any tags`);
+
+            try {
+              const { data: refs } = await github.rest.git.listMatchingRefs({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'tags/'
+              });
+
+              // Check if any tag points to this commit (handle annotated tags)
+              for (const ref of refs) {
+                let commitSha = ref.object.sha;
+
+                if (ref.object.type === 'tag') {
+                  const { data: tag } = await github.rest.git.getTag({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    tag_sha: ref.object.sha
+                  });
+                  commitSha = tag.object.sha;
+                }
+
+                if (commitSha === sha) {
+                  const tagName = ref.ref.replace('refs/tags/', '');
+                  core.info(`Commit is tagged with ${tagName}, skipping CI (will run on tag event)`);
+                  core.setOutput('has_tag', 'true');
+                  return;
+                }
+              }
+
+              core.info('Commit has no tags, proceeding with CI');
+              core.setOutput('has_tag', 'false');
+            } catch (error) {
+              core.warning(`Failed to check tags: ${error.message}`);
+              core.setOutput('has_tag', 'false');
+            }
+
   test-go:
+    needs: [check-if-tagged]
+    # Run on PRs, tags, or main pushes where commit isn't tagged
+    if: |
+      github.event_name == 'pull_request' ||
+      startsWith(github.ref, 'refs/tags/') ||
+      (needs.check-if-tagged.outputs.has-tag == 'false')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,28 +94,81 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Run Go vet
+        run: go vet ./...
+
+      - name: Cache envtest binaries
+        uses: actions/cache@v4
+        with:
+          path: testbin
+          key: envtest-1.31.0-${{ runner.os }}
+
+      - name: Setup envtest binaries
+        run: |
+          make install-envtest
+          mkdir -p testbin
+          ./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path
+
       - name: Run Go tests
-        run: go test ./...
+        run: |
+          KUBEBUILDER_ASSETS="$(pwd)/$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
+            go test -tags=integration ./...
 
   test-rust:
+    needs: [check-if-tagged]
+    # Run on PRs, tags, or main pushes where commit isn't tagged
+    if: |
+      github.event_name == 'pull_request' ||
+      startsWith(github.ref, 'refs/tags/') ||
+      (needs.check-if-tagged.outputs.has-tag == 'false')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache Varnish packages
+        uses: actions/cache@v4
+        id: varnish-cache
+        with:
+          path: |
+            /var/cache/apt/archives
+            /var/lib/apt/lists
+          key: varnish-dev-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
+
       - name: Install Varnish
+        if: steps.varnish-cache.outputs.cache-hit != 'true'
         run: |
           curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
           sudo apt-get install -y varnish-dev
+
+      - name: Install cached Varnish
+        if: steps.varnish-cache.outputs.cache-hit == 'true'
+        run: |
+          sudo apt-get install -y varnish-dev || {
+            curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
+            sudo apt-get install -y varnish-dev
+          }
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev llvm-dev clang
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: true
-          working-directory: ghost
+          cache-workspaces: ghost
+          components: clippy
 
-      - name: Build ghost VMOD
-        run: cd ghost && cargo build
+      - name: Run clippy (warnings as errors)
+        run: cd ghost && cargo clippy --release -- -D warnings
 
-      - name: Run Rust tests
-        run: cd ghost && cargo test --lib
+      - name: Build ghost VMOD in release mode
+        run: cd ghost && cargo build --release
+
+      - name: Run Rust unit tests in release mode
+        run: cd ghost && cargo test --release --lib
+
+      - name: Run VTC integration tests
+        run: cd ghost && cargo test --release run_vtc_tests

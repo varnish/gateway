@@ -60,7 +60,11 @@ varnish v1 -vcl {
         # Intercept reload requests and bypass cache
         # In production, also check client.ip == "127.0.0.1"
         if (req.url == "/.varnish-ghost/reload") {
-            return (pass);
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
         }
     }
 
@@ -74,6 +78,13 @@ varnish v1 -vcl {
         }
     }
 } -start
+
+# Initial reload to load configuration
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
 
 # Test 1: Route to api.example.com backend
 client c1 {

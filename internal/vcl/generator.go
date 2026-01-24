@@ -68,27 +68,57 @@ func SanitizeServiceName(name string) string {
 	return s
 }
 
-// CalculateRoutePriority calculates the priority for a route based on path match type.
+// CalculateRoutePriority calculates the priority for a route based on all match criteria.
 // Higher priority = more specific match:
-// - Exact: 10000
-// - PathPrefix: 1000 + length*10
-// - RegularExpression: 100
-// - No match (default route): 0
-func CalculateRoutePriority(pathMatch *ghost.PathMatch) int {
-	if pathMatch == nil {
-		return 0 // default route
+// Path specificity:
+//   - Exact: 10000
+//   - PathPrefix: 1000 + length*10
+//   - RegularExpression: 100
+//   - No match (default route): 0
+// Additional bonuses:
+//   - Method specified: +5000
+//   - Header matches: +1000 per header (max 16)
+//   - Query param matches: +500 per param (max 16)
+func CalculateRoutePriority(
+	pathMatch *ghost.PathMatch,
+	method *string,
+	headers []ghost.HeaderMatch,
+	queryParams []ghost.QueryParamMatch,
+) int {
+	priority := 0
+
+	// Path specificity (0-10000+)
+	if pathMatch != nil {
+		switch pathMatch.Type {
+		case ghost.PathMatchExact:
+			priority += 10000
+		case ghost.PathMatchPathPrefix:
+			priority += 1000 + len(pathMatch.Value)*10
+		case ghost.PathMatchRegularExpression:
+			priority += 100
+		}
 	}
 
-	switch pathMatch.Type {
-	case ghost.PathMatchExact:
-		return 10000
-	case ghost.PathMatchPathPrefix:
-		return 1000 + len(pathMatch.Value)*10
-	case ghost.PathMatchRegularExpression:
-		return 100
-	default:
-		return 0
+	// Method specificity (+5000)
+	if method != nil {
+		priority += 5000
 	}
+
+	// Header specificity (1000 per header, max 16000)
+	headerCount := len(headers)
+	if headerCount > 16 {
+		headerCount = 16
+	}
+	priority += headerCount * 1000
+
+	// Query param specificity (500 per param, max 8000)
+	queryCount := len(queryParams)
+	if queryCount > 16 {
+		queryCount = 16
+	}
+	priority += queryCount * 500
+
+	return priority
 }
 
 // CollectHTTPRouteBackends extracts backend information from HTTPRoutes for ghost config generation.
@@ -197,7 +227,7 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 							Namespace: backendNS,
 							Port:      port,
 							Weight:    weight,
-							Priority:  CalculateRoutePriority(pathMatch),
+							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
 						})
 					}
 				} else {
@@ -230,6 +260,41 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 							}
 						}
 
+						// Extract method
+						var method *string
+						if match.Method != nil {
+							m := string(*match.Method)
+							method = &m
+						}
+
+						// Extract headers
+						var headers []ghost.HeaderMatch
+						for _, h := range match.Headers {
+							matchType := ghost.MatchTypeExact
+							if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
+								matchType = ghost.MatchTypeRegularExpression
+							}
+							headers = append(headers, ghost.HeaderMatch{
+								Name:  string(h.Name),
+								Value: h.Value,
+								Type:  matchType,
+							})
+						}
+
+						// Extract query params
+						var queryParams []ghost.QueryParamMatch
+						for _, qp := range match.QueryParams {
+							matchType := ghost.MatchTypeExact
+							if qp.Type != nil && *qp.Type == gatewayv1.QueryParamMatchRegularExpression {
+								matchType = ghost.MatchTypeRegularExpression
+							}
+							queryParams = append(queryParams, ghost.QueryParamMatch{
+								Name:  string(qp.Name),
+								Value: qp.Value,
+								Type:  matchType,
+							})
+						}
+
 						// Create a route entry for each backend
 						for _, backend := range rule.BackendRefs {
 							if backend.Name == "" {
@@ -252,13 +317,16 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 							}
 
 							collectedRoutes = append(collectedRoutes, ghost.Route{
-								Hostname:  string(hostname),
-								PathMatch: pathMatch,
-								Service:   string(backend.Name),
-								Namespace: backendNS,
-								Port:      port,
-								Weight:    weight,
-								Priority:  CalculateRoutePriority(pathMatch),
+								Hostname:    string(hostname),
+								PathMatch:   pathMatch,
+								Method:      method,
+								Headers:     headers,
+								QueryParams: queryParams,
+								Service:     string(backend.Name),
+								Namespace:   backendNS,
+								Port:        port,
+								Weight:      weight,
+								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
 							})
 						}
 					}

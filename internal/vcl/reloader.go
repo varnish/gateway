@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/varnish/gateway/internal/filechange"
 	"github.com/varnish/gateway/internal/varnishadm"
 )
 
@@ -30,6 +31,9 @@ type Reloader struct {
 	vclPath    string
 	keepCount  int
 	logger     *slog.Logger
+
+	// File change tracking to avoid spurious reloads
+	fileDetector filechange.Detector
 }
 
 // New creates a new VCL reloader
@@ -64,10 +68,9 @@ func (r *Reloader) Run(ctx context.Context) error {
 		return fmt.Errorf("watcher.Add(%s): %w", dir, err)
 	}
 
-	r.logger.Info("VCL reloader started", "path", r.vclPath, "keepCount", r.keepCount)
+	r.logger.Debug("VCL reloader started", "path", r.vclPath, "keepCount", r.keepCount)
 
 	var debounceTimer *time.Timer
-	filename := filepath.Base(r.vclPath)
 
 	for {
 		select {
@@ -80,17 +83,24 @@ func (r *Reloader) Run(ctx context.Context) error {
 				return nil
 			}
 
-			// Only react to changes to our specific file
-			if filepath.Base(event.Name) != filename {
-				continue
-			}
-
 			// React to Write, Create, and Rename events
 			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
 
-			r.logger.Debug("VCL file changed", "event", event.Op.String())
+			// Check if the VCL file actually changed
+			// This handles Kubernetes ConfigMap atomic swaps (..data symlinks)
+			// and avoids spurious reloads from unrelated directory events
+			if !r.fileDetector.HasChanged(r.vclPath, r.logger) {
+				continue
+			}
+
+			mtime, inode := r.fileDetector.GetMetadata()
+			r.logger.Debug("VCL file changed",
+				"event", event.Op.String(),
+				"mtime", mtime,
+				"inode", inode,
+			)
 
 			// Debounce rapid changes
 			if debounceTimer != nil {
@@ -115,7 +125,7 @@ func (r *Reloader) Run(ctx context.Context) error {
 func (r *Reloader) Reload() error {
 	name := r.generateVCLName()
 
-	r.logger.Info("loading VCL", "name", name, "path", r.vclPath)
+	r.logger.Debug("loading VCL", "name", name, "path", r.vclPath)
 
 	// Load the new VCL
 	resp, err := r.varnishadm.VCLLoad(name, r.vclPath)
@@ -132,7 +142,7 @@ func (r *Reloader) Reload() error {
 	}
 
 	// Switch to the new VCL
-	r.logger.Info("activating VCL", "name", name)
+	r.logger.Debug("activating VCL", "name", name)
 	resp, err = r.varnishadm.VCLUse(name)
 	if err != nil {
 		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
@@ -146,7 +156,7 @@ func (r *Reloader) Reload() error {
 		return fmt.Errorf("VCL activation failed: %s", resp.Payload())
 	}
 
-	r.logger.Info("VCL reload complete", "name", name)
+	r.logger.Debug("VCL reload complete", "name", name)
 
 	// Garbage collect old VCLs
 	if err := r.garbageCollect(); err != nil {

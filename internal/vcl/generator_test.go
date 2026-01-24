@@ -397,7 +397,7 @@ func TestCalculateRoutePriority(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := CalculateRoutePriority(tc.pathMatch)
+			result := CalculateRoutePriority(tc.pathMatch, nil, nil, nil)
 			if result != tc.expected {
 				t.Errorf("CalculateRoutePriority() = %d, expected %d", result, tc.expected)
 			}

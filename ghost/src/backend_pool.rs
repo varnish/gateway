@@ -77,6 +77,9 @@ impl BackendPool {
         let backend = NativeBackend::new(ctx, &config, None)?;
 
         // Insert into pool (wrapped in Arc)
+        // SAFETY: NativeBackend contains VCL_BACKEND pointers which are thread-safe
+        // in Varnish's model. See BackendPool's Send+Sync impl for details.
+        #[allow(clippy::arc_with_non_send_sync)]
         self.backends.insert(key.clone(), Arc::new(backend));
 
         Ok(key)

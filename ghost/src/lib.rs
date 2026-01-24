@@ -25,7 +25,7 @@ mod director;
 mod not_found_backend;
 
 use backend_pool::BackendPool;
-use director::{build_routing_state, GhostDirector, SharedGhostDirector};
+use director::{GhostDirector, SharedGhostDirector};
 use not_found_backend::{NotFoundBackend, NotFoundBody};
 
 // Run VTC tests
@@ -174,9 +174,10 @@ mod ghost {
     pub fn init(path: &str) -> Result<(), VclError> {
         let config_path = PathBuf::from(path);
 
-        // Validate config file exists and is parseable
-        let _config = config::load(&config_path)
-            .map_err(|e| VclError::new(format!("ghost.init: {}", e)))?;
+        // Don't load config here - it may not exist yet during startup.
+        // Config will be loaded when ghost_backend is created in vcl_init,
+        // after chaperone has generated the initial ghost.json file.
+        // This avoids race conditions during pod startup.
 
         let state = GhostState { config_path };
 
@@ -233,13 +234,12 @@ mod ghost {
         /// Create a new ghost backend instance.
         ///
         /// Must be called after `ghost.init()` has been called. This creates
-        /// a director that manages native Varnish backends for all endpoints
-        /// in the configuration.
+        /// a director with empty routing state. Backends will be populated
+        /// on the first `reload()` call after chaperone generates ghost.json.
         ///
         /// # Errors
         ///
-        /// Returns an error if `ghost.init()` has not been called first, or if
-        /// any backend creation fails.
+        /// Returns an error if `ghost.init()` has not been called first.
         pub fn new(ctx: &mut Ctx, #[vcl_name] name: &str) -> Result<Self, VclError> {
             // Get config path from global state
             let config_path = {
@@ -252,15 +252,18 @@ mod ghost {
                 state.config_path.clone()
             };
 
-            // Load configuration
-            let config = config::load(&config_path)
-                .map_err(|e| VclError::new(format!("ghost.backend: failed to load config: {}", e)))?;
+            // Don't load configuration here - it may not exist yet during startup.
+            // Start with empty routing state. The first reload() call from chaperone
+            // will populate backends after ghost.json is generated.
+            use std::collections::HashMap;
+            let routing = director::RoutingState {
+                exact: HashMap::new(),
+                wildcards: Vec::new(),
+                default: None,
+            };
 
-            // Create backend pool for this director
-            let mut backend_pool = BackendPool::new();
-
-            // Build routing state and create backends
-            let routing = build_routing_state(&config, &mut backend_pool, ctx)?;
+            // Create empty backend pool
+            let backend_pool = BackendPool::new();
 
             // Create director (Arc-wrapped so we can clone for reload access)
             let (ghost_director_impl, not_found_backend) =

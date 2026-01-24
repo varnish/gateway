@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -30,12 +32,20 @@ type HTTPRouteReconciler struct {
 	Scheme *runtime.Scheme
 	Config Config
 	Logger *slog.Logger
+
+	// ConfigMap content tracking for change detection
+	configMapHashes map[string]string // key: namespace/name -> hash of Data
 }
 
 // Reconcile handles HTTPRoute reconciliation.
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Logger.With("httproute", req.NamespacedName)
-	log.Info("reconciling HTTPRoute")
+	log.Debug("reconciling HTTPRoute")
+
+	// Initialize configMapHashes if nil
+	if r.configMapHashes == nil {
+		r.configMapHashes = make(map[string]string)
+	}
 
 	// 1. Fetch the HTTPRoute
 	var route gatewayv1.HTTPRoute
@@ -48,7 +58,6 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
 	}
-
 	// 2. Skip if no parentRefs
 	if len(route.Spec.ParentRefs) == 0 {
 		log.Debug("HTTPRoute has no parentRefs, skipping")
@@ -65,12 +74,17 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	// 4. Update HTTPRoute status
-	if err := r.Status().Update(ctx, &route); err != nil {
-		return ctrl.Result{}, fmt.Errorf("r.Status().Update: %w", err)
+	// 4. Update HTTPRoute status using Server-Side Apply - no conflicts with other controllers
+	// Prepare for SSA: set GVK and ensure managedFields is cleared
+	route.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute"))
+	route.SetManagedFields(nil)
+	if err := r.Status().Patch(ctx, &route, client.Apply,
+		client.FieldOwner("varnish-httproute-controller"),
+		client.ForceOwnership); err != nil {
+		return ctrl.Result{}, fmt.Errorf("r.Status().Patch: %w", err)
 	}
 
-	log.Info("HTTPRoute reconciliation complete")
+	log.Debug("HTTPRoute reconciliation complete")
 	return ctrl.Result{}, nil
 }
 
@@ -219,9 +233,17 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	userVCL := r.getUserVCL(ctx, gateway)
 	finalVCL := vcl.Merge(generatedVCL, userVCL)
 
-	// Generate routing.json for ghost
-	routeBackends := vcl.CollectHTTPRouteBackends(routes, gateway.Namespace)
-	routingConfig := ghost.GenerateRoutingConfig(routeBackends, nil)
+	// Generate v2 routing.json for ghost with path-based routing
+	collectedRoutes := vcl.CollectHTTPRouteBackendsV2(routes, gateway.Namespace)
+
+	// Group routes by hostname
+	routesByHost := make(map[string][]ghost.Route)
+	for _, route := range collectedRoutes {
+		routesByHost[route.Hostname] = append(routesByHost[route.Hostname], route)
+	}
+
+	// Generate v2 routing config
+	routingConfig := ghost.GenerateRoutingConfigV2(routesByHost, nil)
 	routingJSON, err := json.MarshalIndent(routingConfig, "", "  ")
 	if err != nil {
 		return fmt.Errorf("json.MarshalIndent: %w", err)
@@ -234,6 +256,11 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", cmName, err)
 	}
 
+	// Compute hash of new ConfigMap data
+	cmKey := fmt.Sprintf("%s/%s", gateway.Namespace, cmName)
+	oldHash := r.configMapHashes[cmKey]
+	newHash := r.computeConfigMapHash(finalVCL, string(routingJSON))
+
 	// Update ConfigMap data
 	if cm.Data == nil {
 		cm.Data = make(map[string]string)
@@ -245,12 +272,31 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Update(%s): %w", cmName, err)
 	}
 
-	r.Logger.Info("updated ConfigMap",
-		"configmap", cmName,
-		"routes", len(routes),
-		"backends", len(routeBackends))
+	// Store new hash
+	r.configMapHashes[cmKey] = newHash
+
+	// Only log if content actually changed
+	if oldHash != newHash {
+		r.Logger.Info("updated ConfigMap",
+			"configmap", cmName,
+			"routes", len(routes),
+			"backends", len(collectedRoutes))
+	} else {
+		r.Logger.Debug("reconciled ConfigMap (no content change)",
+			"configmap", cmName,
+			"routes", len(routes),
+			"backends", len(collectedRoutes))
+	}
 
 	return nil
+}
+
+// computeConfigMapHash computes a hash of the ConfigMap content
+func (r *HTTPRouteReconciler) computeConfigMapHash(vcl, routingJSON string) string {
+	h := sha256.New()
+	h.Write([]byte(vcl))
+	h.Write([]byte(routingJSON))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // getUserVCL returns user-provided VCL from GatewayClassParameters.
@@ -324,19 +370,48 @@ func (r *HTTPRouteReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1
 }
 
 // updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.
+// Creates a minimal patch object to avoid conflicts with Gateway controller.
 func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
-	// Use patch to avoid conflicts when multiple HTTPRoutes reconcile concurrently
-	patch := client.MergeFrom(gateway.DeepCopy())
-
 	// Count routes per listener
 	attachedCount := int32(len(routes))
 
-	// Update each listener's AttachedRoutes count
-	for i := range gateway.Status.Listeners {
-		gateway.Status.Listeners[i].AttachedRoutes = attachedCount
+	// Create minimal Gateway object for SSA patch - only include fields we own
+	patch := &gatewayv1.Gateway{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: gatewayv1.GroupVersion.String(),
+			Kind:       "Gateway",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gateway.Name,
+			Namespace: gateway.Namespace,
+		},
 	}
 
-	if err := r.Status().Patch(ctx, gateway, patch); err != nil {
+	// Build listener statuses with only AttachedRoutes field
+	// We must include SupportedKinds even though Gateway controller owns it,
+	// because it's a required field for validation
+	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Status.Listeners))
+	for i, listener := range gateway.Status.Listeners {
+		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
+			Name:           listener.Name,
+			AttachedRoutes: attachedCount,
+			// Include SupportedKinds to satisfy API validation (required field)
+			// Gateway controller is the field owner, but we need to set it to avoid null
+			SupportedKinds: []gatewayv1.RouteGroupKind{
+				{
+					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
+					Kind:  "HTTPRoute",
+				},
+			},
+			// DO NOT set Conditions - those are owned by Gateway controller
+		}
+	}
+
+	// Use Server-Side Apply - HTTPRoute controller owns AttachedRoutes field
+	// Gateway controller owns conditions - no conflicts!
+	if err := r.Status().Patch(ctx, patch, client.Apply,
+		client.FieldOwner("varnish-httproute-controller"),
+		client.ForceOwnership); err != nil {
 		return fmt.Errorf("r.Status().Patch: %w", err)
 	}
 
@@ -377,7 +452,7 @@ func (r *HTTPRouteReconciler) findHTTPRoutesForGateway(ctx context.Context, obj 
 	}
 
 	if len(requests) > 0 {
-		r.Logger.Info("Gateway changed, re-reconciling attached HTTPRoutes",
+		r.Logger.Debug("Gateway changed, re-reconciling attached HTTPRoutes",
 			"gateway", gateway.Name,
 			"routes", len(requests))
 	}

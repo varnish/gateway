@@ -41,11 +41,43 @@ pub struct PathMatch {
     pub value: String,
 }
 
+/// Match type for headers and query parameters.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "PascalCase")]
+pub enum MatchType {
+    Exact,
+    RegularExpression,
+}
+
+/// Header matching rule.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HeaderMatch {
+    pub name: String,
+    pub value: String,
+    #[serde(rename = "type")]
+    pub match_type: MatchType,
+}
+
+/// Query parameter matching rule.
+#[derive(Debug, Clone, Deserialize)]
+pub struct QueryParamMatch {
+    pub name: String,
+    pub value: String,
+    #[serde(rename = "type")]
+    pub match_type: MatchType,
+}
+
 /// Maps a URL path pattern to a set of backend pods.
 /// Multiple routes per vhost enable path-based traffic splitting.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Route {
     pub path_match: Option<PathMatch>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<HeaderMatch>,
+    #[serde(default)]
+    pub query_params: Vec<QueryParamMatch>,
     pub backends: Vec<Backend>,
     pub priority: i32,
 }
@@ -117,6 +149,20 @@ fn validate(config: &Config) -> Result<(), String> {
 
             if let Some(ref path_match) = route.path_match {
                 validate_path_match(path_match, &route_ctx)?;
+            }
+
+            if let Some(ref method) = route.method {
+                validate_method(method, &route_ctx)?;
+            }
+
+            for (j, header) in route.headers.iter().enumerate() {
+                let header_ctx = format!("{} header {}", route_ctx, j);
+                validate_header_match(header, &header_ctx)?;
+            }
+
+            for (j, qp) in route.query_params.iter().enumerate() {
+                let qp_ctx = format!("{} query_param {}", route_ctx, j);
+                validate_query_param_match(qp, &qp_ctx)?;
             }
         }
 
@@ -212,14 +258,74 @@ fn validate_path_match(path_match: &PathMatch, context: &str) -> Result<(), Stri
                     path_match.value.len()
                 ));
             }
-            // Try to compile it to validate syntax
-            if let Err(e) = regex::Regex::new(&path_match.value) {
-                return Err(format!(
-                    "{}: invalid regex pattern '{}': {}",
-                    context, path_match.value, e
-                ));
-            }
+            // IMPORTANT: Don't compile regex here!
+            //
+            // Regex compilation is deferred to build_routing_state() because:
+            // 1. This validation runs from Varnish worker threads during reload
+            // 2. The regex crate uses thread-local storage (TLS) for its internal caches
+            // 3. Varnish's C threads don't properly initialize Rust's TLS mechanism
+            // 4. In debug mode, this causes SIGABRT when Regex::new() accesses uninitialized TLS
+            // 5. Release mode works because optimizations reduce TLS dependencies
+            //
+            // The regex will be compiled during routing state build where:
+            // - Compilation errors can be caught and reported via Result
+            // - The pattern is stored in PathMatchCompiled for efficient matching
+            //
+            // See DEBUG_MODE_LIMITATIONS.md for detailed explanation.
         }
+    }
+    Ok(())
+}
+
+/// Validate HTTP method
+fn validate_method(method: &str, context: &str) -> Result<(), String> {
+    const VALID_METHODS: &[&str] = &[
+        "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH",
+    ];
+    if !VALID_METHODS.contains(&method) {
+        return Err(format!("{}: invalid method '{}'", context, method));
+    }
+    Ok(())
+}
+
+/// Validate header match configuration
+fn validate_header_match(header: &HeaderMatch, context: &str) -> Result<(), String> {
+    if header.name.is_empty() {
+        return Err(format!("{}: header name cannot be empty", context));
+    }
+    if header.value.is_empty() {
+        return Err(format!("{}: header value cannot be empty", context));
+    }
+    if header.value.len() > 4096 {
+        return Err(format!(
+            "{}: header value too long ({} chars, max 4096)",
+            context,
+            header.value.len()
+        ));
+    }
+    if header.match_type == MatchType::RegularExpression {
+        // Regex compilation deferred - see detailed comment in validate_path_match()
+    }
+    Ok(())
+}
+
+/// Validate query parameter match configuration
+fn validate_query_param_match(qp: &QueryParamMatch, context: &str) -> Result<(), String> {
+    if qp.name.is_empty() {
+        return Err(format!("{}: query param name cannot be empty", context));
+    }
+    if qp.value.is_empty() {
+        return Err(format!("{}: query param value cannot be empty", context));
+    }
+    if qp.value.len() > 1024 {
+        return Err(format!(
+            "{}: query param value too long ({} chars, max 1024)",
+            context,
+            qp.value.len()
+        ));
+    }
+    if qp.match_type == MatchType::RegularExpression {
+        // Regex compilation deferred - see detailed comment in validate_path_match()
     }
     Ok(())
 }

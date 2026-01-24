@@ -162,9 +162,12 @@ func GenerateV2(routingConfig *RoutingConfigV2, endpoints ServiceEndpoints) *Con
 			backends := routeToBackends(route, endpoints)
 			if len(backends) > 0 {
 				routeBackends = append(routeBackends, RouteBackends{
-					PathMatch: route.PathMatch,
-					Backends:  backends,
-					Priority:  route.Priority,
+					PathMatch:   route.PathMatch,
+					Method:      route.Method,
+					Headers:     route.Headers,
+					QueryParams: route.QueryParams,
+					Backends:    backends,
+					Priority:    route.Priority,
 				})
 			}
 		}
