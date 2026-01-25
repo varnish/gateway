@@ -15,7 +15,6 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
-	"github.com/varnish/gateway/internal/vcl"
 )
 
 const (
@@ -41,11 +40,9 @@ func mustParseQuantity(s string) resource.Quantity {
 }
 
 // buildVCLConfigMap creates the ConfigMap containing VCL and routing.json.
-func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway) *corev1.ConfigMap {
-	// Generate initial VCL with no routes (valid but empty routing)
-	initialVCL := vcl.Generate(nil, vcl.GeneratorConfig{})
-
-	// Empty routing config initially
+// The vclContent parameter contains the generated VCL (ghost preamble + user VCL)
+func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway, vclContent string) *corev1.ConfigMap {
+	// Empty routing config initially (HTTPRoute controller will populate this)
 	routingJSON := `{"version": 1, "vhosts": {}}`
 
 	return &corev1.ConfigMap{
@@ -59,7 +56,7 @@ func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway) *corev
 			Labels:    r.buildLabels(gateway),
 		},
 		Data: map[string]string{
-			"main.vcl":     initialVCL,
+			"main.vcl":     vclContent,
 			"routing.json": routingJSON,
 		},
 	}
@@ -166,7 +163,8 @@ func (r *GatewayReconciler) buildChaperoneRoleBinding(gateway *gatewayv1.Gateway
 // buildDeployment creates the Deployment containing the combined varnish-gateway container.
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging) *appsv1.Deployment {
+// The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -213,6 +211,9 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
+					Annotations: map[string]string{
+						AnnotationInfraHash: infraHash,
+					},
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),

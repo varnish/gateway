@@ -20,7 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
-	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/status"
 	"github.com/varnish/gateway/internal/vcl"
@@ -224,15 +223,8 @@ func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute,
 	return false
 }
 
-// updateConfigMap updates the Gateway's VCL ConfigMap with generated VCL and routing.json.
+// updateConfigMap updates the Gateway's ConfigMap with routing.json (preserves main.vcl).
 func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
-	// Generate VCL from routes (ghost preamble)
-	generatedVCL := vcl.Generate(routes, vcl.GeneratorConfig{})
-
-	// Get user VCL (placeholder for future GatewayClassParameters support)
-	userVCL := r.getUserVCL(ctx, gateway)
-	finalVCL := vcl.Merge(generatedVCL, userVCL)
-
 	// Generate v2 routing.json for ghost with path-based routing
 	collectedRoutes := vcl.CollectHTTPRouteBackendsV2(routes, gateway.Namespace)
 
@@ -256,16 +248,15 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", cmName, err)
 	}
 
-	// Compute hash of new ConfigMap data
+	// Compute hash of new routing.json
 	cmKey := fmt.Sprintf("%s/%s", gateway.Namespace, cmName)
 	oldHash := r.configMapHashes[cmKey]
-	newHash := r.computeConfigMapHash(finalVCL, string(routingJSON))
+	newHash := r.computeConfigMapHash(string(routingJSON))
 
-	// Update ConfigMap data
+	// Update ConfigMap data (only routing.json, preserve main.vcl owned by Gateway controller)
 	if cm.Data == nil {
 		cm.Data = make(map[string]string)
 	}
-	cm.Data["main.vcl"] = finalVCL
 	cm.Data["routing.json"] = string(routingJSON)
 
 	if err := r.Update(ctx, &cm); err != nil {
@@ -291,82 +282,11 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	return nil
 }
 
-// computeConfigMapHash computes a hash of the ConfigMap content
-func (r *HTTPRouteReconciler) computeConfigMapHash(vcl, routingJSON string) string {
+// computeConfigMapHash computes a hash of the routing.json content
+func (r *HTTPRouteReconciler) computeConfigMapHash(routingJSON string) string {
 	h := sha256.New()
-	h.Write([]byte(vcl))
 	h.Write([]byte(routingJSON))
 	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-// getUserVCL returns user-provided VCL from GatewayClassParameters.
-// It traverses: Gateway -> GatewayClass -> GatewayClassParameters -> ConfigMap
-func (r *HTTPRouteReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
-	// 1. Get GatewayClass
-	var gatewayClass gatewayv1.GatewayClass
-	if err := r.Get(ctx, types.NamespacedName{Name: string(gateway.Spec.GatewayClassName)}, &gatewayClass); err != nil {
-		if !apierrors.IsNotFound(err) {
-			r.Logger.Error("failed to get GatewayClass", "error", err)
-		}
-		return ""
-	}
-
-	// 2. Check if ParametersRef is set
-	if gatewayClass.Spec.ParametersRef == nil {
-		return ""
-	}
-
-	// 3. Validate ParametersRef points to our CRD
-	ref := gatewayClass.Spec.ParametersRef
-	if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
-		string(ref.Kind) != "GatewayClassParameters" {
-		return "" // Not our parameters type
-	}
-
-	// 4. Fetch GatewayClassParameters
-	var params gatewayparamsv1alpha1.GatewayClassParameters
-	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, &params); err != nil {
-		if !apierrors.IsNotFound(err) {
-			r.Logger.Error("failed to get GatewayClassParameters",
-				"name", ref.Name, "error", err)
-		}
-		return ""
-	}
-
-	// 5. If UserVCLConfigMapRef is not set, return empty
-	if params.Spec.UserVCLConfigMapRef == nil {
-		return ""
-	}
-
-	// 6. Fetch the ConfigMap containing user VCL
-	cmRef := params.Spec.UserVCLConfigMapRef
-	var cm corev1.ConfigMap
-	if err := r.Get(ctx, types.NamespacedName{
-		Name:      cmRef.Name,
-		Namespace: cmRef.Namespace,
-	}, &cm); err != nil {
-		r.Logger.Error("failed to get user VCL ConfigMap",
-			"namespace", cmRef.Namespace, "name", cmRef.Name, "error", err)
-		return ""
-	}
-
-	// 7. Return VCL from ConfigMap (default key is "user.vcl")
-	key := cmRef.Key
-	if key == "" {
-		key = "user.vcl"
-	}
-
-	userVCL, ok := cm.Data[key]
-	if !ok {
-		r.Logger.Warn("user VCL ConfigMap missing expected key",
-			"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
-		return ""
-	}
-
-	r.Logger.Debug("loaded user VCL from ConfigMap",
-		"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
-
-	return userVCL
 }
 
 // updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.

@@ -91,7 +91,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil)
+	deployment := r.buildDeployment(gateway, nil, nil, "test-hash")
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -212,7 +212,7 @@ func TestBuildVCLConfigMap(t *testing.T) {
 		},
 	}
 
-	cm := r.buildVCLConfigMap(gateway)
+	cm := r.buildVCLConfigMap(gateway, "vcl 4.1;\n\nimport ghost;\n")
 
 	if cm.Name != "test-gateway-vcl" {
 		t.Errorf("expected configmap name %q, got %q", "test-gateway-vcl", cm.Name)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -22,6 +23,7 @@ import (
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/status"
+	"github.com/varnish/gateway/internal/vcl"
 )
 
 const (
@@ -143,15 +145,30 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		logging = params.Spec.Logging
 	}
 
+	// Generate VCL content (ghost preamble + user VCL)
+	vclContent := r.generateVCL(ctx, gateway)
+
+	// Parse image pull secrets
+	imagePullSecrets := r.parseImagePullSecrets()
+
+	// Compute infrastructure hash for pod restart detection
+	infraConfig := InfrastructureConfig{
+		GatewayImage:      r.Config.GatewayImage,
+		VarnishdExtraArgs: varnishdExtraArgs,
+		Logging:           logging,
+		ImagePullSecrets:  imagePullSecrets,
+	}
+	infraHash := infraConfig.ComputeHash()
+
 	// Create resources in order (some depend on others existing)
 	// ConfigMap must be created first so HTTPRoute controller can process routes immediately
 	resources := []client.Object{
-		r.buildVCLConfigMap(gateway),
+		r.buildVCLConfigMap(gateway, vclContent),
 		r.buildAdminSecret(gateway),
 		r.buildServiceAccount(gateway),
 		r.buildChaperoneRole(gateway),
 		r.buildChaperoneRoleBinding(gateway),
-		r.buildDeployment(gateway, varnishdExtraArgs, logging),
+		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash),
 		r.buildService(gateway),
 	}
 
@@ -197,6 +214,22 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", desired.GetName(), err)
 	}
 
+	// For ConfigMaps, update only main.vcl, preserve routing.json (owned by HTTPRoute controller)
+	if desiredCM, ok := desired.(*corev1.ConfigMap); ok {
+		existingCM := existing.(*corev1.ConfigMap)
+		// Check if main.vcl changed
+		if existingCM.Data["main.vcl"] != desiredCM.Data["main.vcl"] {
+			// Update only main.vcl, keep routing.json from existing
+			existingCM.Data["main.vcl"] = desiredCM.Data["main.vcl"]
+			if err := r.Update(ctx, existingCM); err != nil {
+				return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
+			}
+			r.Logger.Info("updated configmap main.vcl",
+				"name", desired.GetName())
+		}
+		return nil
+	}
+
 	// For Deployments, check if image needs updating (supports rolling updates)
 	if desiredDeploy, ok := desired.(*appsv1.Deployment); ok {
 		existingDeploy := existing.(*appsv1.Deployment)
@@ -223,9 +256,24 @@ func needsDeploymentUpdate(existing, desired *appsv1.Deployment) bool {
 		len(desired.Spec.Template.Spec.Containers) == 0 {
 		return false
 	}
+
 	// Check if image changed
-	return existing.Spec.Template.Spec.Containers[0].Image !=
-		desired.Spec.Template.Spec.Containers[0].Image
+	if existing.Spec.Template.Spec.Containers[0].Image !=
+		desired.Spec.Template.Spec.Containers[0].Image {
+		return true
+	}
+
+	// Check if infrastructure hash changed (triggers pod restart)
+	existingHash := ""
+	desiredHash := ""
+	if existing.Spec.Template.Annotations != nil {
+		existingHash = existing.Spec.Template.Annotations[AnnotationInfraHash]
+	}
+	if desired.Spec.Template.Annotations != nil {
+		desiredHash = desired.Spec.Template.Annotations[AnnotationInfraHash]
+	}
+
+	return existingHash != desiredHash
 }
 
 // updateGatewayStatus updates Gateway status using Server-Side Apply.
@@ -456,6 +504,105 @@ func (r *GatewayReconciler) getGatewayClassParameters(ctx context.Context, gatew
 	return &params
 }
 
+// getUserVCL returns user-provided VCL from GatewayClassParameters.
+// It traverses: Gateway -> GatewayClass -> GatewayClassParameters -> ConfigMap
+func (r *GatewayReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
+	// 1. Get GatewayClass
+	var gatewayClass gatewayv1.GatewayClass
+	if err := r.Get(ctx, types.NamespacedName{Name: string(gateway.Spec.GatewayClassName)}, &gatewayClass); err != nil {
+		if !apierrors.IsNotFound(err) {
+			r.Logger.Error("failed to get GatewayClass", "error", err)
+		}
+		return ""
+	}
+
+	// 2. Check if ParametersRef is set
+	if gatewayClass.Spec.ParametersRef == nil {
+		return ""
+	}
+
+	// 3. Validate ParametersRef points to our CRD
+	ref := gatewayClass.Spec.ParametersRef
+	if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
+		string(ref.Kind) != "GatewayClassParameters" {
+		return "" // Not our parameters type
+	}
+
+	// 4. Fetch GatewayClassParameters
+	var params gatewayparamsv1alpha1.GatewayClassParameters
+	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, &params); err != nil {
+		if !apierrors.IsNotFound(err) {
+			r.Logger.Error("failed to get GatewayClassParameters",
+				"name", ref.Name, "error", err)
+		}
+		return ""
+	}
+
+	// 5. If UserVCLConfigMapRef is not set, return empty
+	if params.Spec.UserVCLConfigMapRef == nil {
+		return ""
+	}
+
+	// 6. Fetch the ConfigMap containing user VCL
+	cmRef := params.Spec.UserVCLConfigMapRef
+	var cm corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      cmRef.Name,
+		Namespace: cmRef.Namespace,
+	}, &cm); err != nil {
+		r.Logger.Error("failed to get user VCL ConfigMap",
+			"namespace", cmRef.Namespace, "name", cmRef.Name, "error", err)
+		return ""
+	}
+
+	// 7. Return VCL from ConfigMap (default key is "user.vcl")
+	key := cmRef.Key
+	if key == "" {
+		key = "user.vcl"
+	}
+
+	userVCL, ok := cm.Data[key]
+	if !ok {
+		r.Logger.Warn("user VCL ConfigMap missing expected key",
+			"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
+		return ""
+	}
+
+	r.Logger.Debug("loaded user VCL from ConfigMap",
+		"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
+
+	return userVCL
+}
+
+// generateVCL generates ghost preamble VCL and merges it with user VCL
+func (r *GatewayReconciler) generateVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
+	// Generate ghost preamble VCL
+	generatedVCL := vcl.Generate(nil, vcl.GeneratorConfig{})
+
+	// Get user VCL if configured
+	userVCL := r.getUserVCL(ctx, gateway)
+
+	// Merge generated and user VCL
+	return vcl.Merge(generatedVCL, userVCL)
+}
+
+// parseImagePullSecrets parses the comma-separated ImagePullSecrets config
+// and returns a slice of secret names for use in infrastructure hash computation
+func (r *GatewayReconciler) parseImagePullSecrets() []string {
+	if r.Config.ImagePullSecrets == "" {
+		return nil
+	}
+
+	var secrets []string
+	for _, name := range strings.Split(r.Config.ImagePullSecrets, ",") {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			secrets = append(secrets, name)
+		}
+	}
+	return secrets
+}
+
 // buildLabels returns labels for resources owned by a Gateway.
 func (r *GatewayReconciler) buildLabels(gateway *gatewayv1.Gateway) map[string]string {
 	return map[string]string{
@@ -522,6 +669,82 @@ func (r *GatewayReconciler) enqueueGatewaysForParams() handler.EventHandler {
 	})
 }
 
+// enqueueGatewaysForConfigMap returns an EventHandler that enqueues all Gateways
+// that use a user VCL ConfigMap (via GatewayClass -> GatewayClassParameters).
+// Lookup chain: ConfigMap -> GatewayClassParameters -> GatewayClass -> Gateway
+func (r *GatewayReconciler) enqueueGatewaysForConfigMap() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+		cm, ok := obj.(*corev1.ConfigMap)
+		if !ok {
+			return nil
+		}
+
+		// Find all GatewayClassParameters that reference this ConfigMap
+		var paramsList gatewayparamsv1alpha1.GatewayClassParametersList
+		if err := r.List(ctx, &paramsList); err != nil {
+			r.Logger.Error("failed to list GatewayClassParameters", "error", err)
+			return nil
+		}
+
+		var requests []ctrl.Request
+		for _, params := range paramsList.Items {
+			// Check if this params references our ConfigMap
+			if params.Spec.UserVCLConfigMapRef == nil {
+				continue
+			}
+			cmRef := params.Spec.UserVCLConfigMapRef
+			if cmRef.Name != cm.Name || cmRef.Namespace != cm.Namespace {
+				continue
+			}
+
+			// Find all GatewayClasses that reference this GatewayClassParameters
+			var gatewayClasses gatewayv1.GatewayClassList
+			if err := r.List(ctx, &gatewayClasses); err != nil {
+				r.Logger.Error("failed to list GatewayClasses", "error", err)
+				continue
+			}
+
+			for _, gc := range gatewayClasses.Items {
+				// Check if this GatewayClass references our params
+				if gc.Spec.ParametersRef == nil {
+					continue
+				}
+				ref := gc.Spec.ParametersRef
+				if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
+					string(ref.Kind) != "GatewayClassParameters" ||
+					ref.Name != params.Name {
+					continue
+				}
+
+				// Find all Gateways using this GatewayClass
+				var gateways gatewayv1.GatewayList
+				if err := r.List(ctx, &gateways); err != nil {
+					r.Logger.Error("failed to list Gateways", "error", err)
+					continue
+				}
+
+				for _, gw := range gateways.Items {
+					if string(gw.Spec.GatewayClassName) == gc.Name {
+						requests = append(requests, ctrl.Request{
+							NamespacedName: types.NamespacedName{
+								Name:      gw.Name,
+								Namespace: gw.Namespace,
+							},
+						})
+					}
+				}
+			}
+		}
+
+		if len(requests) > 0 {
+			r.Logger.Info("user VCL ConfigMap changed, enqueuing Gateways for reconciliation",
+				"configmap", fmt.Sprintf("%s/%s", cm.Namespace, cm.Name), "gateways", len(requests))
+		}
+
+		return requests
+	})
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -536,6 +759,10 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&gatewayparamsv1alpha1.GatewayClassParameters{},
 			r.enqueueGatewaysForParams(),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			r.enqueueGatewaysForConfigMap(),
 		).
 		Complete(r)
 }
