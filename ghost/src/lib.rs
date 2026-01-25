@@ -12,6 +12,20 @@
 //! - Lower latency and memory usage vs async Rust HTTP
 //! - Simpler code with fewer dependencies
 //! - Better integration with Varnish ecosystem
+//!
+//! ## Stack Usage Requirements
+//!
+//! Rust code, especially in debug builds, requires more stack space than typical C code.
+//! Varnish's default thread pool stack size (80kB) is often insufficient for ghost.
+//!
+//! **Recommended configuration**: Increase Varnish's thread pool stack to 160kB:
+//!
+//! ```bash
+//! varnishd -p thread_pool_stack=160k ...
+//! ```
+//!
+//! This is particularly important when using regex-based routing rules, which have
+//! higher stack requirements. Production deployments should always use this setting.
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
@@ -107,24 +121,33 @@ pub struct ghost_backend {
 ///
 /// ```json
 /// {
-///   "version": 1,
+///   "version": 2,
 ///   "vhosts": {
 ///     "api.example.com": {
-///       "backends": [
-///         {"address": "10.0.0.1", "port": 8080, "weight": 100},
-///         {"address": "10.0.0.2", "port": 8080, "weight": 100}
+///       "routes": [
+///         {
+///           "path_match": {"type": "PathPrefix", "value": "/api"},
+///           "backends": [
+///             {"address": "10.0.0.1", "port": 8080, "weight": 100},
+///             {"address": "10.0.0.2", "port": 8080, "weight": 100}
+///           ],
+///           "priority": 100
+///         }
 ///       ]
 ///     },
 ///     "*.staging.example.com": {
-///       "backends": [
-///         {"address": "10.0.2.1", "port": 8080, "weight": 100}
+///       "routes": [
+///         {
+///           "backends": [
+///             {"address": "10.0.2.1", "port": 8080, "weight": 100}
+///           ],
+///           "priority": 100
+///         }
+///       ],
+///       "default_backends": [
+///         {"address": "10.0.99.1", "port": 80, "weight": 100}
 ///       ]
 ///     }
-///   },
-///   "default": {
-///     "backends": [
-///       {"address": "10.0.99.1", "port": 80, "weight": 100}
-///     ]
 ///   }
 /// }
 /// ```
