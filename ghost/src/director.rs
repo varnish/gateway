@@ -18,6 +18,7 @@ use varnish::vcl::{Backend, Buffer, Ctx, HttpHeaders, LogTag, StrOrBytes, VclDir
 use crate::backend_pool::BackendPool;
 use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
+use crate::vhost_director::VhostDirector;
 
 /// Wrapper for VCL_BACKEND pointer that implements Send + Sync
 ///
@@ -65,7 +66,7 @@ impl PathMatchCompiled {
     }
 
     /// Check if this path match matches the given path
-    fn matches(&self, path: &str) -> bool {
+    pub fn matches(&self, path: &str) -> bool {
         match self {
             PathMatchCompiled::Exact(value) => path == value,
             PathMatchCompiled::PathPrefix(prefix) => matches_path_prefix(prefix, path),
@@ -102,7 +103,7 @@ impl HeaderMatchCompiled {
     }
 
     /// Check if this header match matches the given request
-    fn matches(&self, bereq: &HttpHeaders) -> bool {
+    pub fn matches(&self, bereq: &HttpHeaders) -> bool {
         match self {
             HeaderMatchCompiled::Exact { name, value } => {
                 let header_value = match bereq.header(name) {
@@ -171,7 +172,7 @@ impl QueryParamMatchCompiled {
     }
 
     /// Check if this query param match matches the given query string
-    fn matches(&self, query_string: &str) -> bool {
+    pub fn matches(&self, query_string: &str) -> bool {
         let params = parse_query_string(query_string);
         let param_value = match self {
             QueryParamMatchCompiled::Exact { name, .. }
@@ -210,7 +211,17 @@ pub struct RoutingState {
     pub default: Option<Vec<WeightedBackendRef>>,
 }
 
+/// Map of vhost directors for two-tier routing
+#[derive(Debug, Clone)]
+pub struct VhostDirectorMap {
+    /// Exact hostname matches to vhost directors
+    pub exact: HashMap<String, Arc<VhostDirector>>,
+    /// Wildcard hostname patterns to vhost directors (in order)
+    pub wildcards: Vec<(String, Arc<VhostDirector>)>,
+}
+
 /// Build routing state from configuration with path-based routing
+#[allow(dead_code)]
 pub fn build_routing_state(
     config: &Config,
     backend_pool: &mut BackendPool,
@@ -308,7 +319,145 @@ pub fn build_routing_state(
     })
 }
 
+/// Build vhost directors from configuration
+///
+/// Creates a VhostDirector for each vhost in the config. Each director handles
+/// route matching and backend selection for its hostname.
+pub fn build_vhost_directors(
+    config: &Config,
+    backend_pool: &mut BackendPool,
+    ctx: &mut Ctx,
+) -> Result<VhostDirectorMap, VclError> {
+    let mut exact = HashMap::new();
+    let mut wildcards = Vec::new();
+
+    // First pass: build routes and populate backend pool
+    let mut vhost_routes: HashMap<String, Vec<RouteEntry>> = HashMap::new();
+
+    // Process vhosts
+    for (hostname, vhost) in &config.vhosts {
+        let mut route_entries = Vec::new();
+
+        // Process each route in the vhost
+        for route in &vhost.routes {
+            let mut backend_refs = Vec::new();
+
+            // Create backend refs for each backend in the route
+            for backend in &route.backends {
+                let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
+                backend_refs.push(WeightedBackendRef {
+                    key,
+                    weight: backend.weight,
+                });
+            }
+
+            let path_match = match route.path_match.as_ref() {
+                Some(pm) => Some(
+                    PathMatchCompiled::from_config(pm)
+                        .map_err(|e| VclError::new(format!("Invalid path match: {}", e)))?,
+                ),
+                None => None,
+            };
+
+            // Compile header matches
+            let headers: Result<Vec<_>, _> = route
+                .headers
+                .iter()
+                .map(HeaderMatchCompiled::from_config)
+                .collect();
+            let headers = headers.map_err(|e| VclError::new(format!("Invalid header match: {}", e)))?;
+
+            // Compile query param matches
+            let query_params: Result<Vec<_>, _> = route
+                .query_params
+                .iter()
+                .map(QueryParamMatchCompiled::from_config)
+                .collect();
+            let query_params = query_params.map_err(|e| VclError::new(format!("Invalid query param match: {}", e)))?;
+
+            route_entries.push(RouteEntry {
+                path_match,
+                method: route.method.clone(),
+                headers,
+                query_params,
+                backends: backend_refs,
+                priority: route.priority,
+            });
+        }
+
+        // Sort routes by priority (descending - higher priority first)
+        route_entries.sort_by(|a, b| b.priority.cmp(&a.priority));
+
+        // Add default_backends as lowest priority route if present
+        if !vhost.default_backends.is_empty() {
+            let mut default_refs = Vec::new();
+            for backend in &vhost.default_backends {
+                let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
+                default_refs.push(WeightedBackendRef {
+                    key,
+                    weight: backend.weight,
+                });
+            }
+            route_entries.push(RouteEntry {
+                path_match: None,
+                method: None,
+                headers: Vec::new(),
+                query_params: Vec::new(),
+                backends: default_refs,
+                priority: 0,
+            });
+        }
+
+        // Store routes for second pass
+        vhost_routes.insert(hostname.clone(), route_entries);
+    }
+
+    // Second pass: create VhostDirectors with shared backend pool
+    // Now that all backends are created, wrap the pool in Arc
+    let backend_pool_arc = Arc::new(backend_pool.clone());
+
+    for (hostname, route_entries) in vhost_routes {
+        // Create VhostDirector for this vhost
+        let vhost_director = Arc::new(VhostDirector::new(
+            hostname.clone(),
+            route_entries,
+            Arc::clone(&backend_pool_arc),
+        ));
+
+        // Categorize into exact or wildcard
+        if hostname.starts_with("*.") {
+            wildcards.push((hostname, vhost_director));
+        } else {
+            exact.insert(hostname, vhost_director);
+        }
+    }
+
+    Ok(VhostDirectorMap { exact, wildcards })
+}
+
+/// Collect all backend keys referenced in vhost directors
+fn collect_referenced_backends_from_directors(directors: &VhostDirectorMap) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+
+    // Collect from exact matches
+    for director in directors.exact.values() {
+        for key in director.backend_keys() {
+            keys.insert(key);
+        }
+    }
+
+    // Collect from wildcards
+    for (_, director) in &directors.wildcards {
+        for key in director.backend_keys() {
+            keys.insert(key);
+        }
+    }
+
+    keys
+}
+
 /// Collect all backend keys referenced in routing state
+#[allow(dead_code)]
 fn collect_referenced_backends(routing: &RoutingState) -> std::collections::HashSet<String> {
     let mut keys = std::collections::HashSet::new();
 
@@ -342,8 +491,8 @@ fn collect_referenced_backends(routing: &RoutingState) -> std::collections::Hash
 
 /// Ghost director implementation
 pub struct GhostDirector {
-    /// Routing state (atomic swap for lock-free reads)
-    routing: ArcSwap<RoutingState>,
+    /// Vhost directors (atomic swap for lock-free reads)
+    vhost_directors: ArcSwap<VhostDirectorMap>,
     /// Backend pool (atomic swap for lock-free reads)
     backends: ArcSwap<BackendPool>,
     /// Path to config file (for reload)
@@ -355,13 +504,13 @@ pub struct GhostDirector {
 }
 
 impl GhostDirector {
-    /// Create a new Ghost director with v1 routing
+    /// Create a new Ghost director with vhost directors
     ///
     /// Returns (director, not_found_backend). The Backend must be kept alive
     /// for the lifetime of the director.
     pub fn new(
         ctx: &mut Ctx,
-        routing: Arc<RoutingState>,
+        vhost_directors: Arc<VhostDirectorMap>,
         backends: BackendPool,
         config_path: PathBuf,
     ) -> Result<(Self, Backend<NotFoundBackend, NotFoundBody>), VclError> {
@@ -370,7 +519,7 @@ impl GhostDirector {
         let not_found_ptr = SendSyncBackend(not_found_backend.vcl_ptr());
 
         let director = Self {
-            routing: ArcSwap::new(Arc::clone(&routing)),
+            vhost_directors: ArcSwap::new(Arc::clone(&vhost_directors)),
             backends: ArcSwap::new(Arc::new(backends)),
             config_path,
             not_found_backend: not_found_ptr,
@@ -396,7 +545,8 @@ impl GhostDirector {
             error_msg
         })?;
 
-        let new_routing = build_routing_state(&config, &mut backend_pool, ctx).map_err(|e| {
+        // Build new vhost directors
+        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx).map_err(|e| {
             let error_msg = format!("Ghost reload failed: {}", e);
             // Log to VSL for visibility in varnishlog
             ctx.log(LogTag::Error, &error_msg);
@@ -405,14 +555,14 @@ impl GhostDirector {
             error_msg
         })?;
 
-        // Collect all backend keys referenced in the new routing state
-        let referenced_keys = collect_referenced_backends(&new_routing);
+        // Collect all backend keys referenced in the new directors
+        let referenced_keys = collect_referenced_backends_from_directors(&new_directors);
 
         // Clean up unreferenced backends from the pool
         backend_pool.retain_only(&referenced_keys);
 
-        // Atomic swap of routing and backends
-        self.routing.store(Arc::new(new_routing));
+        // Atomic swap of vhost_directors and backends
+        self.vhost_directors.store(Arc::new(new_directors));
         self.backends.store(Arc::new(backend_pool));
 
         // Clear error on success
@@ -425,84 +575,211 @@ impl GhostDirector {
     pub fn last_error(&self) -> Option<String> {
         self.last_error.read().clone()
     }
+
+    /// JSON output format for backend.list -j
+    fn list_json(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        let directors = self.vhost_directors.load();
+        let backends = self.backends.load();
+
+        let mut all_backends = Vec::new();
+
+        // Collect from exact matches
+        for director in directors.exact.values() {
+            // Build the JSON object directly
+            let selections = director.stats().backend_selections();
+            let total = director.stats().total_requests();
+
+            let backend_objs: Vec<serde_json::Value> = selections
+                .iter()
+                .map(|(key, count)| {
+                    serde_json::json!({
+                        "address": key,
+                        "selections": count,
+                        "percentage": if total > 0 {
+                            (*count as f64 / total as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+
+            let obj = serde_json::json!({
+                "name": format!("ghost.{}", director.hostname()),
+                "type": "vhost_director",
+                "admin": "auto",
+                "health": if director.healthy(ctx).0 { "healthy" } else { "sick" },
+                "routes": director.backend_keys().len(),
+                "total_requests": total,
+                "last_request": director.stats().last_request().map(|t| {
+                    use crate::format::format_timestamp;
+                    format_timestamp(Some(t))
+                }),
+                "backends": backend_objs
+            });
+
+            all_backends.push(obj);
+        }
+
+        // Collect from wildcards
+        for (_, director) in &directors.wildcards {
+            let selections = director.stats().backend_selections();
+            let total = director.stats().total_requests();
+
+            let backend_objs: Vec<serde_json::Value> = selections
+                .iter()
+                .map(|(key, count)| {
+                    serde_json::json!({
+                        "address": key,
+                        "selections": count,
+                        "percentage": if total > 0 {
+                            (*count as f64 / total as f64) * 100.0
+                        } else {
+                            0.0
+                        }
+                    })
+                })
+                .collect();
+
+            let obj = serde_json::json!({
+                "name": format!("ghost.{}", director.hostname()),
+                "type": "vhost_director",
+                "admin": "auto",
+                "health": if director.healthy(ctx).0 { "healthy" } else { "sick" },
+                "routes": director.backend_keys().len(),
+                "total_requests": total,
+                "last_request": director.stats().last_request().map(|t| {
+                    use crate::format::format_timestamp;
+                    format_timestamp(Some(t))
+                }),
+                "backends": backend_objs
+            });
+
+            all_backends.push(obj);
+        }
+
+        let output = serde_json::json!({
+            "backends": all_backends,
+            "total_vhosts": directors.exact.len() + directors.wildcards.len(),
+            "total_backends": backends.len()
+        });
+
+        let json_str = serde_json::to_string(&output).unwrap_or_else(|_| "{}".to_string());
+        let _ = vsb.write(&json_str);
+    }
 }
 
 impl VclDirector for GhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
-        // Get bereq for Host and URL extraction
+        // Get bereq for Host header extraction
         let bereq = ctx.http_bereq.as_ref()?;
 
         // Get Host header
         let host = get_host_header(bereq)?;
 
-        // Load routing state (lock-free atomic load)
-        let routing = self.routing.load();
+        // Load vhost directors (lock-free atomic load)
+        let directors = self.vhost_directors.load();
 
-        // Extract URL from bereq
-        let url = bereq
-            .url()
-            .and_then(|u| match u {
-                StrOrBytes::Utf8(s) => Some(s),
-                StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
-            })
-            .unwrap_or("/");
-
-        // Extract path and query string
-        let (path, query_string) = extract_path_and_query(url);
-
-        // Extract method
-        let method = bereq
-            .method()
-            .and_then(|m| match m {
-                StrOrBytes::Utf8(s) => Some(s),
-                StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
-            })
-            .unwrap_or("GET");
-
-        // Hostname + path + method + headers + query matching
-        let backend_refs = match match_host_and_path(&routing, &host, path, method, bereq, query_string) {
-            Some(refs) => refs,
+        // Match hostname to vhost director
+        let vhost_director = match match_hostname(&directors, &host) {
+            Some(dir) => dir,
             None => {
-                // Return 404 backend for undefined vhosts/paths
+                // No vhost found for this hostname
+                // Return 404 backend
                 return Some(self.not_found_backend.0);
             }
         };
 
-        // Select backend using weighted random
-        let backend_ref = select_backend_weighted(backend_refs)?;
-
-        // Look up in backend pool (lock-free atomic load)
-        let backends = self.backends.load();
-        let backend = backends.get(&backend_ref.key)?;
-
-        Some(backend.vcl_ptr())
+        // Delegate to vhost director for route matching and backend selection
+        match vhost_director.resolve(ctx) {
+            Some(backend) => Some(backend),
+            None => {
+                // No backend found for this path/method/headers
+                // Return 404 backend
+                Some(self.not_found_backend.0)
+            }
+        }
     }
 
-    fn healthy(&self, _ctx: &mut Ctx) -> (bool, SystemTime) {
-        // Phase 1: Always report healthy
-        // Phase 2: Check if any backend is healthy
-        (true, SystemTime::now())
+    fn healthy(&self, ctx: &mut Ctx) -> (bool, SystemTime) {
+        // Aggregate health across all vhost directors
+        // Report healthy if any vhost has backends
+        let directors = self.vhost_directors.load();
+
+        // Check if any vhost director is healthy
+        for director in directors.exact.values() {
+            let (healthy, _) = director.healthy(ctx);
+            if healthy {
+                return (true, SystemTime::now());
+            }
+        }
+
+        for (_, director) in &directors.wildcards {
+            let (healthy, _) = director.healthy(ctx);
+            if healthy {
+                return (true, SystemTime::now());
+            }
+        }
+
+        // No healthy vhosts
+        (false, SystemTime::now())
     }
 
     fn release(&self) {
         // Backends are dropped when director is dropped
     }
 
-    fn list(&self, _ctx: &mut Ctx, vsb: &mut Buffer, _detailed: bool, _json: bool) {
-        let routing = self.routing.load();
-        let backends = self.backends.load();
+    fn list(&self, ctx: &mut Ctx, vsb: &mut Buffer, detailed: bool, json: bool) {
+        let directors = self.vhost_directors.load();
 
-        let total_vhosts = routing.exact.len() + routing.wildcards.len();
-        let has_default = routing.default.is_some();
+        if json {
+            self.list_json(ctx, vsb);
+        } else if detailed {
+            // Detailed: each vhost gets detailed output
+            for director in directors.exact.values() {
+                director.list(ctx, vsb, true, false);
+            }
+            for (_, director) in &directors.wildcards {
+                director.list(ctx, vsb, true, false);
+            }
+        } else {
+            // Brief: table header + rows
+            let header = "Backend name                      Admin    Health    Requests\n";
+            let _ = vsb.write(&header);
 
-        let msg = format!(
-            "{} vhosts, {} backends, default: {}",
-            total_vhosts,
-            backends.len(),
-            if has_default { "yes" } else { "no" }
-        );
-        let _ = vsb.write(&msg);
+            for director in directors.exact.values() {
+                director.list(ctx, vsb, false, false);
+            }
+            for (_, director) in &directors.wildcards {
+                director.list(ctx, vsb, false, false);
+            }
+        }
     }
+}
+
+/// Match hostname to vhost director
+///
+/// Returns the vhost director for the matched hostname.
+/// Matching priority: exact hostname > wildcard hostname
+fn match_hostname<'a>(
+    directors: &'a VhostDirectorMap,
+    host: &str,
+) -> Option<&'a Arc<VhostDirector>> {
+    let host = host.to_lowercase();
+
+    // 1. Try exact hostname match
+    if let Some(director) = directors.exact.get(&host) {
+        return Some(director);
+    }
+
+    // 2. Try wildcard hostname match
+    for (pattern, director) in &directors.wildcards {
+        if matches_wildcard(pattern, &host) {
+            return Some(director);
+        }
+    }
+
+    None
 }
 
 /// Wrapper around Arc<GhostDirector> to implement VclDirector (orphan rules workaround)
@@ -533,6 +810,7 @@ impl VclDirector for SharedGhostDirector {
 /// 1. Exact hostname > wildcard hostname > default
 /// 2. Within matched vhost, iterate routes by priority
 /// 3. First route whose path, method, headers, and query params match wins
+#[allow(dead_code)]
 fn match_host_and_path<'a>(
     routing: &'a RoutingState,
     host: &str,
@@ -571,6 +849,7 @@ fn match_host_and_path<'a>(
 
 /// Match routes against all conditions (already sorted by priority)
 /// All conditions within a match are AND-ed together
+#[allow(dead_code)]
 fn match_routes<'a>(
     routes: &'a [RouteEntry],
     path: &str,
@@ -637,6 +916,7 @@ fn matches_wildcard(pattern: &str, host: &str) -> bool {
 }
 
 /// Select a backend using weighted random selection
+#[allow(dead_code)]
 fn select_backend_weighted(refs: &[WeightedBackendRef]) -> Option<&WeightedBackendRef> {
     if refs.is_empty() {
         return None;
@@ -689,6 +969,7 @@ fn get_host_header(http: &HttpHeaders) -> Option<String> {
 
 /// Extract path and query string from URL
 /// Returns (path, Some(query_string)) or (path, None)
+#[allow(dead_code)]
 fn extract_path_and_query(url: &str) -> (&str, Option<&str>) {
     if let Some(q_idx) = url.find('?') {
         let path = &url[..q_idx];

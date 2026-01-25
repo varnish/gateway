@@ -67,24 +67,33 @@ return (deliver);
 
 ```json
 {
-"version": 1,
+"version": 2,
 "vhosts": {
 "api.example.com": {
+"routes": [
+{
+"path_match": {"type": "PathPrefix", "value": "/api"},
 "backends": [
 {"address": "10.0.0.1", "port": 8080, "weight": 100},
 {"address": "10.0.0.2", "port": 8080, "weight": 100}
+],
+"priority": 100
+}
 ]
 },
 "*.staging.example.com": {
+"routes": [
+{
 "backends": [
 {"address": "10.0.2.1", "port": 8080, "weight": 100}
-]
+],
+"priority": 100
 }
-},
-"default": {
-"backends": [
+],
+"default_backends": [
 {"address": "10.0.99.1", "port": 80, "weight": 100}
 ]
+}
 }
 }
 ```

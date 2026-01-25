@@ -36,7 +36,10 @@ use varnish::vcl::{Ctx, Director, VclError};
 mod backend_pool;
 mod config;
 mod director;
+pub mod format;
 mod not_found_backend;
+mod stats;
+mod vhost_director;
 
 use backend_pool::BackendPool;
 use director::{GhostDirector, SharedGhostDirector};
@@ -276,13 +279,12 @@ mod ghost {
             };
 
             // Don't load configuration here - it may not exist yet during startup.
-            // Start with empty routing state. The first reload() call from chaperone
+            // Start with empty vhost directors. The first reload() call from chaperone
             // will populate backends after ghost.json is generated.
             use std::collections::HashMap;
-            let routing = director::RoutingState {
+            let vhost_directors = director::VhostDirectorMap {
                 exact: HashMap::new(),
                 wildcards: Vec::new(),
-                default: None,
             };
 
             // Create empty backend pool
@@ -290,7 +292,7 @@ mod ghost {
 
             // Create director (Arc-wrapped so we can clone for reload access)
             let (ghost_director_impl, not_found_backend) =
-                GhostDirector::new(ctx, Arc::new(routing), backend_pool, config_path)?;
+                GhostDirector::new(ctx, Arc::new(vhost_directors), backend_pool, config_path)?;
             let ghost_director = Arc::new(ghost_director_impl);
             let shared_director = SharedGhostDirector(Arc::clone(&ghost_director));
             let director = Director::new(ctx, "ghost", name, shared_director)?;

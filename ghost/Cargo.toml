@@ -16,6 +16,7 @@ parking_lot = "0.12"
 arc-swap = "1.7"
 rand = "0.8"
 regex = "1.10"
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 [dev-dependencies]
 tempfile = "3.0"

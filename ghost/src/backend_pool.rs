@@ -14,7 +14,7 @@ use varnish::vcl::{Ctx, Endpoint, NativeBackend, NativeBackendConfig, VclError};
 /// Each director owns its own backends. Backends are indexed by "address:port"
 /// and reused across config reloads within the same director.
 /// Backends are wrapped in Arc for efficient cloning during hot-reload.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BackendPool {
     backends: HashMap<String, Arc<NativeBackend>>,
 }

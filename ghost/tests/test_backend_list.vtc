@@ -1,0 +1,121 @@
+varnishtest "backend.list output formats"
+
+# Test that backend.list produces correct output in normal, detailed, and JSON modes
+
+server s1 {
+    rxreq
+    expect req.http.host == "api.example.com"
+    txresp -status 200 -body "API response"
+} -start
+
+server s2 {
+    rxreq
+    expect req.http.host == "web.example.com"
+    txresp -status 200 -body "Web response"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+  "version": 2,
+  "vhosts": {
+    "api.example.com": {
+      "routes": [
+        {
+          "backends": [
+            {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+          ],
+          "priority": 100
+        }
+      ]
+    },
+    "web.example.com": {
+      "routes": [
+        {
+          "backends": [
+            {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+          ],
+          "priority": 100
+        }
+      ]
+    }
+  }
+}
+EOF
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+    }
+
+    sub vcl_backend_fetch {
+        set bereq.backend = router.backend();
+    }
+} -start
+
+# Trigger initial reload
+client creload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# Make some requests to generate stats
+client c1 {
+    txreq -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "API response"
+} -run
+
+client c2 {
+    txreq -hdr "Host: web.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "Web response"
+} -run
+
+client c3 {
+    txreq -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# Test normal backend.list output
+varnish v1 -cliok "backend.list"
+varnish v1 -cliexpect "Backend name" "backend.list"
+varnish v1 -cliexpect "ghost.api.example.com" "backend.list"
+varnish v1 -cliexpect "ghost.web.example.com" "backend.list"
+varnish v1 -cliexpect "healthy" "backend.list"
+
+# Test detailed backend.list output
+varnish v1 -cliok "backend.list -p"
+varnish v1 -cliexpect "Backend: ghost.api.example.com" "backend.list -p"
+varnish v1 -cliexpect "Admin: auto" "backend.list -p"
+varnish v1 -cliexpect "Health: healthy" "backend.list -p"
+varnish v1 -cliexpect "Routes:" "backend.list -p"
+varnish v1 -cliexpect "Total requests:" "backend.list -p"
+varnish v1 -cliexpect "Backends:" "backend.list -p"
+varnish v1 -cliexpect "selections" "backend.list -p"
+
+# Note: JSON mode (-j) output would need to be verified with more sophisticated parsing
+# For now, we verify that the JSON flag doesn't crash the system
+varnish v1 -cliok "backend.list -j"
+varnish v1 -cliexpect "ghost.api.example.com" "backend.list -j"
+varnish v1 -cliexpect "vhost_director" "backend.list -j"
