@@ -327,6 +327,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/drain", drainHandler)
+	mux.HandleFunc("/debug/backends", makeBackendsHandler(vadm))
 
 	healthServer := &http.Server{
 		Addr:    cfg.HealthAddr,
@@ -431,4 +432,48 @@ func drainHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Info("drain requested via endpoint, health will now return 503")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("draining"))
+}
+
+// makeBackendsHandler creates a handler that exposes varnishadm backend.list output
+// Supports query parameters:
+//   - format=json: Return JSON output (backend.list -j)
+//   - detailed=true: Return detailed output (backend.list -p)
+func makeBackendsHandler(vadm *varnishadm.Server) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Parse query parameters
+		format := r.URL.Query().Get("format")
+		detailed := r.URL.Query().Get("detailed") == "true"
+
+		// Determine flags
+		var jsonMode bool
+		if format == "json" {
+			jsonMode = true
+			detailed = false // JSON mode takes precedence
+		}
+
+		// Execute backend.list command
+		resp, err := vadm.BackendList(detailed, jsonMode)
+		if err != nil {
+			slog.Error("backend.list failed", "error", err)
+			http.Error(w, fmt.Sprintf("backend.list error: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		// Check response status
+		if resp.StatusCode() != 200 {
+			slog.Warn("backend.list returned non-OK status", "status", resp.StatusCode())
+			http.Error(w, fmt.Sprintf("backend.list status %d: %s", resp.StatusCode(), resp.Payload()), http.StatusInternalServerError)
+			return
+		}
+
+		// Set content type based on format
+		if jsonMode {
+			w.Header().Set("Content-Type", "application/json")
+		} else {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(resp.Payload()))
+	}
 }

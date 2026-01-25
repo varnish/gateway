@@ -592,3 +592,14 @@ func (m *MockVarnishadm) GetTLSState() []TLSCertEntry {
 	}
 	return certs
 }
+
+// BackendList executes backend.list command with optional flags
+func (m *MockVarnishadm) BackendList(detailed, json bool) (VarnishResponse, error) {
+	cmd := "backend.list"
+	if json {
+		cmd += " -j"
+	} else if detailed {
+		cmd += " -p"
+	}
+	return m.Exec(cmd)
+}

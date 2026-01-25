@@ -589,3 +589,82 @@ func TestCommands_StructuredMethods(t *testing.T) {
 		}
 	})
 }
+
+func TestCommands_BackendCommands(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	t.Run("BackendList normal mode", func(t *testing.T) {
+		mock.ClearCallHistory()
+		mock.SetResponse("backend.list", VarnishResponse{
+			statusCode: ClisOk,
+			payload:    "Backend name    Admin    Health    Requests\nghost.api.example.com    auto    healthy    100",
+		})
+
+		resp, err := mock.BackendList(false, false)
+		if err != nil {
+			t.Fatalf("BackendList() error = %v", err)
+		}
+
+		if resp.StatusCode() != ClisOk {
+			t.Errorf("statusCode = %v, want %v", resp.StatusCode(), ClisOk)
+		}
+
+		history := mock.GetCallHistory()
+		expectedCmd := "backend.list"
+		if len(history) != 1 || history[0] != expectedCmd {
+			t.Errorf("Expected command %q, got %v", expectedCmd, history)
+		}
+	})
+
+	t.Run("BackendList detailed mode", func(t *testing.T) {
+		mock.ClearCallHistory()
+		mock.SetResponse("backend.list -p", VarnishResponse{
+			statusCode: ClisOk,
+			payload:    "Backend: ghost.api.example.com\n  Admin: auto\n  Health: healthy\n  Routes: 3\n  Total requests: 1234",
+		})
+
+		resp, err := mock.BackendList(true, false)
+		if err != nil {
+			t.Fatalf("BackendList() error = %v", err)
+		}
+
+		if resp.StatusCode() != ClisOk {
+			t.Errorf("statusCode = %v, want %v", resp.StatusCode(), ClisOk)
+		}
+
+		history := mock.GetCallHistory()
+		expectedCmd := "backend.list -p"
+		if len(history) != 1 || history[0] != expectedCmd {
+			t.Errorf("Expected command %q, got %v", expectedCmd, history)
+		}
+	})
+
+	t.Run("BackendList JSON mode", func(t *testing.T) {
+		mock.ClearCallHistory()
+		mock.SetResponse("backend.list -j", VarnishResponse{
+			statusCode: ClisOk,
+			payload:    `{"backends":[{"name":"ghost.api.example.com","type":"vhost_director","total_requests":1234}]}`,
+		})
+
+		resp, err := mock.BackendList(false, true)
+		if err != nil {
+			t.Fatalf("BackendList() error = %v", err)
+		}
+
+		if resp.StatusCode() != ClisOk {
+			t.Errorf("statusCode = %v, want %v", resp.StatusCode(), ClisOk)
+		}
+
+		history := mock.GetCallHistory()
+		expectedCmd := "backend.list -j"
+		if len(history) != 1 || history[0] != expectedCmd {
+			t.Errorf("Expected command %q, got %v", expectedCmd, history)
+		}
+
+		// Verify JSON is valid
+		if !strings.Contains(resp.Payload(), "backends") {
+			t.Error("Expected JSON payload to contain 'backends' key")
+		}
+	})
+}

@@ -196,3 +196,18 @@ func (v *Server) TLSCertRollback() (VarnishResponse, error) {
 func (v *Server) TLSCertReload() (VarnishResponse, error) {
 	return v.Exec("tls.cert.reload")
 }
+
+// Backend commands
+
+// BackendList lists all backends
+// If detailed is true, adds -p flag for detailed output
+// If json is true, adds -j flag for JSON output
+func (v *Server) BackendList(detailed, json bool) (VarnishResponse, error) {
+	cmd := "backend.list"
+	if json {
+		cmd += " -j"
+	} else if detailed {
+		cmd += " -p"
+	}
+	return v.Exec(cmd)
+}
