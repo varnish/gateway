@@ -1,0 +1,140 @@
+# Canary Deployment Example
+#
+# This example demonstrates how to perform a canary deployment using the Varnish Gateway.
+# Traffic is split 90% to the stable version and 10% to the canary version.
+#
+# Deploy:
+#   kubectl apply -f docs/examples/canary-deployment.yaml
+#
+# Test:
+#   # Get the gateway service IP
+#   kubectl get svc -n default varnish-gateway
+#
+#   # Make requests and observe the traffic split
+#   for i in {1..100}; do curl -H "Host: app.example.com" http://<GATEWAY-IP>/; done | sort | uniq -c
+#   # You should see approximately 90 responses from stable and 10 from canary
+
+---
+# Gateway (if not already deployed)
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: varnish-gateway
+  namespace: default
+spec:
+  gatewayClassName: varnish
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+
+---
+# Stable backend deployment (version 1.0)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-stable
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myapp
+      version: stable
+  template:
+    metadata:
+      labels:
+        app: myapp
+        version: stable
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo
+        args:
+          - "-text=stable-v1.0"
+          - "-listen=:8080"
+        ports:
+        - containerPort: 8080
+
+---
+# Canary backend deployment (version 2.0)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-canary
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: myapp
+      version: canary
+  template:
+    metadata:
+      labels:
+        app: myapp
+        version: canary
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo
+        args:
+          - "-text=canary-v2.0"
+          - "-listen=:8080"
+        ports:
+        - containerPort: 8080
+
+---
+# Stable service
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-stable
+  namespace: default
+spec:
+  selector:
+    app: myapp
+    version: stable
+  ports:
+  - port: 8080
+    targetPort: 8080
+
+---
+# Canary service
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-canary
+  namespace: default
+spec:
+  selector:
+    app: myapp
+    version: canary
+  ports:
+  - port: 8080
+    targetPort: 8080
+
+---
+# HTTPRoute with weighted traffic split
+# 90% to stable, 10% to canary
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: canary-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: varnish-gateway
+      namespace: default
+  hostnames:
+    - "app.example.com"
+  rules:
+    - backendRefs:
+        # Stable version gets 90% of traffic
+        - name: app-stable
+          port: 8080
+          weight: 90
+        # Canary version gets 10% of traffic
+        - name: app-canary
+          port: 8080
+          weight: 10

@@ -1,9 +1,28 @@
+# ConfigMap with user VCL to disable caching
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: varnish-user-vcl
+  namespace: varnish-gateway-system
+data:
+  user.vcl: |
+    # Disable caching for all requests
+    sub vcl_recv {
+        return (pass);
+    }
+---
 # GatewayClassParameters for Varnish configuration
 apiVersion: gateway.varnish-software.com/v1alpha1
 kind: GatewayClassParameters
 metadata:
   name: varnish-params
 spec:
+  # Reference to user VCL that disables caching
+  userVCLConfigMapRef:
+    name: varnish-user-vcl
+    namespace: varnish-gateway-system
+    key: user.vcl
+
   # Enable varnishlog for debugging
   logging:
     mode: varnishlog
