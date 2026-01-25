@@ -1,6 +1,9 @@
 package ghost
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Endpoint represents a discovered backend endpoint from Kubernetes.
 type Endpoint struct {
@@ -147,6 +150,99 @@ func GroupRoutesByHostname(routes []Route, hostnames []string) map[string][]Rout
 	return grouped
 }
 
+// mergeRoutesByMatchCriteria groups routes with identical match criteria and merges their backends.
+// This enables traffic splitting where multiple backendRefs in the same HTTPRoute rule
+// are combined into a single route with weighted backends.
+func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []RouteBackends {
+	// Group routes by their match criteria
+	type routeKey struct {
+		pathMatch   string // JSON serialization of PathMatch
+		method      string
+		headers     string // JSON serialization of Headers
+		queryParams string // JSON serialization of QueryParams
+		priority    int
+	}
+
+	grouped := make(map[routeKey][]Route)
+	for _, route := range routes {
+		key := routeKey{
+			pathMatch:   serializePathMatch(route.PathMatch),
+			method:      serializeMethod(route.Method),
+			headers:     serializeHeaders(route.Headers),
+			queryParams: serializeQueryParams(route.QueryParams),
+			priority:    route.Priority,
+		}
+		grouped[key] = append(grouped[key], route)
+	}
+
+	// Convert grouped routes to RouteBackends
+	result := make([]RouteBackends, 0, len(grouped))
+	for key, routeGroup := range grouped {
+		// Collect all backends from all routes in this group
+		var allBackends []Backend
+		for _, route := range routeGroup {
+			backends := routeToBackends(route, endpoints)
+			allBackends = append(allBackends, backends...)
+		}
+
+		// Only create RouteBackends if we have backends
+		if len(allBackends) > 0 {
+			// Use the first route's match criteria (all routes in group have identical criteria)
+			firstRoute := routeGroup[0]
+			result = append(result, RouteBackends{
+				PathMatch:   firstRoute.PathMatch,
+				Method:      firstRoute.Method,
+				Headers:     firstRoute.Headers,
+				QueryParams: firstRoute.QueryParams,
+				Backends:    allBackends,
+				Priority:    key.priority,
+			})
+		}
+	}
+
+	return result
+}
+
+// serializePathMatch converts PathMatch to a string for grouping.
+func serializePathMatch(pm *PathMatch) string {
+	if pm == nil {
+		return ""
+	}
+	return string(pm.Type) + ":" + pm.Value
+}
+
+// serializeMethod converts method pointer to string for grouping.
+func serializeMethod(m *string) string {
+	if m == nil {
+		return ""
+	}
+	return *m
+}
+
+// serializeHeaders converts headers to string for grouping.
+func serializeHeaders(headers []HeaderMatch) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, h := range headers {
+		parts = append(parts, string(h.Type)+":"+h.Name+":"+h.Value)
+	}
+	return strings.Join(parts, "|")
+}
+
+// serializeQueryParams converts query params to string for grouping.
+func serializeQueryParams(params []QueryParamMatch) string {
+	if len(params) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, p := range params {
+		parts = append(parts, string(p.Type)+":"+p.Name+":"+p.Value)
+	}
+	return strings.Join(parts, "|")
+}
+
 // GenerateV2 creates a v2 ghost.json Config by merging routing rules with discovered endpoints.
 // routingConfig contains the vhost-to-service mappings with path-based routes from the operator.
 // endpoints contains the discovered pod IPs for each service.
@@ -158,20 +254,9 @@ func GenerateV2(routingConfig *RoutingConfigV2, endpoints ServiceEndpoints) *Con
 		// Initialize to empty slice, not nil - nil marshals to null in JSON
 		routeBackends := make([]RouteBackends, 0)
 
-		// Process each route in this vhost
-		for _, route := range vhostRouting.Routes {
-			backends := routeToBackends(route, endpoints)
-			if len(backends) > 0 {
-				routeBackends = append(routeBackends, RouteBackends{
-					PathMatch:   route.PathMatch,
-					Method:      route.Method,
-					Headers:     route.Headers,
-					QueryParams: route.QueryParams,
-					Backends:    backends,
-					Priority:    route.Priority,
-				})
-			}
-		}
+		// Merge routes with identical match criteria (for traffic splitting)
+		mergedRoutes := mergeRoutesByMatchCriteria(vhostRouting.Routes, endpoints)
+		routeBackends = append(routeBackends, mergedRoutes...)
 
 		// Process default route if present
 		// Initialize to empty slice, not nil - nil marshals to null in JSON

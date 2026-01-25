@@ -20,7 +20,6 @@
 ## Phase 4: Traffic Management
 
 - Traffic splitting (weighted backendRefs)
-- RequestMirror filter
 
 ## Phase 5: Request/Response Modification
 
