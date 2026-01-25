@@ -185,6 +185,26 @@ spec:
     - "workspace_backend=128k"
 ```
 
+## Dynamic Configuration Updates
+
+You can change logging configuration without redeploying Gateways. Simply edit the GatewayClassParameters:
+
+```bash
+# Edit logging configuration
+kubectl edit gatewayclassparameters varnish-params
+
+# Change mode, format, or extraArgs
+# The operator will automatically update all Gateways using this GatewayClass
+```
+
+The operator watches GatewayClassParameters for changes and automatically:
+1. Detects which Gateways use the modified parameters
+2. Triggers reconciliation for those Gateways
+3. Updates the Deployment with new logging configuration
+4. Kubernetes performs a rolling update (zero downtime)
+
+**No manual intervention needed** - changes propagate automatically within seconds.
+
 ## Usage
 
 ### View live logs

@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -464,6 +465,63 @@ func (r *GatewayReconciler) buildLabels(gateway *gatewayv1.Gateway) map[string]s
 	}
 }
 
+// enqueueGatewaysForParams returns an EventHandler that enqueues all Gateways
+// that use a GatewayClass referencing the changed GatewayClassParameters.
+func (r *GatewayReconciler) enqueueGatewaysForParams() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+		params, ok := obj.(*gatewayparamsv1alpha1.GatewayClassParameters)
+		if !ok {
+			return nil
+		}
+
+		// Find all GatewayClasses that reference this GatewayClassParameters
+		var gatewayClasses gatewayv1.GatewayClassList
+		if err := r.List(ctx, &gatewayClasses); err != nil {
+			r.Logger.Error("failed to list GatewayClasses", "error", err)
+			return nil
+		}
+
+		var requests []ctrl.Request
+		for _, gc := range gatewayClasses.Items {
+			// Check if this GatewayClass references our params
+			if gc.Spec.ParametersRef == nil {
+				continue
+			}
+			ref := gc.Spec.ParametersRef
+			if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
+				string(ref.Kind) != "GatewayClassParameters" ||
+				ref.Name != params.Name {
+				continue
+			}
+
+			// Find all Gateways using this GatewayClass
+			var gateways gatewayv1.GatewayList
+			if err := r.List(ctx, &gateways); err != nil {
+				r.Logger.Error("failed to list Gateways", "error", err)
+				continue
+			}
+
+			for _, gw := range gateways.Items {
+				if string(gw.Spec.GatewayClassName) == gc.Name {
+					requests = append(requests, ctrl.Request{
+						NamespacedName: types.NamespacedName{
+							Name:      gw.Name,
+							Namespace: gw.Namespace,
+						},
+					})
+				}
+			}
+		}
+
+		if len(requests) > 0 {
+			r.Logger.Info("GatewayClassParameters changed, enqueuing Gateways for reconciliation",
+				"params", params.Name, "gateways", len(requests))
+		}
+
+		return requests
+	})
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -475,6 +533,10 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
+		Watches(
+			&gatewayparamsv1alpha1.GatewayClassParameters{},
+			r.enqueueGatewaysForParams(),
+		).
 		Complete(r)
 }
 
