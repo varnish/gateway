@@ -36,6 +36,7 @@ The Varnish Gateway supports streaming varnish logs via a sidecar container that
 2. **Shared varnish working directory**: Both containers mount the same `/var/run/varnish` volume
 3. **Stdout streaming**: Logs go to stdout for automatic Kubernetes capture
 4. **Standard kubectl logs**: Access logs via `kubectl logs <pod-name> -c varnish-log`
+5. **Automatic retry**: Uses `varnishlog -t off` to wait indefinitely for varnishd to start (no fixed delays)
 
 ## Configuration
 

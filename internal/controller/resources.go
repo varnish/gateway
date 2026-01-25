@@ -409,23 +409,18 @@ func (r *GatewayReconciler) buildLoggingSidecar(gateway *gatewayv1.Gateway, logg
 		image = logging.Image
 	}
 
-	// Build command string with all arguments
-	// Use shell wrapper with startup delay to wait for varnishd to be ready
-	var cmdStr string
+	// Build command arguments
+	// Use -t off to wait indefinitely for varnishd to become available
+	command := []string{logging.Mode}
+	args := []string{"-n", "/var/run/varnish/vsm", "-t", "off"}
+
+	// Add format for varnishncsa
 	if logging.Mode == "varnishncsa" && logging.Format != "" {
-		// Quote format string to handle spaces and special characters
-		cmdStr = fmt.Sprintf("%s -n /var/run/varnish/vsm -F %q", logging.Mode, logging.Format)
-	} else {
-		cmdStr = fmt.Sprintf("%s -n /var/run/varnish/vsm", logging.Mode)
+		args = append(args, "-F", logging.Format)
 	}
 
-	// Add extra args (user responsible for proper quoting)
-	if len(logging.ExtraArgs) > 0 {
-		cmdStr = cmdStr + " " + strings.Join(logging.ExtraArgs, " ")
-	}
-
-	command := []string{"sh", "-c"}
-	args := []string{fmt.Sprintf("sleep 5 && exec %s", cmdStr)}
+	// Add extra args
+	args = append(args, logging.ExtraArgs...)
 
 	return corev1.Container{
 		Name:    "varnish-log",
