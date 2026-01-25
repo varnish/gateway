@@ -47,7 +47,7 @@ All three components (operator, chaperone, ghost) are now at Phase 1 completion.
 **Ghost package** (`internal/ghost/`) - Phase 1 Complete:
 - `config.go` - Types for ghost.json and routing.json configuration
 - `generator.go` - Merges routing rules (from operator) with EndpointSlices to produce ghost.json
-- `watcher.go` - Watches routing config + EndpointSlices, regenerates ghost.json, triggers HTTP reload
+- `watcher.go` - Watches routing config + EndpointSlices via Kubernetes informers, content-based deduplication for routing.json, regenerates ghost.json, triggers HTTP reload
 
 **Reload package** (`internal/reload/`):
 - `client.go` - HTTP client to trigger ghost VMOD reload via `/.varnish-ghost/reload` endpoint
@@ -55,7 +55,7 @@ All three components (operator, chaperone, ghost) are now at Phase 1 completion.
 **VCL package** (`internal/vcl/`):
 - `generator.go` - Generates ghost preamble VCL (imports ghost, initializes router)
 - `merge.go` - Merges generated VCL with user VCL
-- `reloader.go` - Watches main.vcl, hot-reloads via varnishadm with garbage collection
+- `reloader.go` - Watches main.vcl via Kubernetes informers, content-based deduplication, hot-reloads via varnishadm with garbage collection
 - `types.go` - Backend info types for routing config generation
 
 **Varnishadm package** (`internal/varnishadm/`):
@@ -187,7 +187,7 @@ HTTPRoute → HTTPRoute Controller → ConfigMap routing.json → Ghost hot-relo
 **Hot Reload** (config changes):
 - User VCL changes → varnishadm reload (no pod restart)
 - Routing changes → ghost HTTP reload (no pod restart)
-- **Detection**: Chaperone watches ConfigMap via fsnotify and Kubernetes informers
+- **Detection**: Chaperone watches ConfigMap via Kubernetes informers with content-based deduplication
 - **Trigger**: In-process reload, zero downtime
 
 **ConfigMap Shared Ownership Pattern**
@@ -214,10 +214,11 @@ ConfigMap:
 User VCL ConfigMap change
   ↓ (watched by Gateway controller via enqueueGatewaysForConfigMap)
 Gateway reconcile
-  ↓ (regenerate VCL, update ConfigMap)
+  ↓ (regenerate VCL, update ConfigMap main.vcl)
   ↓ (infra-hash unchanged? YES)
-  → ConfigMap main.vcl updated
-     └─> Chaperone detects change → hot-reloads VCL via varnishadm
+  → ConfigMap updated
+     ├─> Ghost watcher: sees update, checks routing.json (unchanged), SKIPS reload
+     └─> VCL reloader: sees update, checks main.vcl (changed), TRIGGERS VCL reload
 
 GatewayClassParameters.varnishdExtraArgs change
   ↓ (watched by Gateway controller via enqueueGatewaysForParams)
@@ -230,11 +231,10 @@ Gateway reconcile
 HTTPRoute change
   ↓ (primary resource of HTTPRoute controller)
 HTTPRoute reconcile
-  ↓ (generate routing.json, update ConfigMap)
-  → ConfigMap routing.json updated
-     └─> Chaperone detects change
-          └─> Regenerates ghost.json
-               └─> Hot-reloads ghost via HTTP endpoint
+  ↓ (generate routing.json, update ConfigMap routing.json)
+  → ConfigMap updated
+     ├─> Ghost watcher: sees update, checks routing.json (changed), TRIGGERS ghost reload
+     └─> VCL reloader: sees update, checks main.vcl (unchanged), SKIPS reload
 ```
 
 ### Two Reload Paths
@@ -247,7 +247,7 @@ HTTPRoute reconcile
 ```
 sigs.k8s.io/controller-runtime    # operator framework
 sigs.k8s.io/gateway-api           # Gateway API types
-github.com/fsnotify/fsnotify      # file watching (chaperone)
+k8s.io/client-go                  # Kubernetes client and informers
 github.com/perbu/vclparser        # optional: VCL syntax validation
 ```
 

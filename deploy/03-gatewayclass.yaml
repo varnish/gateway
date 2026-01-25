@@ -8,6 +8,7 @@ data:
   user.vcl: |
     # Disable caching for all requests
     sub vcl_recv {
+        # pass all the things!
         return (pass);
     }
 ---

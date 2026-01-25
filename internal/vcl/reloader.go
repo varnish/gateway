@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"path/filepath"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
-	"github.com/varnish/gateway/internal/filechange"
 	"github.com/varnish/gateway/internal/varnishadm"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 )
 
 const (
@@ -20,9 +23,6 @@ const (
 
 	// vclPrefix is the prefix for managed VCL names
 	vclPrefix = "vcl_"
-
-	// debounceDelay is the time to wait after a file change before reloading
-	debounceDelay = 100 * time.Millisecond
 )
 
 // Reloader watches a VCL file and hot-reloads it into Varnish when it changes
@@ -32,12 +32,25 @@ type Reloader struct {
 	keepCount  int
 	logger     *slog.Logger
 
-	// File change tracking to avoid spurious reloads
-	fileDetector filechange.Detector
+	// ConfigMap watching
+	kubeClient         kubernetes.Interface
+	configMapName      string
+	configMapNamespace string
+	lastVCL            string
+	lastVCLMux         sync.RWMutex
+	lastConfigMapRV    string
 }
 
 // New creates a new VCL reloader
-func New(v varnishadm.VarnishadmInterface, vclPath string, keepCount int, logger *slog.Logger) *Reloader {
+func New(
+	v varnishadm.VarnishadmInterface,
+	vclPath string,
+	keepCount int,
+	kubeClient kubernetes.Interface,
+	configMapName string,
+	configMapNamespace string,
+	logger *slog.Logger,
+) *Reloader {
 	if keepCount <= 0 {
 		keepCount = DefaultKeepCount
 	}
@@ -45,79 +58,109 @@ func New(v varnishadm.VarnishadmInterface, vclPath string, keepCount int, logger
 		logger = slog.Default()
 	}
 	return &Reloader{
-		varnishadm: v,
-		vclPath:    vclPath,
-		keepCount:  keepCount,
-		logger:     logger,
+		varnishadm:         v,
+		vclPath:            vclPath,
+		keepCount:          keepCount,
+		kubeClient:         kubeClient,
+		configMapName:      configMapName,
+		configMapNamespace: configMapNamespace,
+		logger:             logger,
 	}
 }
 
 // Run starts watching the VCL file and reloading on changes
 // It blocks until the context is cancelled
 func (r *Reloader) Run(ctx context.Context) error {
-	watcher, err := fsnotify.NewWatcher()
+	r.logger.Debug("VCL reloader started",
+		"path", r.vclPath,
+		"configMapName", r.configMapName,
+		"namespace", r.configMapNamespace,
+		"keepCount", r.keepCount)
+
+	// Set up ConfigMap informer
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		r.kubeClient,
+		30*time.Second,
+		informers.WithNamespace(r.configMapNamespace),
+	)
+
+	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
+	_, err := configMapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			if cm, ok := obj.(*corev1.ConfigMap); ok {
+				r.handleConfigMapUpdate(ctx, cm)
+			}
+		},
+		UpdateFunc: func(_, newObj any) {
+			if cm, ok := newObj.(*corev1.ConfigMap); ok {
+				r.handleConfigMapUpdate(ctx, cm)
+			}
+		},
+	})
 	if err != nil {
-		return fmt.Errorf("fsnotify.NewWatcher(): %w", err)
-	}
-	defer watcher.Close()
-
-	// Watch the directory containing the VCL file
-	// This handles file recreation (e.g., ConfigMap updates which replace files)
-	dir := filepath.Dir(r.vclPath)
-	if err := watcher.Add(dir); err != nil {
-		return fmt.Errorf("watcher.Add(%s): %w", dir, err)
+		return fmt.Errorf("configMapInformer.AddEventHandler: %w", err)
 	}
 
-	r.logger.Debug("VCL reloader started", "path", r.vclPath, "keepCount", r.keepCount)
+	// Start the informer
+	factory.Start(ctx.Done())
 
-	var debounceTimer *time.Timer
+	// Wait for informer to sync
+	if !cache.WaitForCacheSync(ctx.Done(), configMapInformer.HasSynced) {
+		return fmt.Errorf("failed to sync ConfigMap cache")
+	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			r.logger.Info("VCL reloader stopping")
-			return ctx.Err()
+	r.logger.Info("VCL reloader ready")
 
-		case event, ok := <-watcher.Events:
-			if !ok {
-				return nil
-			}
+	// Wait for context cancellation
+	<-ctx.Done()
+	r.logger.Info("VCL reloader stopping")
+	return ctx.Err()
+}
 
-			// React to Write, Create, and Rename events
-			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) == 0 {
-				continue
-			}
+// handleConfigMapUpdate processes ConfigMap add/update events
+func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMap) {
+	// Filter: only our ConfigMap
+	if cm.Name != r.configMapName {
+		return
+	}
 
-			// Check if the VCL file actually changed
-			// This handles Kubernetes ConfigMap atomic swaps (..data symlinks)
-			// and avoids spurious reloads from unrelated directory events
-			if !r.fileDetector.HasChanged(r.vclPath, r.logger) {
-				continue
-			}
+	// Deduplicate via ResourceVersion
+	if cm.ResourceVersion != "" && cm.ResourceVersion == r.lastConfigMapRV {
+		r.logger.Debug("skipping duplicate ConfigMap update", "resourceVersion", cm.ResourceVersion)
+		return
+	}
+	r.lastConfigMapRV = cm.ResourceVersion
 
-			mtime, inode := r.fileDetector.GetMetadata()
-			r.logger.Debug("VCL file changed",
-				"event", event.Op.String(),
-				"mtime", mtime,
-				"inode", inode,
-			)
+	// Extract main.vcl
+	newVCL, ok := cm.Data["main.vcl"]
+	if !ok {
+		r.logger.Warn("ConfigMap missing main.vcl key", "name", cm.Name)
+		return
+	}
 
-			// Debounce rapid changes
-			if debounceTimer != nil {
-				debounceTimer.Stop()
-			}
-			debounceTimer = time.AfterFunc(debounceDelay, func() {
-				if err := r.Reload(); err != nil {
-					r.logger.Error("VCL reload failed", "error", err)
-				}
-			})
+	// Check if VCL content actually changed
+	r.lastVCLMux.Lock()
+	if r.lastVCL == newVCL {
+		r.lastVCLMux.Unlock()
+		r.logger.Debug("ConfigMap updated but main.vcl unchanged, skipping reload",
+			"resourceVersion", cm.ResourceVersion)
+		return
+	}
+	r.lastVCL = newVCL
+	r.lastVCLMux.Unlock()
 
-		case err, ok := <-watcher.Errors:
-			if !ok {
-				return nil
-			}
-			r.logger.Error("watcher error", "error", err)
-		}
+	r.logger.Info("main.vcl changed, triggering VCL reload",
+		"resourceVersion", cm.ResourceVersion)
+
+	// Write VCL to file (for varnishd)
+	if err := os.WriteFile(r.vclPath, []byte(newVCL), 0644); err != nil {
+		r.logger.Error("failed to write VCL file", "error", err)
+		return
+	}
+
+	// Trigger varnishadm reload
+	if err := r.Reload(); err != nil {
+		r.logger.Error("VCL reload failed", "error", err)
 	}
 }
 

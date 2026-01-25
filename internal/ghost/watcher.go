@@ -50,8 +50,10 @@ type Watcher struct {
 	serviceWatch    map[string]struct{}   // services we care about (namespace/name)
 
 	// ConfigMap watching
-	configMapName   string // name of ConfigMap to watch
-	lastConfigMapRV string // last seen ResourceVersion for deduplication
+	configMapName      string // name of ConfigMap to watch
+	lastConfigMapRV    string // last seen ResourceVersion for deduplication
+	lastRoutingJSON    string // last seen routing.json content for content-based deduplication
+	lastRoutingJSONMux sync.RWMutex // protect lastRoutingJSON
 }
 
 // NewWatcher creates a new ghost configuration watcher.
@@ -542,6 +544,21 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 		w.logger.Error("invalid routing config", "error", err)
 		return
 	}
+
+	// Check if routing.json content actually changed
+	routingJSONStr := string(data)
+	w.lastRoutingJSONMux.Lock()
+	if w.lastRoutingJSON == routingJSONStr {
+		w.lastRoutingJSONMux.Unlock()
+		w.logger.Debug("ConfigMap updated but routing.json unchanged, skipping reload",
+			"resourceVersion", cm.ResourceVersion)
+		return
+	}
+	w.lastRoutingJSON = routingJSONStr
+	w.lastRoutingJSONMux.Unlock()
+
+	w.logger.Info("routing.json changed, triggering ghost reload",
+		"resourceVersion", cm.ResourceVersion)
 
 	// Parse routing config (v1 or v2)
 	w.mu.Lock()

@@ -258,6 +258,9 @@ func run() error {
 		vadm,
 		cfg.VCLPath,
 		vcl.DefaultKeepCount,
+		k8sClient,
+		cfg.ConfigMapName,
+		cfg.Namespace,
 		logger.With("component", "vcl"),
 	)
 

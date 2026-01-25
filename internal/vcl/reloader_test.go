@@ -10,6 +10,9 @@ import (
 	"time"
 
 	"github.com/varnish/gateway/internal/varnishadm"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestReload_Success(t *testing.T) {
@@ -25,7 +28,9 @@ func TestReload_Success(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(mock, vclPath, 3, logger)
+	// Create fake client (not needed for Reload() test, but required by New)
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
 	if err := r.Reload(); err != nil {
 		t.Fatalf("Reload() failed: %v", err)
 	}
@@ -62,7 +67,8 @@ func TestReload_LoadFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := New(mock, vclPath, 3, logger)
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
 
 	// Set up a failure response for VCL load
 	// The mock pattern matches "vcl.load" prefix, so we need to override default behavior
@@ -94,7 +100,8 @@ available   auto/warm          - vcl_20240101_100000_005`))
 	tmpDir := t.TempDir()
 	vclPath := filepath.Join(tmpDir, "main.vcl")
 
-	r := New(mock, vclPath, 2, logger)
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 2, client, "test-cm", "default", logger)
 
 	if err := r.garbageCollect(); err != nil {
 		t.Fatalf("garbageCollect() failed: %v", err)
@@ -132,7 +139,8 @@ available   auto/warm          - vcl_20240101_100000_002`))
 	tmpDir := t.TempDir()
 	vclPath := filepath.Join(tmpDir, "main.vcl")
 
-	r := New(mock, vclPath, 1, logger)
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 1, client, "test-cm", "default", logger)
 
 	if err := r.garbageCollect(); err != nil {
 		t.Fatalf("garbageCollect() failed: %v", err)
@@ -161,7 +169,8 @@ available   auto/warm          - vcl_20240101_100000_002`))
 	tmpDir := t.TempDir()
 	vclPath := filepath.Join(tmpDir, "main.vcl")
 
-	r := New(mock, vclPath, 0, logger) // keepCount=0 to force discard
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 0, client, "test-cm", "default", logger) // keepCount=0 to force discard
 
 	if err := r.garbageCollect(); err != nil {
 		t.Fatalf("garbageCollect() failed: %v", err)
@@ -189,7 +198,8 @@ available   auto/warm          - vcl_20240101_100000_001`))
 	tmpDir := t.TempDir()
 	vclPath := filepath.Join(tmpDir, "main.vcl")
 
-	r := New(mock, vclPath, 0, logger) // keepCount=0 to force discard
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 0, client, "test-cm", "default", logger) // keepCount=0 to force discard
 
 	if err := r.garbageCollect(); err != nil {
 		t.Fatalf("garbageCollect() failed: %v", err)
@@ -205,7 +215,7 @@ available   auto/warm          - vcl_20240101_100000_001`))
 	}
 }
 
-func TestRun_FileChange(t *testing.T) {
+func TestRun_ConfigMapChange(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	mock := varnishadm.NewMock(6082, "secret", logger)
 
@@ -215,12 +225,20 @@ func TestRun_FileChange(t *testing.T) {
 	tmpDir := t.TempDir()
 	vclPath := filepath.Join(tmpDir, "main.vcl")
 
-	// Create initial file
-	if err := os.WriteFile(vclPath, []byte("vcl 4.1; # v1"), 0644); err != nil {
-		t.Fatal(err)
+	// Create ConfigMap with initial VCL
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cm",
+			Namespace:       "default",
+			ResourceVersion: "1",
+		},
+		Data: map[string]string{
+			"main.vcl": "vcl 4.1; # v1",
+		},
 	}
 
-	r := New(mock, vclPath, 3, logger)
+	client := fake.NewSimpleClientset(cm)
+	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -231,15 +249,17 @@ func TestRun_FileChange(t *testing.T) {
 		errCh <- r.Run(ctx)
 	}()
 
-	// Wait for watcher to start
-	time.Sleep(50 * time.Millisecond)
+	// Wait for informer to sync
+	time.Sleep(100 * time.Millisecond)
 
-	// Modify the file
-	if err := os.WriteFile(vclPath, []byte("vcl 4.1; # v2"), 0644); err != nil {
+	// Update the ConfigMap
+	cm.Data["main.vcl"] = "vcl 4.1; # v2"
+	cm.ResourceVersion = "2"
+	if _, err := client.CoreV1().ConfigMaps("default").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
-	// Wait for debounce and reload
+	// Wait for update to be processed
 	time.Sleep(200 * time.Millisecond)
 
 	// Cancel and wait for clean shutdown
@@ -263,22 +283,23 @@ func TestRun_FileChange(t *testing.T) {
 		}
 	}
 	if !foundLoad {
-		t.Error("expected vcl.load to be called after file change")
+		t.Error("expected vcl.load to be called after ConfigMap change")
 	}
 }
 
 func TestNew_Defaults(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	mock := varnishadm.NewMock(6082, "secret", logger)
+	client := fake.NewSimpleClientset()
 
 	// Test default keepCount
-	r := New(mock, "/path/to/vcl", 0, nil)
+	r := New(mock, "/path/to/vcl", 0, client, "test-cm", "default", nil)
 	if r.keepCount != DefaultKeepCount {
 		t.Errorf("expected default keepCount %d, got %d", DefaultKeepCount, r.keepCount)
 	}
 
 	// Test negative keepCount
-	r = New(mock, "/path/to/vcl", -5, logger)
+	r = New(mock, "/path/to/vcl", -5, client, "test-cm", "default", logger)
 	if r.keepCount != DefaultKeepCount {
 		t.Errorf("expected default keepCount %d for negative input, got %d", DefaultKeepCount, r.keepCount)
 	}
@@ -287,8 +308,9 @@ func TestNew_Defaults(t *testing.T) {
 func TestGenerateVCLName(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	mock := varnishadm.NewMock(6082, "secret", logger)
+	client := fake.NewSimpleClientset()
 
-	r := New(mock, "/path/to/vcl", 3, logger)
+	r := New(mock, "/path/to/vcl", 3, client, "test-cm", "default", logger)
 
 	name1 := r.generateVCLName()
 	time.Sleep(2 * time.Millisecond)
@@ -307,5 +329,78 @@ func TestGenerateVCLName(t *testing.T) {
 	// Names should be sortable (older name < newer name)
 	if name1 >= name2 {
 		t.Errorf("expected name1 < name2 for sorting, got %q >= %q", name1, name2)
+	}
+}
+
+func TestHandleConfigMapUpdate_ContentDeduplication(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	mock := varnishadm.NewMock(6082, "secret", logger)
+	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, "active      auto/warm          - boot"))
+
+	tmpDir := t.TempDir()
+	vclPath := filepath.Join(tmpDir, "main.vcl")
+
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
+
+	ctx := context.Background()
+
+	// First update - should trigger reload
+	cm1 := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cm",
+			Namespace:       "default",
+			ResourceVersion: "1",
+		},
+		Data: map[string]string{
+			"main.vcl": "vcl 4.1; # v1",
+		},
+	}
+	r.handleConfigMapUpdate(ctx, cm1)
+
+	// Verify reload was called
+	history1 := mock.GetCallHistory()
+	initialCallCount := len(history1)
+	if initialCallCount == 0 {
+		t.Error("expected vcl.load to be called for first update")
+	}
+
+	// Second update - same content, different ResourceVersion - should NOT trigger reload
+	cm2 := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cm",
+			Namespace:       "default",
+			ResourceVersion: "2",
+		},
+		Data: map[string]string{
+			"main.vcl": "vcl 4.1; # v1", // Same content
+		},
+	}
+	r.handleConfigMapUpdate(ctx, cm2)
+
+	// Verify reload was NOT called (history should be same length)
+	history2 := mock.GetCallHistory()
+	if len(history2) != initialCallCount {
+		t.Errorf("expected no new reload for unchanged content, but got %d new commands (was %d, now %d)",
+			len(history2)-initialCallCount, initialCallCount, len(history2))
+	}
+
+	// Third update - different content - should trigger reload
+	cm3 := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cm",
+			Namespace:       "default",
+			ResourceVersion: "3",
+		},
+		Data: map[string]string{
+			"main.vcl": "vcl 4.1; # v2", // Different content
+		},
+	}
+	r.handleConfigMapUpdate(ctx, cm3)
+
+	// Verify reload was called (history should have grown)
+	history3 := mock.GetCallHistory()
+	if len(history3) <= initialCallCount {
+		t.Error("expected vcl.load to be called for changed content")
 	}
 }
