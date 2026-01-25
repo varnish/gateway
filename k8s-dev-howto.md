@@ -195,6 +195,50 @@ curl -H "Host: beta.example.com" localhost:8080
 # {"app": "beta", ...}
 ```
 
+## Debug Gateway Backend Stats
+
+The chaperone exposes a `/debug/backends` endpoint that shows ghost VMOD backend statistics. Access it using kubectl port-forward:
+
+```bash
+# Find the gateway pod
+kubectl get pods -l app.kubernetes.io/name=gateway
+
+# Port-forward to the health server (default port 8080)
+kubectl port-forward <gateway-pod-name> 8080:8080
+
+# In another terminal, access the debug endpoint
+
+# Normal output (table format)
+curl http://localhost:8080/debug/backends
+
+# Detailed output (multi-line per vhost with backend breakdown)
+curl http://localhost:8080/debug/backends?detailed=true
+
+# JSON output (for scripting/monitoring)
+curl http://localhost:8080/debug/backends?format=json | jq .
+```
+
+Example output (detailed mode):
+```
+Backend: ghost.alpha.example.com
+  Admin: auto
+  Health: healthy
+  Routes: 1
+  Total requests: 1234
+  Last request: 2026-01-25T15:30:45Z
+  Backends:
+    10.244.0.5:8080 - 890 selections (72.0%)
+    10.244.0.6:8080 - 344 selections (28.0%)
+```
+
+This is useful for:
+- Verifying routing decisions (which backend was selected)
+- Checking traffic distribution across pod replicas
+- Debugging why certain endpoints aren't receiving traffic
+- Monitoring request counts per vhost
+
+**Note**: Stats are reset when the configuration is reloaded (new EndpointSlices or routing changes).
+
 ## Watch Kubernetes Events
 
 ```bash
