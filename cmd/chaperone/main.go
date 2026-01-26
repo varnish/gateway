@@ -326,6 +326,18 @@ func run() error {
 		}
 	}()
 
+	// Listen for fatal VCL reload errors
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case err := <-vclReloader.FatalError():
+			slog.Error("fatal VCL reload error - exiting", "error", err)
+			errCh <- err
+		case <-ctx.Done():
+		}
+	}()
+
 	// Start health server with drain endpoint for graceful shutdown
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)

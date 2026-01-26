@@ -46,6 +46,12 @@ func (v *Server) VCLLoad(name, path string) (VarnishResponse, error) {
 	return v.Exec(cmd)
 }
 
+// VCLInline loads VCL configuration inline (without a file)
+func (v *Server) VCLInline(name, vcl string) (VarnishResponse, error) {
+	cmd := fmt.Sprintf("vcl.inline %s << EOF\n%s\nEOF", name, vcl)
+	return v.Exec(cmd)
+}
+
 // VCLUse switches to using the specified VCL configuration
 func (v *Server) VCLUse(name string) (VarnishResponse, error) {
 	cmd := fmt.Sprintf("vcl.use %s", name)

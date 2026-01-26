@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +38,10 @@ type Reloader struct {
 	lastVCL            string
 	lastVCLMux         sync.RWMutex
 	lastConfigMapRV    string
+
+	// Fatal error signaling
+	fatalErrCh   chan error
+	fatalErrOnce sync.Once
 }
 
 // New creates a new VCL reloader
@@ -65,7 +68,14 @@ func New(
 		configMapName:      configMapName,
 		configMapNamespace: configMapNamespace,
 		logger:             logger,
+		fatalErrCh:         make(chan error, 1),
 	}
+}
+
+// FatalError returns a channel that receives fatal errors from VCL reload failures.
+// VCL reload failures are fatal because the gateway cannot serve with incorrect configuration.
+func (r *Reloader) FatalError() <-chan error {
+	return r.fatalErrCh
 }
 
 // Run starts watching the VCL file and reloading on changes
@@ -152,19 +162,17 @@ func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigM
 	r.logger.Info("main.vcl changed, triggering VCL reload",
 		"resourceVersion", cm.ResourceVersion)
 
-	// Write VCL to file (for varnishd)
-	if err := os.WriteFile(r.vclPath, []byte(newVCL), 0644); err != nil {
-		r.logger.Error("failed to write VCL file", "error", err)
-		return
-	}
-
-	// Trigger varnishadm reload
-	if err := r.Reload(); err != nil {
-		r.logger.Error("VCL reload failed", "error", err)
+	// Trigger varnishadm reload with inline VCL
+	if err := r.ReloadInline(newVCL); err != nil {
+		r.logger.Error("VCL reload failed - this is fatal", "error", err)
+		// Send fatal error (only once to avoid blocking)
+		r.fatalErrOnce.Do(func() {
+			r.fatalErrCh <- fmt.Errorf("VCL reload failed: %w", err)
+		})
 	}
 }
 
-// Reload performs a single VCL reload
+// Reload performs a single VCL reload from the configured file path
 func (r *Reloader) Reload() error {
 	name := r.generateVCLName()
 
@@ -174,6 +182,52 @@ func (r *Reloader) Reload() error {
 	resp, err := r.varnishadm.VCLLoad(name, r.vclPath)
 	if err != nil {
 		return fmt.Errorf("varnishadm.VCLLoad(%s, %s): %w", name, r.vclPath, err)
+	}
+	if resp.StatusCode() != varnishadm.ClisOk {
+		r.logger.Error("VCL compilation failed",
+			"name", name,
+			"status", resp.StatusCode(),
+			"output", resp.Payload(),
+		)
+		return fmt.Errorf("VCL compilation failed: %s", resp.Payload())
+	}
+
+	// Switch to the new VCL
+	r.logger.Debug("activating VCL", "name", name)
+	resp, err = r.varnishadm.VCLUse(name)
+	if err != nil {
+		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
+	}
+	if resp.StatusCode() != varnishadm.ClisOk {
+		r.logger.Error("VCL activation failed",
+			"name", name,
+			"status", resp.StatusCode(),
+			"output", resp.Payload(),
+		)
+		return fmt.Errorf("VCL activation failed: %s", resp.Payload())
+	}
+
+	r.logger.Debug("VCL reload complete", "name", name)
+
+	// Garbage collect old VCLs
+	if err := r.garbageCollect(); err != nil {
+		r.logger.Warn("VCL garbage collection failed", "error", err)
+		// Non-fatal, continue
+	}
+
+	return nil
+}
+
+// ReloadInline performs a single VCL reload with inline VCL content
+func (r *Reloader) ReloadInline(vcl string) error {
+	name := r.generateVCLName()
+
+	r.logger.Debug("loading inline VCL", "name", name)
+
+	// Load the new VCL inline
+	resp, err := r.varnishadm.VCLInline(name, vcl)
+	if err != nil {
+		return fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
 	}
 	if resp.StatusCode() != varnishadm.ClisOk {
 		r.logger.Error("VCL compilation failed",

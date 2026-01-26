@@ -21,6 +21,7 @@ type VarnishadmInterface interface {
 
 	// VCL commands
 	VCLLoad(name, path string) (VarnishResponse, error)
+	VCLInline(name, vcl string) (VarnishResponse, error)
 	VCLUse(name string) (VarnishResponse, error)
 	VCLLabel(label, name string) (VarnishResponse, error)
 	VCLDiscard(name string) (VarnishResponse, error)

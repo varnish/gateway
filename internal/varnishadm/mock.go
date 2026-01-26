@@ -185,6 +185,13 @@ func (m *MockVarnishadm) Exec(cmd string) (VarnishResponse, error) {
 		}, nil
 	}
 
+	if strings.HasPrefix(cmd, "vcl.inline") {
+		return VarnishResponse{
+			statusCode: ClisOk,
+			payload:    "VCL compiled",
+		}, nil
+	}
+
 	if strings.HasPrefix(cmd, "vcl.use") {
 		return VarnishResponse{
 			statusCode: ClisOk,
@@ -280,6 +287,12 @@ func (m *MockVarnishadm) PanicClear() (VarnishResponse, error) {
 // VCLLoad loads a VCL configuration from a file in the mock
 func (m *MockVarnishadm) VCLLoad(name, path string) (VarnishResponse, error) {
 	cmd := fmt.Sprintf("vcl.load %s %s", name, path)
+	return m.Exec(cmd)
+}
+
+// VCLInline loads VCL configuration inline (without a file) in the mock
+func (m *MockVarnishadm) VCLInline(name, vcl string) (VarnishResponse, error) {
+	cmd := fmt.Sprintf("vcl.inline %s << EOF\n%s\nEOF", name, vcl)
 	return m.Exec(cmd)
 }
 

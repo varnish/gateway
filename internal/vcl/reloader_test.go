@@ -277,13 +277,13 @@ func TestRun_ConfigMapChange(t *testing.T) {
 	history := mock.GetCallHistory()
 	foundLoad := false
 	for _, cmd := range history {
-		if strings.HasPrefix(cmd, "vcl.load vcl_") {
+		if strings.HasPrefix(cmd, "vcl.inline vcl_") {
 			foundLoad = true
 			break
 		}
 	}
 	if !foundLoad {
-		t.Error("expected vcl.load to be called after ConfigMap change")
+		t.Error("expected vcl.inline to be called after ConfigMap change")
 	}
 }
 
@@ -402,5 +402,54 @@ func TestHandleConfigMapUpdate_ContentDeduplication(t *testing.T) {
 	history3 := mock.GetCallHistory()
 	if len(history3) <= initialCallCount {
 		t.Error("expected vcl.load to be called for changed content")
+	}
+}
+
+// failingVarnishadm wraps MockVarnishadm to make VCLInline always fail
+type failingVarnishadm struct {
+	*varnishadm.MockVarnishadm
+}
+
+func (f *failingVarnishadm) VCLInline(name, vcl string) (varnishadm.VarnishResponse, error) {
+	return varnishadm.NewVarnishResponse(varnishadm.ClisSyntax, "VCL compilation failed: syntax error"), nil
+}
+
+func TestVCLReloadFailure_Fatal(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	baseMock := varnishadm.NewMock(6082, "secret", logger)
+	mock := &failingVarnishadm{MockVarnishadm: baseMock}
+
+	tmpDir := t.TempDir()
+	vclPath := filepath.Join(tmpDir, "main.vcl")
+
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
+
+	ctx := context.Background()
+
+	// Trigger a VCL reload that will fail
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cm",
+			Namespace:       "default",
+			ResourceVersion: "1",
+		},
+		Data: map[string]string{
+			"main.vcl": "invalid vcl",
+		},
+	}
+	r.handleConfigMapUpdate(ctx, cm)
+
+	// Verify that FatalError channel received an error
+	select {
+	case err := <-r.FatalError():
+		if err == nil {
+			t.Error("expected non-nil error from FatalError channel")
+		}
+		if !strings.Contains(err.Error(), "VCL reload failed") {
+			t.Errorf("expected error to mention VCL reload failure, got: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Error("expected to receive fatal error on FatalError channel")
 	}
 }
