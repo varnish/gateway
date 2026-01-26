@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/varnishadm"
 	"github.com/varnish/gateway/internal/vcl"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 )
 
 //go:embed .version
@@ -153,6 +155,9 @@ func configureLogger() {
 		handler = slog.NewTextHandler(os.Stderr, opts)
 	}
 	slog.SetDefault(slog.New(handler))
+
+	// Redirect klog (used by Kubernetes client libraries) to slog
+	klog.SetLogger(logr.FromSlogHandler(handler))
 }
 
 func main() {

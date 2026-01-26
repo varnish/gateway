@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -45,7 +46,11 @@ func main() {
 	handler := slog.NewJSONHandler(os.Stderr, nil)
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
-	ctrl.SetLogger(logr.FromSlogHandler(handler))
+
+	// Redirect both controller-runtime and klog to slog
+	logrLogger := logr.FromSlogHandler(handler)
+	ctrl.SetLogger(logrLogger)
+	klog.SetLogger(logrLogger)
 
 	// Load config from environment
 	cfg := controller.Config{
