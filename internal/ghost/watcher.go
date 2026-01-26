@@ -134,7 +134,7 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	)
 
 	endpointSliceInformer := factory.Discovery().V1().EndpointSlices().Informer()
-	_, err := endpointSliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err = endpointSliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if slice, ok := obj.(*discoveryv1.EndpointSlice); ok {
 				w.handleEndpointSliceUpdate(ctx, slice)
