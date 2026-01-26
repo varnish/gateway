@@ -113,7 +113,20 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		}
 	}
 
-	// Set up EndpointSlice informer (after Varnish is ready to avoid reload race)
+	// Load initial routing config BEFORE starting informers
+	// This populates serviceWatch so EndpointSlice events won't be ignored
+	cm, err := w.client.CoreV1().ConfigMaps(w.namespace).Get(ctx, w.configMapName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get initial ConfigMap %s: %w", w.configMapName, err)
+	}
+	w.handleConfigMapUpdate(ctx, cm)
+
+	w.logger.Debug("routing config loaded, starting informers",
+		"vhosts", w.getVHostCount(),
+		"watchedServices", len(w.serviceWatch),
+	)
+
+	// Set up EndpointSlice informer (after routing config loaded to avoid race)
 	factory := informers.NewSharedInformerFactoryWithOptions(
 		w.client,
 		30*time.Second,
@@ -174,19 +187,6 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		configMapInformer.HasSynced) {
 		return fmt.Errorf("failed to sync caches")
 	}
-
-	// Give informers a moment to process initial resources
-	// This is particularly important for fake clients in tests
-	time.Sleep(50 * time.Millisecond)
-
-	// Load initial routing config from ConfigMap explicitly
-	// The informer may have already loaded it, but we ensure it's available
-	cm, err := w.client.CoreV1().ConfigMaps(w.namespace).Get(ctx, w.configMapName, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to get ConfigMap %s: %w", w.configMapName, err)
-	}
-	// Process it to load routing config (handleConfigMapUpdate is idempotent)
-	w.handleConfigMapUpdate(ctx, cm)
 
 	// Mark initial sync complete - subsequent endpoint changes will trigger reloads
 	w.mu.Lock()
