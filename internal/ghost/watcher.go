@@ -407,6 +407,13 @@ func (w *Watcher) regenerateConfig(ctx context.Context) error {
 	endpoints := make(ServiceEndpoints, len(w.endpoints))
 	maps.Copy(endpoints, w.endpoints)
 
+	// Count services and backends
+	serviceCount := len(endpoints)
+	backendCount := 0
+	for _, eps := range endpoints {
+		backendCount += len(eps)
+	}
+
 	routingConfigV1 := w.routingConfig
 	routingConfigV2 := w.routingConfigV2
 	w.mu.RUnlock()
@@ -420,6 +427,8 @@ func (w *Watcher) regenerateConfig(ctx context.Context) error {
 		}
 		w.logger.Info("ghost.json v2 regenerated",
 			"vhosts", len(config.VHosts),
+			"services", serviceCount,
+			"backends", backendCount,
 			"path", w.ghostConfigPath,
 		)
 	} else {
@@ -430,6 +439,8 @@ func (w *Watcher) regenerateConfig(ctx context.Context) error {
 		}
 		w.logger.Info("ghost.json v1 regenerated",
 			"vhosts", len(config.VHosts),
+			"services", serviceCount,
+			"backends", backendCount,
 			"path", w.ghostConfigPath,
 		)
 	}
