@@ -59,9 +59,6 @@ type GatewayReconciler struct {
 	Scheme *runtime.Scheme
 	Config Config
 	Logger *slog.Logger
-	// UseServerSideApply controls whether to use SSA for status updates (default true)
-	// Set to false in tests since fake client doesn't support SSA
-	UseServerSideApply bool
 }
 
 // Reconcile handles Gateway reconciliation.

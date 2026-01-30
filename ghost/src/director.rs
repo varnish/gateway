@@ -915,41 +915,6 @@ fn matches_wildcard(pattern: &str, host: &str) -> bool {
     !prefix.is_empty() && !prefix.contains('.')
 }
 
-/// Select a backend using weighted random selection
-#[allow(dead_code)]
-fn select_backend_weighted(refs: &[WeightedBackendRef]) -> Option<&WeightedBackendRef> {
-    if refs.is_empty() {
-        return None;
-    }
-
-    if refs.len() == 1 {
-        return Some(&refs[0]);
-    }
-
-    // Calculate total weight
-    let total_weight: u32 = refs.iter().map(|r| r.weight).sum();
-
-    if total_weight == 0 {
-        return None;
-    }
-
-    // Random selection
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let r = rng.gen_range(0..total_weight);
-
-    let mut cumulative = 0u32;
-    for backend_ref in refs {
-        cumulative += backend_ref.weight;
-        if r < cumulative {
-            return Some(backend_ref);
-        }
-    }
-
-    // Fallback (shouldn't happen if weights are valid)
-    Some(&refs[0])
-}
-
 /// Convert StrOrBytes to Cow<str> if possible
 fn str_or_bytes_to_cow<'a>(sob: &'a StrOrBytes<'a>) -> Option<Cow<'a, str>> {
     match sob {
@@ -1060,58 +1025,6 @@ mod tests {
         };
         assert_eq!(ref1.key, "10.0.0.1:8080");
         assert_eq!(ref1.weight, 100);
-    }
-
-    #[test]
-    fn test_select_backend_weighted_single() {
-        let refs = vec![WeightedBackendRef {
-            key: "10.0.0.1:8080".to_string(),
-            weight: 100,
-        }];
-        let selected = select_backend_weighted(&refs).unwrap();
-        assert_eq!(selected.key, "10.0.0.1:8080");
-    }
-
-    #[test]
-    fn test_select_backend_weighted_distribution() {
-        let refs = vec![
-            WeightedBackendRef {
-                key: "10.0.0.1:8080".to_string(),
-                weight: 90,
-            },
-            WeightedBackendRef {
-                key: "10.0.0.2:8080".to_string(),
-                weight: 10,
-            },
-        ];
-
-        // Run many selections and check distribution
-        let mut counts = HashMap::new();
-        for _ in 0..1000 {
-            let selected = select_backend_weighted(&refs).unwrap();
-            *counts.entry(selected.key.clone()).or_insert(0) += 1;
-        }
-
-        let count_1 = *counts.get("10.0.0.1:8080").unwrap_or(&0);
-        let count_2 = *counts.get("10.0.0.2:8080").unwrap_or(&0);
-
-        // Allow for statistical variance (should be roughly 900:100)
-        assert!(
-            count_1 > 800,
-            "10.0.0.1 selected {} times, expected ~900",
-            count_1
-        );
-        assert!(
-            count_2 < 200,
-            "10.0.0.2 selected {} times, expected ~100",
-            count_2
-        );
-    }
-
-    #[test]
-    fn test_select_backend_weighted_empty() {
-        let refs: Vec<WeightedBackendRef> = vec![];
-        assert!(select_backend_weighted(&refs).is_none());
     }
 
     #[test]

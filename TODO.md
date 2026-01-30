@@ -17,9 +17,13 @@
 - Query parameter matching (`rule.Matches[].QueryParams`)
 - Priority-based route selection with additive specificity bonuses
 
-## Phase 4: Traffic Management
+## Phase 4: Complete
 
 - Traffic splitting (weighted backendRefs)
+  - HTTPRoute controller extracts weights from Gateway API BackendRefs
+  - Routes with identical match criteria are merged with weighted backends
+  - Ghost VMOD implements weighted random backend selection
+  - Full test coverage including VTC canary deployment test
 
 ## Phase 5: Request/Response Modification
 
