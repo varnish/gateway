@@ -230,7 +230,10 @@ impl VclDirector for VhostDirector {
 
             // URLRewrite
             if let Some(url_rewrite) = &filters.url_rewrite {
-                let _ = apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path);
+                ctx.log(varnish::vcl::LogTag::Debug, "Applying URL rewrite filter");
+                if let Err(e) = apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path) {
+                    ctx.log(varnish::vcl::LogTag::Error, format!("URL rewrite failed: {}", e));
+                }
             }
 
             // RequestRedirect - TODO: implement synthetic backend
@@ -691,7 +694,8 @@ fn apply_url_rewrite_filter(
                                 } else {
                                     format!("{}/{}", trimmed_new, remainder)
                                 };
-                                (result, None)
+                                let log = format!("ReplacePrefixMatch: {} + {} -> {}", matched_prefix, remainder, result);
+                                (result, Some((varnish::vcl::LogTag::Debug, log)))
                             } else {
                                 let msg = format!("ReplacePrefixMatch: path {} doesn't start with matched prefix {}",
                                         path, matched_prefix);

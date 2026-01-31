@@ -558,4 +558,51 @@ mod tests {
         assert_eq!(api.routes.len(), 0);
         assert_eq!(api.default_backends.len(), 0);
     }
+
+    #[test]
+    fn test_url_rewrite_filter_parsing() {
+        let file = write_config(
+            r#"{
+                "version": 2,
+                "vhosts": {
+                    "test.example.com": {
+                        "routes": [
+                            {
+                                "path_match": {
+                                    "type": "PathPrefix",
+                                    "value": "/api/v1"
+                                },
+                                "backends": [
+                                    {"address": "127.0.0.1", "port": 8080, "weight": 100}
+                                ],
+                                "filters": {
+                                    "url_rewrite": {
+                                        "path_type": "ReplacePrefixMatch",
+                                        "replace_prefix_match": "/api/v2"
+                                    }
+                                },
+                                "priority": 100
+                            }
+                        ]
+                    }
+                }
+            }"#,
+        );
+
+        let config = load(file.path()).unwrap();
+        assert_eq!(config.version, 2);
+
+        let vhost = &config.vhosts["test.example.com"];
+        assert_eq!(vhost.routes.len(), 1);
+
+        let route = &vhost.routes[0];
+        assert!(route.filters.is_some());
+
+        let filters = route.filters.as_ref().unwrap();
+        assert!(filters.url_rewrite.is_some());
+
+        let url_rewrite = filters.url_rewrite.as_ref().unwrap();
+        assert_eq!(url_rewrite.path_type.as_ref().unwrap(), "ReplacePrefixMatch");
+        assert_eq!(url_rewrite.replace_prefix_match.as_ref().unwrap(), "/api/v2");
+    }
 }
