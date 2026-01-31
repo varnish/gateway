@@ -337,6 +337,11 @@ fn select_backend_weighted(refs: &[WeightedBackendRef]) -> Option<&WeightedBacke
     }
 
     // Random selection
+    // TODO: Use Varnish's VRND_RandomTestable() when varnish-rs exposes it
+    // This would eliminate thread_rng() TLS overhead (~10-50ns per call).
+    // Varnish provides VRND_RandomTestable() and VRND_RandomTestableDouble()
+    // in lib/libvarnish/vrnd.c, used by vmod_std::random().
+    // See: https://github.com/varnishcache/varnish-cache/blob/master/lib/libvarnish/vrnd.c
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let r = rng.gen_range(0..total_weight);
