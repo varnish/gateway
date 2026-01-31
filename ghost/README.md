@@ -172,7 +172,7 @@ This will be used for:
 Deliver hook for response header modification.
 
 Call this in `vcl_deliver` to apply ResponseHeaderModifier filters.
-Reads filter context from request headers set during route matching.
+Reads filter context from response headers (copied from bereq in vcl_backend_response).
 
 ### Constructor `ghost.ghost_backend()`
 

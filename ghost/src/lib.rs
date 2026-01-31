@@ -242,35 +242,33 @@ mod ghost {
     /// Deliver hook for response header modification.
     ///
     /// Call this in `vcl_deliver` to apply ResponseHeaderModifier filters.
-    /// Reads filter context from request headers set during route matching.
+    /// Reads filter context from response headers (copied from bereq in vcl_backend_response).
     pub fn deliver(ctx: &mut Ctx) {
-        // Get filter context from request header
-        let req = match ctx.http_req.as_ref() {
+        // Get mutable response for both reading and modifying
+        let resp = match ctx.http_resp.as_mut() {
             Some(r) => r,
             None => return,
         };
 
-        let filter_json = match req.header(FILTER_CONTEXT_HEADER) {
-            Some(StrOrBytes::Utf8(s)) => s,
+        // Read filter context from response header
+        let filter_json = match resp.header(FILTER_CONTEXT_HEADER) {
+            Some(StrOrBytes::Utf8(s)) => s.to_string(),
             Some(StrOrBytes::Bytes(b)) => {
                 match std::str::from_utf8(b) {
-                    Ok(s) => s,
+                    Ok(s) => s.to_string(),
                     Err(_) => return,
                 }
             }
             None => return,
         };
 
+        // Remove filter context header (internal only, don't leak to client)
+        resp.unset_header(FILTER_CONTEXT_HEADER);
+
         // Deserialize filter
-        let filter: ResponseHeaderFilter = match serde_json::from_str(filter_json) {
+        let filter: ResponseHeaderFilter = match serde_json::from_str(&filter_json) {
             Ok(f) => f,
             Err(_) => return,
-        };
-
-        // Apply to response
-        let resp = match ctx.http_resp.as_mut() {
-            Some(r) => r,
-            None => return,
         };
 
         // Remove headers

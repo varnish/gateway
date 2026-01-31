@@ -66,6 +66,14 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    set bereq.backend = router.backend();\n")
 	sb.WriteString("}\n\n")
 
+	// Generate vcl_backend_response - copy filter context to beresp
+	sb.WriteString("sub vcl_backend_response {\n")
+	sb.WriteString("    # Copy filter context from bereq to beresp for vcl_deliver\n")
+	sb.WriteString("    if (bereq.http.X-Ghost-Filter-Context) {\n")
+	sb.WriteString("        set beresp.http.X-Ghost-Filter-Context = bereq.http.X-Ghost-Filter-Context;\n")
+	sb.WriteString("    }\n")
+	sb.WriteString("}\n\n")
+
 	// Generate vcl_deliver
 	sb.WriteString("sub vcl_deliver {\n")
 	sb.WriteString("    ghost.deliver();\n")
