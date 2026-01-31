@@ -177,4 +177,5 @@ vendor:
 
 clean:
 	rm -rf dist/
+	rm -f operator chaperone
 	cd ghost && cargo clean

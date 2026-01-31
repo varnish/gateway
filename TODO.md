@@ -25,13 +25,81 @@
   - Ghost VMOD implements weighted random backend selection
   - Full test coverage including VTC canary deployment test
 
-## Phase 5: Request/Response Modification
+## Phase 5: Request/Response Modification (Partial)
 
-- RequestHeaderModifier filter
-- ResponseHeaderModifier filter
-- URLRewrite filter
-- RequestRedirect filter
+### Implemented
+
+- RequestHeaderModifier filter (Set, Add, Remove)
+- ResponseHeaderModifier filter (Set, Add, Remove)
+- URLRewrite filter - hostname rewriting
+- URLRewrite filter - ReplaceFullPath
+- URLRewrite filter - ReplacePrefixMatch (accurate implementation)
+  - Tracks exact matched prefix from route selection
+  - Replaces only the matched portion, preserving remainder
+  - Handles query string preservation
+  - VTC test coverage included
 - Add `ghost.deliver()` call to VCL preamble
+
+### Not Implemented
+
+#### RequestRedirect Filter
+
+**Status**: Not implemented
+
+**Gateway API Requirement**: Support for synthetic HTTP redirect responses.
+
+**Specification**:
+```yaml
+filters:
+- type: RequestRedirect
+  requestRedirect:
+    scheme: https
+    hostname: new-host.example.com
+    path:
+      type: ReplaceFullPath
+      replaceFullPath: /new/path
+    port: 8443
+    statusCode: 301
+```
+
+**Implementation Requirements**:
+1. Create synthetic redirect backend (similar to `NotFoundBackend`)
+2. Generate `Location` header from redirect config components:
+   - scheme (default: use current scheme)
+   - hostname (default: use current host)
+   - path (apply path rewrite if specified)
+   - port (default: use current port)
+3. Return appropriate 3xx status code (301, 302, 307, 308)
+4. Ensure redirect backend works with Varnish director pattern
+
+**Files to Create/Modify**:
+- `ghost/src/redirect_backend.rs` - New synthetic backend for redirects
+- `ghost/src/vhost_director.rs:resolve()` - Return redirect backend when filter present
+- `ghost/src/director.rs` - Register redirect backend in pool
+
+**Test Coverage Needed**:
+- VTC tests for all redirect status codes (301, 302, 307, 308)
+- Test scheme rewriting
+- Test hostname rewriting
+- Test path rewriting in redirects
+- Test port modification
+- Test Location header construction
+- Test with HTTPS redirects
+
+**Gateway API Conformance Impact**:
+- Core feature required for conformance
+- Many real-world use cases (HTTP→HTTPS redirect, domain migration, etc.)
+- Blocking for production readiness
+
+### Implementation Priority
+
+**Critical for Release**:
+1. RequestRedirect implementation (missing core feature)
+
+**Nice to Have**:
+- Enhanced error reporting for filter application failures
+- Metrics for filter application (success/failure counts)
+- VTC integration tests for all filter combinations
 
 ## Phase 6: client-side TLS
 
@@ -286,9 +354,9 @@ Use Policy Attachment instead of GatewayClass-specific fields for Varnish config
 
 ## Observability
 
-- ✅ Varnish logging via sidecar container (varnishlog/varnishncsa)
-- ✅ Add logging configuration to GatewayClassParameters (format, mode, extraArgs)
-- ✅ Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency
+- Varnish logging via sidecar container (varnishlog/varnishncsa) - Complete
+- Add logging configuration to GatewayClassParameters (format, mode, extraArgs) - Complete
+- Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency - Complete
 - Future: Add varnishlog-json support when available
 - Future: Create VarnishLoggingPolicy CRD using Gateway API policy attachment pattern
   - Policy targets Gateway via `targetRef`, overrides class defaults when present
