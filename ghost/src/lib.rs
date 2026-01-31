@@ -219,22 +219,22 @@ mod ghost {
 
     /// Pre-routing hook for `vcl_recv`.
     ///
-    /// This function is reserved for future URL rewriting and pre-routing logic.
-    /// Currently returns `None` (no action). Reload handling has moved to the
-    /// director for cleaner separation.
+    /// Reserved for future use in vcl_recv for request inspection and potential
+    /// modification. Currently returns None (no action).
     ///
-    /// # Returns
+    /// # Future Use Cases
     ///
-    /// - `None` - no action, continue normal request processing
+    /// This will enable:
+    /// - URL normalization/rewriting (may require &mut Ctx for bereq modification)
+    /// - Authentication checks (read-only)
+    /// - Rate limiting decisions (read-only with external state)
     ///
-    /// # Future Use
+    /// # Note
     ///
-    /// This will be used for:
-    /// - URL normalization/rewriting
-    /// - Authentication checks
-    /// - Rate limiting intercepts
+    /// The ctx parameter is currently unused but kept for API stability.
+    /// Future implementations may need mutable access for request modification.
     #[allow(unused_variables)]
-    pub fn recv(ctx: &mut Ctx) -> Option<String> {
+    pub fn recv(ctx: &Ctx) -> Option<String> {
         // Placeholder for future URL rewriting logic
         None
     }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use varnish::ffi::VCL_BACKEND;
-use varnish::vcl::{Buffer, Ctx, HttpHeaders, StrOrBytes, VclDirector, VclError};
+use varnish::vcl::{Buffer, Ctx, HttpHeaders, LogTag, StrOrBytes, VclDirector, VclError};
 
 use crate::backend_pool::BackendPool;
 use crate::config::RouteFilters;
@@ -160,20 +160,7 @@ impl VhostDirector {
         let selections = self.stats.backend_selections();
         let total = self.stats.total_requests();
 
-        let backends: Vec<serde_json::Value> = selections
-            .iter()
-            .map(|(key, count)| {
-                serde_json::json!({
-                    "address": key,
-                    "selections": count,
-                    "percentage": if total > 0 {
-                        (*count as f64 / total as f64) * 100.0
-                    } else {
-                        0.0
-                    }
-                })
-            })
-            .collect();
+        let backends = crate::format::format_backend_selections_json(&selections, total);
 
         let obj = serde_json::json!({
             "name": format!("ghost.{}", self.hostname),
@@ -680,44 +667,7 @@ fn apply_url_rewrite_filter(
                     let (path, query) = extract_path_and_query(current_url);
 
                     // Compute new path and any log messages without borrowing ctx
-                    let (new_path, log_msg) = match matched_path {
-                        Some(PathMatchCompiled::PathPrefix(matched_prefix)) => {
-                            // Replace the matched prefix with new_prefix
-                            if path.starts_with(matched_prefix) {
-                                let remainder = &path[matched_prefix.len()..];
-                                let trimmed_new = new_prefix.trim_end_matches('/');
-
-                                let result = if remainder.is_empty() {
-                                    trimmed_new.to_string()
-                                } else if remainder.starts_with('/') {
-                                    format!("{}{}", trimmed_new, remainder)
-                                } else {
-                                    format!("{}/{}", trimmed_new, remainder)
-                                };
-                                let log = format!("ReplacePrefixMatch: {} + {} -> {}", matched_prefix, remainder, result);
-                                (result, Some((varnish::vcl::LogTag::Debug, log)))
-                            } else {
-                                let msg = format!("ReplacePrefixMatch: path {} doesn't start with matched prefix {}",
-                                        path, matched_prefix);
-                                (path.to_string(), Some((varnish::vcl::LogTag::Error, msg)))
-                            }
-                        }
-                        Some(PathMatchCompiled::Exact(_)) => {
-                            // Exact match: treat as ReplaceFullPath
-                            let msg = "ReplacePrefixMatch with Exact match - treating as full replacement".to_string();
-                            (new_prefix.to_string(), Some((varnish::vcl::LogTag::Debug, msg)))
-                        }
-                        Some(PathMatchCompiled::Regex(_)) => {
-                            // Regex: cannot extract matched portion, use heuristic
-                            let msg = "ReplacePrefixMatch with RegularExpression not supported - using heuristic".to_string();
-                            (replace_first_segment_heuristic(path, new_prefix), Some((varnish::vcl::LogTag::Error, msg)))
-                        }
-                        None => {
-                            // No path match: use heuristic
-                            let msg = "ReplacePrefixMatch without path match - using heuristic".to_string();
-                            (replace_first_segment_heuristic(path, new_prefix), Some((varnish::vcl::LogTag::Debug, msg)))
-                        }
-                    };
+                    let (new_path, log_msg) = apply_replace_prefix_match(path, new_prefix, matched_path);
 
                     let final_url = if let Some(q) = query {
                         format!("{}?{}", new_path, q)
@@ -745,7 +695,99 @@ fn apply_url_rewrite_filter(
     Ok(())
 }
 
-/// Heuristic: replace first path segment (fallback when matched prefix unknown)
+/// Apply ReplacePrefixMatch path rewrite logic
+///
+/// Computes the new path based on the matched path type and returns both the new path
+/// and an optional log message for debugging.
+///
+/// # Arguments
+///
+/// * `path` - The current request path (without query string)
+/// * `new_prefix` - The new prefix to use for replacement
+/// * `matched_path` - The PathMatch that was used to select this route (if any)
+///
+/// # Returns
+///
+/// A tuple of `(new_path, optional_log_message)` where the log message contains
+/// a tag and message string for VSL logging.
+fn apply_replace_prefix_match(
+    path: &str,
+    new_prefix: &str,
+    matched_path: Option<&PathMatchCompiled>,
+) -> (String, Option<(LogTag, String)>) {
+    match matched_path {
+        Some(PathMatchCompiled::PathPrefix(matched_prefix)) => {
+            // Replace the matched prefix with new_prefix
+            if path.starts_with(matched_prefix) {
+                let remainder = &path[matched_prefix.len()..];
+                let trimmed_new = new_prefix.trim_end_matches('/');
+
+                let result = if remainder.is_empty() {
+                    trimmed_new.to_string()
+                } else if remainder.starts_with('/') {
+                    format!("{}{}", trimmed_new, remainder)
+                } else {
+                    format!("{}/{}", trimmed_new, remainder)
+                };
+                let log = format!("ReplacePrefixMatch: {} + {} -> {}", matched_prefix, remainder, result);
+                (result, Some((LogTag::Debug, log)))
+            } else {
+                let msg = format!("ReplacePrefixMatch: path {} doesn't start with matched prefix {}",
+                        path, matched_prefix);
+                (path.to_string(), Some((LogTag::Error, msg)))
+            }
+        }
+        Some(PathMatchCompiled::Exact(_)) => {
+            // Exact match: treat as ReplaceFullPath
+            let msg = "ReplacePrefixMatch with Exact match - treating as full replacement".to_string();
+            (new_prefix.to_string(), Some((LogTag::Debug, msg)))
+        }
+        Some(PathMatchCompiled::Regex(_)) => {
+            // Regex: cannot extract matched portion, use heuristic
+            let msg = "ReplacePrefixMatch with RegularExpression not supported - using heuristic".to_string();
+            (replace_first_segment_heuristic(path, new_prefix), Some((LogTag::Error, msg)))
+        }
+        None => {
+            // No path match: use heuristic
+            let msg = "ReplacePrefixMatch without path match - using heuristic".to_string();
+            (replace_first_segment_heuristic(path, new_prefix), Some((LogTag::Debug, msg)))
+        }
+    }
+}
+
+/// Heuristic for replacing the first path segment when matched prefix is unknown
+///
+/// This is a **fallback behavior** used when `ReplacePrefixMatch` is configured but:
+/// - No `PathMatch` is specified (route matches on method/headers/query params only), OR
+/// - `PathMatch` uses `RegularExpression` (we can't extract the matched portion)
+///
+/// **NOT Gateway API Spec Compliant**: The Gateway API spec requires knowing the exact
+/// matched prefix to perform the replacement. This heuristic provides reasonable behavior
+/// in edge cases where the spec is ambiguous or silent.
+///
+/// # Behavior
+///
+/// Replaces the first path segment (everything between the first and second `/`) with
+/// `new_prefix`, preserving the rest of the path.
+///
+/// # Examples
+///
+/// ```text
+/// replace_first_segment_heuristic("/v1/users/123", "/v2")
+///   -> "/v2/users/123"
+///
+/// replace_first_segment_heuristic("/api", "/v2")
+///   -> "/v2"
+///
+/// replace_first_segment_heuristic("/v1/products", "/api/v2")
+///   -> "/api/v2/products"
+/// ```
+///
+/// # Implementation
+///
+/// 1. Split path on `/` into at most 3 parts: `["", "v1", "users/123"]`
+/// 2. Replace the second part (first segment) with `new_prefix` (trimmed of trailing `/`)
+/// 3. Append the remainder (third part, if any)
 fn replace_first_segment_heuristic(path: &str, new_prefix: &str) -> String {
     if path.starts_with('/') {
         let segments: Vec<&str> = path.splitn(3, '/').collect();

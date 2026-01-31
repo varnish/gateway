@@ -19,9 +19,10 @@ pub struct BackendPool {
     backends: HashMap<String, Arc<NativeBackend>>,
 }
 
-// SAFETY: VCL_BACKEND pointers are thread-safe in Varnish's model.
-// They are designed to be used from multiple worker threads concurrently.
-// The raw pointer is just an opaque handle managed by Varnish's backend infrastructure.
+// SAFETY: NativeBackend wraps VCL_BACKEND pointers which are thread-safe in Varnish.
+// Multiple worker threads can concurrently access backends through shared VCL state.
+// The raw pointer is an opaque handle managed by Varnish's backend infrastructure
+// with its own synchronization guarantees.
 unsafe impl Send for BackendPool {}
 unsafe impl Sync for BackendPool {}
 
@@ -108,14 +109,7 @@ impl BackendPool {
     /// This is used during config reload to clean up backends that are
     /// no longer referenced in the routing state.
     pub fn retain_only(&mut self, keys_to_keep: &std::collections::HashSet<String>) {
-        let before = self.backends.len();
         self.backends.retain(|key, _backend| keys_to_keep.contains(key));
-        let after = self.backends.len();
-        let removed = before - after;
-
-        if removed > 0 {
-            eprintln!("ghost: cleaned up {} unused backends ({} -> {})", removed, before, after);
-        }
     }
 }
 

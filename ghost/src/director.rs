@@ -22,8 +22,11 @@ use crate::vhost_director::VhostDirector;
 
 /// Wrapper for VCL_BACKEND pointer that implements Send + Sync
 ///
-/// This is safe because Varnish runs single-threaded per worker,
-/// and the backend pointer is valid for the lifetime of the director.
+/// SAFETY: VCL_BACKEND is an opaque Varnish handle designed for multi-threaded use.
+/// While individual Varnish workers are single-threaded, we use Arc and atomic
+/// operations because multiple workers may access the same director concurrently
+/// (via shared VCL state). The raw pointer is managed by Varnish's backend
+/// infrastructure which provides its own synchronization guarantees.
 struct SendSyncBackend(VCL_BACKEND);
 
 unsafe impl Send for SendSyncBackend {}
@@ -103,44 +106,30 @@ impl HeaderMatchCompiled {
     }
 
     /// Check if this header match matches the given request
+    /// Works with borrowed data - no allocations
     pub fn matches(&self, bereq: &HttpHeaders) -> bool {
+        let header_value = match bereq.header(match self {
+            HeaderMatchCompiled::Exact { name, .. } => name,
+            HeaderMatchCompiled::Regex { name, .. } => name,
+        }) {
+            Some(v) => v,
+            None => return false,
+        };
+
         match self {
-            HeaderMatchCompiled::Exact { name, value } => {
-                let header_value = match bereq.header(name) {
-                    Some(v) => {
-                        // Convert to String to avoid lifetime issues
-                        match v {
-                            StrOrBytes::Utf8(s) => s.to_string(),
-                            StrOrBytes::Bytes(b) => {
-                                match std::str::from_utf8(b) {
-                                    Ok(s) => s.to_string(),
-                                    Err(_) => return false,
-                                }
-                            }
-                        }
-                    }
-                    None => return false,
-                };
-                &header_value == value
-            }
-            HeaderMatchCompiled::Regex { name, regex } => {
-                let header_value = match bereq.header(name) {
-                    Some(v) => {
-                        // Convert to String to avoid lifetime issues
-                        match v {
-                            StrOrBytes::Utf8(s) => s.to_string(),
-                            StrOrBytes::Bytes(b) => {
-                                match std::str::from_utf8(b) {
-                                    Ok(s) => s.to_string(),
-                                    Err(_) => return false,
-                                }
-                            }
-                        }
-                    }
-                    None => return false,
-                };
-                regex.is_match(&header_value)
-            }
+            HeaderMatchCompiled::Exact { value, .. } => match header_value {
+                StrOrBytes::Utf8(s) => s == value,
+                StrOrBytes::Bytes(b) => b == value.as_bytes(),
+            },
+            HeaderMatchCompiled::Regex { regex, .. } => match header_value {
+                StrOrBytes::Utf8(s) => regex.is_match(s),
+                StrOrBytes::Bytes(b) => {
+                    // Only allocate if we have non-UTF8 bytes that need regex matching
+                    std::str::from_utf8(b)
+                        .map(|s| regex.is_match(s))
+                        .unwrap_or(false)
+                }
+            },
         }
     }
 }
@@ -451,20 +440,7 @@ impl GhostDirector {
             let selections = director.stats().backend_selections();
             let total = director.stats().total_requests();
 
-            let backend_objs: Vec<serde_json::Value> = selections
-                .iter()
-                .map(|(key, count)| {
-                    serde_json::json!({
-                        "address": key,
-                        "selections": count,
-                        "percentage": if total > 0 {
-                            (*count as f64 / total as f64) * 100.0
-                        } else {
-                            0.0
-                        }
-                    })
-                })
-                .collect();
+            let backend_objs = crate::format::format_backend_selections_json(&selections, total);
 
             let obj = serde_json::json!({
                 "name": format!("ghost.{}", director.hostname()),
@@ -488,20 +464,7 @@ impl GhostDirector {
             let selections = director.stats().backend_selections();
             let total = director.stats().total_requests();
 
-            let backend_objs: Vec<serde_json::Value> = selections
-                .iter()
-                .map(|(key, count)| {
-                    serde_json::json!({
-                        "address": key,
-                        "selections": count,
-                        "percentage": if total > 0 {
-                            (*count as f64 / total as f64) * 100.0
-                        } else {
-                            0.0
-                        }
-                    })
-                })
-                .collect();
+            let backend_objs = crate::format::format_backend_selections_json(&selections, total);
 
             let obj = serde_json::json!({
                 "name": format!("ghost.{}", director.hostname()),

@@ -17,12 +17,27 @@ sync.
 
 ## Architecture
 
-Ghost uses **Varnish native backends** with the director pattern for routing. This provides:
+### Two-Tier Director Pattern
+
+Ghost uses a **two-tier director architecture** for efficient routing:
+
+1. **GhostDirector** (meta-director) - Matches hostname (exact or wildcard) and delegates to the appropriate VhostDirector
+2. **VhostDirector** (per-vhost) - Handles route matching (path, method, headers, query params) and backend selection for a single virtual host
+
+This separation provides:
+- Clean separation of concerns (hostname vs route matching)
+- Efficient per-vhost statistics tracking
+- Lock-free hot-reload via ArcSwap (atomic pointer swaps)
+- Easy scaling to thousands of routes per vhost
+
+### Native Backends
+
+Ghost uses **Varnish native backends** instead of a custom HTTP client. This provides:
 
 - Battle-tested HTTP client and connection pooling from Varnish
 - Lower latency and memory usage vs async Rust HTTP
 - Simpler code with fewer dependencies
-- Better integration with Varnish ecosystem
+- Better integration with Varnish ecosystem (health checks, backend.list, etc.)
 
 ## Backend Lifecycle
 
@@ -34,7 +49,7 @@ This cleanup is safe because:
 
 - Varnish's VCL_BACKEND lifecycle management handles in-flight requests
 - Backends are removed only after the new routing state is fully constructed
-- The cleanup happens atomically under a write lock to maintain consistency
+- The cleanup happens atomically via ArcSwap (lock-free atomic pointer swap)
 
 ## Build
 
@@ -68,26 +83,46 @@ VTC test files include this parameter. See `DEBUG_MODE_LIMITATIONS.md` for detai
 
 ## Key Files
 
-- `src/lib.rs` - VMOD entry points, ghost_backend object
-- `src/config.rs` - JSON config parsing and validation
-- `src/director.rs` - Host matching, weighted backend selection, director implementation
-- `src/backend_pool.rs` - Native backend creation and management
+- `src/lib.rs` - VMOD entry points, ghost_backend object, reload endpoint
+- `src/config.rs` - JSON config parsing and validation (routing.json, ghost.json)
+- `src/director.rs` - GhostDirector (meta-director), hostname matching, compiled match types
+- `src/vhost_director.rs` - VhostDirector (per-vhost), route matching, backend selection, filter application
+- `src/backend_pool.rs` - Native backend creation and management, automatic cleanup
 - `src/not_found_backend.rs` - Synthetic 404 backend for undefined vhosts
+- `src/stats.rs` - Per-vhost and per-backend statistics tracking
+- `src/format.rs` - Formatting utilities for backend.list JSON output
 
 ## Key Dependencies
 
 - `varnish` - VMOD bindings and native backend support
-- `parking_lot` - RwLock for lock-free reads during hot-reload
+- `arc-swap` - Lock-free atomic swaps for hot-reload (main routing state)
+- `parking_lot` - RwLock for error message storage
 - `rand` - Weighted random backend selection
-- `serde/serde_json` - Configuration parsing
+- `regex` - Path/header/query parameter regex matching
+- `serde/serde_json` - Configuration parsing and filter serialization
 
 ## Status
 
-Phase 1 (Virtual Host Routing) complete. See `ghost-vmod.md` for roadmap.
+**Phase 3 Complete** - Advanced request matching and Gateway API filters fully implemented:
+
+- Virtual host routing (exact and wildcard hostnames)
+- Advanced path matching (exact, prefix, regex)
+- HTTP method matching
+- Header matching (exact and regex)
+- Query parameter matching (exact and regex)
+- Priority-based route selection with specificity bonuses
+- Request header filters (add, set, remove)
+- Response header filters (add, set, remove)
+- URL rewrite filters (ReplaceFullPath, ReplacePrefixMatch with intelligent fallback)
+
+See parent directory's CLAUDE.md for full project roadmap.
 
 ## Conventions
 
 - Use `cargo fmt` and `cargo clippy`
 - Error handling via `VclError`
-- Config hot-reload via `Arc<RwLock<>>`
+- Config hot-reload via `ArcSwap` for lock-free atomic swaps
+- Compiled match types (regex, path patterns) pre-compiled during config load
 - Backends owned by director instances (not global)
+- Avoid allocations in hot path (use borrowed data where possible)
+- Comprehensive rustdoc comments for public functions and complex logic
