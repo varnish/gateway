@@ -201,17 +201,6 @@ pub struct RouteEntry {
     pub priority: i32,
 }
 
-/// Routing state for v2 configuration with path-based routing
-#[derive(Debug, Clone)]
-pub struct RoutingState {
-    /// Exact hostname matches with path-based routes
-    pub exact: HashMap<String, Vec<RouteEntry>>,
-    /// Wildcard hostname patterns with path-based routes (in order)
-    pub wildcards: Vec<(String, Vec<RouteEntry>)>,
-    /// Default fallback backends
-    pub default: Option<Vec<WeightedBackendRef>>,
-}
-
 /// Map of vhost directors for two-tier routing
 #[derive(Debug, Clone)]
 pub struct VhostDirectorMap {
@@ -219,109 +208,6 @@ pub struct VhostDirectorMap {
     pub exact: HashMap<String, Arc<VhostDirector>>,
     /// Wildcard hostname patterns to vhost directors (in order)
     pub wildcards: Vec<(String, Arc<VhostDirector>)>,
-}
-
-/// Build routing state from configuration with path-based routing
-#[allow(dead_code)]
-pub fn build_routing_state(
-    config: &Config,
-    backend_pool: &mut BackendPool,
-    ctx: &mut Ctx,
-) -> Result<RoutingState, VclError> {
-    let mut exact = HashMap::new();
-    let mut wildcards = Vec::new();
-
-    // Process vhosts
-    for (hostname, vhost) in &config.vhosts {
-        let mut route_entries = Vec::new();
-
-        // Process each route in the vhost
-        for route in &vhost.routes {
-            let mut backend_refs = Vec::new();
-
-            // Create backend refs for each backend in the route
-            for backend in &route.backends {
-                let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
-                backend_refs.push(WeightedBackendRef {
-                    key,
-                    weight: backend.weight,
-                });
-            }
-
-            let path_match = match route.path_match.as_ref() {
-                Some(pm) => Some(
-                    PathMatchCompiled::from_config(pm)
-                        .map_err(|e| VclError::new(format!("Invalid path match: {}", e)))?,
-                ),
-                None => None,
-            };
-
-            // Compile header matches
-            let headers: Result<Vec<_>, _> = route
-                .headers
-                .iter()
-                .map(HeaderMatchCompiled::from_config)
-                .collect();
-            let headers = headers.map_err(|e| VclError::new(format!("Invalid header match: {}", e)))?;
-
-            // Compile query param matches
-            let query_params: Result<Vec<_>, _> = route
-                .query_params
-                .iter()
-                .map(QueryParamMatchCompiled::from_config)
-                .collect();
-            let query_params = query_params.map_err(|e| VclError::new(format!("Invalid query param match: {}", e)))?;
-
-            let filters = route.filters.as_ref().map(|f| Arc::new(f.clone()));
-
-            route_entries.push(RouteEntry {
-                path_match,
-                method: route.method.clone(),
-                headers,
-                query_params,
-                filters,
-                backends: backend_refs,
-                priority: route.priority,
-            });
-        }
-
-        // Sort routes by priority (descending - higher priority first)
-        route_entries.sort_by(|a, b| b.priority.cmp(&a.priority));
-
-        // Add default_backends as lowest priority route if present
-        if !vhost.default_backends.is_empty() {
-            let mut default_refs = Vec::new();
-            for backend in &vhost.default_backends {
-                let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
-                default_refs.push(WeightedBackendRef {
-                    key,
-                    weight: backend.weight,
-                });
-            }
-            route_entries.push(RouteEntry {
-                path_match: None,
-                method: None,
-                headers: Vec::new(),
-                query_params: Vec::new(),
-                filters: None,
-                backends: default_refs,
-                priority: 0,
-            });
-        }
-
-        // Categorize into exact or wildcard
-        if hostname.starts_with("*.") {
-            wildcards.push((hostname.clone(), route_entries));
-        } else {
-            exact.insert(hostname.clone(), route_entries);
-        }
-    }
-
-    Ok(RoutingState {
-        exact,
-        wildcards,
-        default: None,
-    })
 }
 
 /// Build vhost directors from configuration
@@ -459,39 +345,6 @@ fn collect_referenced_backends_from_directors(directors: &VhostDirectorMap) -> s
     for (_, director) in &directors.wildcards {
         for key in director.backend_keys() {
             keys.insert(key);
-        }
-    }
-
-    keys
-}
-
-/// Collect all backend keys referenced in routing state
-#[allow(dead_code)]
-fn collect_referenced_backends(routing: &RoutingState) -> std::collections::HashSet<String> {
-    let mut keys = std::collections::HashSet::new();
-
-    // Collect from exact matches
-    for routes in routing.exact.values() {
-        for route in routes {
-            for backend_ref in &route.backends {
-                keys.insert(backend_ref.key.clone());
-            }
-        }
-    }
-
-    // Collect from wildcards
-    for (_, routes) in &routing.wildcards {
-        for route in routes {
-            for backend_ref in &route.backends {
-                keys.insert(backend_ref.key.clone());
-            }
-        }
-    }
-
-    // Collect from default
-    if let Some(refs) = &routing.default {
-        for backend_ref in refs {
-            keys.insert(backend_ref.key.clone());
         }
     }
 
@@ -812,99 +665,6 @@ impl VclDirector for SharedGhostDirector {
     }
 }
 
-/// Match hostname and path against routing state
-///
-/// Returns the list of backend references for the matched route.
-/// Matching priority:
-/// 1. Exact hostname > wildcard hostname > default
-/// 2. Within matched vhost, iterate routes by priority
-/// 3. First route whose path, method, headers, and query params match wins
-#[allow(dead_code)]
-fn match_host_and_path<'a>(
-    routing: &'a RoutingState,
-    host: &str,
-    path: &str,
-    method: &str,
-    bereq: &HttpHeaders,
-    query_string: Option<&str>,
-) -> Option<&'a [WeightedBackendRef]> {
-    let host = host.to_lowercase();
-
-    // 1. Try exact hostname match
-    if let Some(routes) = routing.exact.get(&host) {
-        if let Some(backends) = match_routes(routes, path, method, bereq, query_string) {
-            return Some(backends);
-        }
-    }
-
-    // 2. Try wildcard hostname match
-    for (pattern, routes) in &routing.wildcards {
-        if matches_wildcard(pattern, &host) {
-            if let Some(backends) = match_routes(routes, path, method, bereq, query_string) {
-                return Some(backends);
-            }
-        }
-    }
-
-    // 3. Default fallback
-    if let Some(refs) = &routing.default {
-        if !refs.is_empty() {
-            return Some(refs);
-        }
-    }
-
-    None
-}
-
-/// Match routes against all conditions (already sorted by priority)
-/// All conditions within a match are AND-ed together
-#[allow(dead_code)]
-fn match_routes<'a>(
-    routes: &'a [RouteEntry],
-    path: &str,
-    method: &str,
-    bereq: &HttpHeaders,
-    query_string: Option<&str>,
-) -> Option<&'a [WeightedBackendRef]> {
-    for route in routes {
-        // Check path match
-        if let Some(ref pm) = route.path_match {
-            if !pm.matches(path) {
-                continue;
-            }
-        }
-
-        // Check method match
-        if let Some(ref m) = route.method {
-            if m != method {
-                continue;
-            }
-        }
-
-        // Check header matches (all must match - AND)
-        if !route.headers.iter().all(|hm| hm.matches(bereq)) {
-            continue;
-        }
-
-        // Check query param matches (all must match - AND)
-        if let Some(qs) = query_string {
-            if !route.query_params.iter().all(|qpm| qpm.matches(qs)) {
-                continue;
-            }
-        } else if !route.query_params.is_empty() {
-            // No query string but route requires query params
-            continue;
-        }
-
-        // All conditions matched
-        if !route.backends.is_empty() {
-            return Some(&route.backends);
-        }
-    }
-
-    None
-}
-
 /// Check if a wildcard pattern matches a hostname
 fn matches_wildcard(pattern: &str, host: &str) -> bool {
     if !pattern.starts_with("*.") {
@@ -939,30 +699,6 @@ fn get_host_header(http: &HttpHeaders) -> Option<String> {
     // Strip port if present
     let host = host_str.split(':').next()?;
     Some(host.to_lowercase())
-}
-
-/// Extract path and query string from URL
-/// Returns (path, Some(query_string)) or (path, None)
-#[allow(dead_code)]
-fn extract_path_and_query(url: &str) -> (&str, Option<&str>) {
-    if let Some(q_idx) = url.find('?') {
-        let path = &url[..q_idx];
-        let query_part = &url[q_idx + 1..];
-        // Strip fragment if present
-        let query = if let Some(f_idx) = query_part.find('#') {
-            &query_part[..f_idx]
-        } else {
-            query_part
-        };
-        let final_path = if path.is_empty() { "/" } else { path };
-        (final_path, Some(query))
-    } else {
-        // No query string, but check for fragment
-        let path_end = url.find('#').unwrap_or(url.len());
-        let path = &url[..path_end];
-        let final_path = if path.is_empty() { "/" } else { path };
-        (final_path, None)
-    }
 }
 
 /// Parse query string into key-value pairs
@@ -1034,25 +770,6 @@ mod tests {
         };
         assert_eq!(ref1.key, "10.0.0.1:8080");
         assert_eq!(ref1.weight, 100);
-    }
-
-    #[test]
-    fn test_extract_path_and_query() {
-        assert_eq!(extract_path_and_query("/api/users"), ("/api/users", None));
-        assert_eq!(
-            extract_path_and_query("/api/users?foo=bar"),
-            ("/api/users", Some("foo=bar"))
-        );
-        assert_eq!(
-            extract_path_and_query("/api/users#fragment"),
-            ("/api/users", None)
-        );
-        assert_eq!(
-            extract_path_and_query("/api/users?foo=bar#fragment"),
-            ("/api/users", Some("foo=bar"))
-        );
-        assert_eq!(extract_path_and_query(""), ("/", None));
-        assert_eq!(extract_path_and_query("?query"), ("/", Some("query")));
     }
 
     #[test]
@@ -1163,97 +880,4 @@ mod tests {
         // This verifies the behavior used in RouteEntry with None path_match
     }
 
-    #[test]
-    fn test_collect_referenced_backends_empty() {
-        // Empty routing state
-        let routing = RoutingState {
-            exact: HashMap::new(),
-            wildcards: vec![],
-            default: None,
-        };
-
-        let keys = collect_referenced_backends(&routing);
-        assert_eq!(keys.len(), 0);
-    }
-
-    #[test]
-    fn test_collect_referenced_backends_all_variants() {
-        // Create routing state with multiple routes per vhost
-        let routing = RoutingState {
-            exact: {
-                let mut map = HashMap::new();
-                map.insert(
-                    "api.example.com".to_string(),
-                    vec![
-                        RouteEntry {
-                            path_match: Some(PathMatchCompiled::PathPrefix("/v2".to_string())),
-                            method: None,
-                            headers: Vec::new(),
-                            query_params: Vec::new(),
-                            filters: None,
-                            backends: vec![WeightedBackendRef {
-                                key: "10.0.0.1:8080".to_string(),
-                                weight: 100,
-                            }],
-                            priority: 100,
-                        },
-                        RouteEntry {
-                            path_match: Some(PathMatchCompiled::PathPrefix("/v1".to_string())),
-                            method: None,
-                            headers: Vec::new(),
-                            query_params: Vec::new(),
-                            filters: None,
-                            backends: vec![WeightedBackendRef {
-                                key: "10.0.0.2:8080".to_string(),
-                                weight: 100,
-                            }],
-                            priority: 50,
-                        },
-                        RouteEntry {
-                            path_match: None,
-                            method: None,
-                            headers: Vec::new(),
-                            query_params: Vec::new(),
-                            filters: None,
-                            backends: vec![WeightedBackendRef {
-                                key: "10.0.0.3:8080".to_string(),
-                                weight: 100,
-                            }],
-                            priority: 0,
-                        },
-                    ],
-                );
-                map
-            },
-            wildcards: vec![(
-                "*.staging.example.com".to_string(),
-                vec![RouteEntry {
-                    path_match: None,
-                    method: None,
-                    headers: Vec::new(),
-                    query_params: Vec::new(),
-                    filters: None,
-                    backends: vec![WeightedBackendRef {
-                        key: "10.0.2.1:8080".to_string(),
-                        weight: 100,
-                    }],
-                    priority: 0,
-                }],
-            )],
-            default: Some(vec![WeightedBackendRef {
-                key: "10.0.99.1:80".to_string(),
-                weight: 100,
-            }]),
-        };
-
-        let keys = collect_referenced_backends(&routing);
-
-        // Should have all 5 unique backend keys
-        assert_eq!(keys.len(), 5);
-        assert!(keys.contains("10.0.0.1:8080"));
-        assert!(keys.contains("10.0.0.2:8080"));
-        assert!(keys.contains("10.0.0.3:8080"));
-        assert!(keys.contains("10.0.2.1:8080"));
-        assert!(keys.contains("10.0.99.1:80"));
-    }
 }
