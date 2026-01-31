@@ -31,7 +31,7 @@ use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use varnish::vcl::{Ctx, Director, VclError};
+use varnish::vcl::{Ctx, Director, StrOrBytes, VclError};
 
 mod backend_pool;
 mod config;
@@ -42,8 +42,12 @@ mod stats;
 mod vhost_director;
 
 use backend_pool::BackendPool;
+use config::ResponseHeaderFilter;
 use director::{GhostDirector, SharedGhostDirector};
 use not_found_backend::{NotFoundBackend, NotFoundBody};
+
+/// Header name for passing matched route filters to vcl_deliver
+const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
 
 // Run VTC tests
 varnish::run_vtc_tests!("tests/*.vtc");
@@ -233,6 +237,56 @@ mod ghost {
     pub fn recv(ctx: &mut Ctx) -> Option<String> {
         // Placeholder for future URL rewriting logic
         None
+    }
+
+    /// Deliver hook for response header modification.
+    ///
+    /// Call this in `vcl_deliver` to apply ResponseHeaderModifier filters.
+    /// Reads filter context from request headers set during route matching.
+    pub fn deliver(ctx: &mut Ctx) {
+        // Get filter context from request header
+        let req = match ctx.http_req.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let filter_json = match req.header(FILTER_CONTEXT_HEADER) {
+            Some(StrOrBytes::Utf8(s)) => s,
+            Some(StrOrBytes::Bytes(b)) => {
+                match std::str::from_utf8(b) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                }
+            }
+            None => return,
+        };
+
+        // Deserialize filter
+        let filter: ResponseHeaderFilter = match serde_json::from_str(filter_json) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+
+        // Apply to response
+        let resp = match ctx.http_resp.as_mut() {
+            Some(r) => r,
+            None => return,
+        };
+
+        // Remove headers
+        for name in &filter.remove {
+            resp.unset_header(name);
+        }
+
+        // Set headers
+        for action in &filter.set {
+            let _ = resp.set_header(&action.name, &action.value);
+        }
+
+        // Add headers
+        for action in &filter.add {
+            let _ = resp.set_header(&action.name, &action.value);
+        }
     }
 
     /// Ghost backend object for request routing.

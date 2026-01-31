@@ -1,6 +1,7 @@
 package ghost
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -160,6 +161,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 		method      string
 		headers     string // JSON serialization of Headers
 		queryParams string // JSON serialization of QueryParams
+		filters     string // JSON serialization of Filters
 		priority    int
 	}
 
@@ -170,6 +172,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			method:      serializeMethod(route.Method),
 			headers:     serializeHeaders(route.Headers),
 			queryParams: serializeQueryParams(route.QueryParams),
+			filters:     serializeFilters(route.Filters),
 			priority:    route.Priority,
 		}
 		grouped[key] = append(grouped[key], route)
@@ -194,6 +197,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 				Method:      firstRoute.Method,
 				Headers:     firstRoute.Headers,
 				QueryParams: firstRoute.QueryParams,
+				Filters:     firstRoute.Filters,
 				Backends:    allBackends,
 				Priority:    key.priority,
 			})
@@ -241,6 +245,15 @@ func serializeQueryParams(params []QueryParamMatch) string {
 		parts = append(parts, string(p.Type)+":"+p.Name+":"+p.Value)
 	}
 	return strings.Join(parts, "|")
+}
+
+// serializeFilters converts filters to string for grouping.
+func serializeFilters(filters *RouteFilters) string {
+	if filters == nil {
+		return ""
+	}
+	data, _ := json.Marshal(filters)
+	return string(data)
 }
 
 // GenerateV2 creates a v2 ghost.json Config by merging routing rules with discovered endpoints.

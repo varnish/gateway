@@ -79,6 +79,53 @@ type QueryParamMatch struct {
 	Type  MatchType `json:"type"`
 }
 
+// HTTPHeaderAction represents a header modification action
+type HTTPHeaderAction struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// RequestHeaderFilter defines header modifications for requests
+type RequestHeaderFilter struct {
+	Set    []HTTPHeaderAction `json:"set,omitempty"`
+	Add    []HTTPHeaderAction `json:"add,omitempty"`
+	Remove []string           `json:"remove,omitempty"`
+}
+
+// ResponseHeaderFilter defines header modifications for responses
+type ResponseHeaderFilter struct {
+	Set    []HTTPHeaderAction `json:"set,omitempty"`
+	Add    []HTTPHeaderAction `json:"add,omitempty"`
+	Remove []string           `json:"remove,omitempty"`
+}
+
+// URLRewriteFilter defines URL rewrite configuration
+type URLRewriteFilter struct {
+	Hostname           *string `json:"hostname,omitempty"`
+	PathType           *string `json:"path_type,omitempty"`
+	ReplaceFullPath    *string `json:"replace_full_path,omitempty"`
+	ReplacePrefixMatch *string `json:"replace_prefix_match,omitempty"`
+}
+
+// RequestRedirectFilter defines redirect configuration
+type RequestRedirectFilter struct {
+	Scheme             *string `json:"scheme,omitempty"`
+	Hostname           *string `json:"hostname,omitempty"`
+	PathType           *string `json:"path_type,omitempty"`
+	ReplaceFullPath    *string `json:"replace_full_path,omitempty"`
+	ReplacePrefixMatch *string `json:"replace_prefix_match,omitempty"`
+	Port               *int    `json:"port,omitempty"`
+	StatusCode         int     `json:"status_code"`
+}
+
+// RouteFilters holds all filters that can be applied to a route
+type RouteFilters struct {
+	RequestHeaderModifier  *RequestHeaderFilter  `json:"request_header_modifier,omitempty"`
+	ResponseHeaderModifier *ResponseHeaderFilter `json:"response_header_modifier,omitempty"`
+	URLRewrite             *URLRewriteFilter     `json:"url_rewrite,omitempty"`
+	RequestRedirect        *RequestRedirectFilter `json:"request_redirect,omitempty"`
+}
+
 // Route represents a path-based routing rule (v2 config).
 type Route struct {
 	Hostname    string            `json:"hostname,omitempty"` // Used when collecting from HTTPRoutes
@@ -86,6 +133,7 @@ type Route struct {
 	Method      *string           `json:"method,omitempty"`
 	Headers     []HeaderMatch     `json:"headers,omitempty"`
 	QueryParams []QueryParamMatch `json:"query_params,omitempty"`
+	Filters     *RouteFilters     `json:"filters,omitempty"`
 	Service     string            `json:"service"`
 	Namespace   string            `json:"namespace"`
 	Port        int               `json:"port"`
@@ -112,6 +160,7 @@ type RouteBackends struct {
 	Method      *string           `json:"method,omitempty"`
 	Headers     []HeaderMatch     `json:"headers,omitempty"`
 	QueryParams []QueryParamMatch `json:"query_params,omitempty"`
+	Filters     *RouteFilters     `json:"filters,omitempty"`
 	Backends    []Backend         `json:"backends"`
 	Priority    int               `json:"priority"`
 }

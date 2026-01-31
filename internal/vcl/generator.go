@@ -66,6 +66,11 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    set bereq.backend = router.backend();\n")
 	sb.WriteString("}\n\n")
 
+	// Generate vcl_deliver
+	sb.WriteString("sub vcl_deliver {\n")
+	sb.WriteString("    ghost.deliver();\n")
+	sb.WriteString("}\n\n")
+
 	sb.WriteString("# --- User VCL concatenated below ---\n")
 
 	return sb.String()
@@ -306,6 +311,12 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 							})
 						}
 
+						// Extract filters
+						var filters *ghost.RouteFilters
+						if len(rule.Filters) > 0 {
+							filters = extractFilters(rule.Filters)
+						}
+
 						// Create a route entry for each backend
 						for _, backend := range rule.BackendRefs {
 							if backend.Name == "" {
@@ -333,6 +344,7 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 								Method:      method,
 								Headers:     headers,
 								QueryParams: queryParams,
+								Filters:     filters,
 								Service:     string(backend.Name),
 								Namespace:   backendNS,
 								Port:        port,
@@ -362,4 +374,116 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 	})
 
 	return collectedRoutes
+}
+
+// extractFilters converts Gateway API filters to ghost filter configuration
+func extractFilters(filters []gatewayv1.HTTPRouteFilter) *ghost.RouteFilters {
+	result := &ghost.RouteFilters{}
+	hasFilters := false
+
+	for _, filter := range filters {
+		switch filter.Type {
+		case gatewayv1.HTTPRouteFilterRequestHeaderModifier:
+			if filter.RequestHeaderModifier != nil {
+				result.RequestHeaderModifier = convertRequestHeaderFilter(filter.RequestHeaderModifier)
+				hasFilters = true
+			}
+		case gatewayv1.HTTPRouteFilterResponseHeaderModifier:
+			if filter.ResponseHeaderModifier != nil {
+				result.ResponseHeaderModifier = convertResponseHeaderFilter(filter.ResponseHeaderModifier)
+				hasFilters = true
+			}
+		case gatewayv1.HTTPRouteFilterURLRewrite:
+			if filter.URLRewrite != nil {
+				result.URLRewrite = convertURLRewriteFilter(filter.URLRewrite)
+				hasFilters = true
+			}
+		case gatewayv1.HTTPRouteFilterRequestRedirect:
+			if filter.RequestRedirect != nil {
+				result.RequestRedirect = convertRequestRedirectFilter(filter.RequestRedirect)
+				hasFilters = true
+			}
+		}
+	}
+
+	if !hasFilters {
+		return nil
+	}
+	return result
+}
+
+func convertRequestHeaderFilter(f *gatewayv1.HTTPHeaderFilter) *ghost.RequestHeaderFilter {
+	result := &ghost.RequestHeaderFilter{}
+	for _, h := range f.Set {
+		result.Set = append(result.Set, ghost.HTTPHeaderAction{
+			Name:  string(h.Name),
+			Value: h.Value,
+		})
+	}
+	for _, h := range f.Add {
+		result.Add = append(result.Add, ghost.HTTPHeaderAction{
+			Name:  string(h.Name),
+			Value: h.Value,
+		})
+	}
+	result.Remove = f.Remove
+	return result
+}
+
+func convertResponseHeaderFilter(f *gatewayv1.HTTPHeaderFilter) *ghost.ResponseHeaderFilter {
+	result := &ghost.ResponseHeaderFilter{}
+	for _, h := range f.Set {
+		result.Set = append(result.Set, ghost.HTTPHeaderAction{
+			Name:  string(h.Name),
+			Value: h.Value,
+		})
+	}
+	for _, h := range f.Add {
+		result.Add = append(result.Add, ghost.HTTPHeaderAction{
+			Name:  string(h.Name),
+			Value: h.Value,
+		})
+	}
+	result.Remove = f.Remove
+	return result
+}
+
+func convertURLRewriteFilter(f *gatewayv1.HTTPURLRewriteFilter) *ghost.URLRewriteFilter {
+	result := &ghost.URLRewriteFilter{}
+	if f.Hostname != nil {
+		hostname := string(*f.Hostname)
+		result.Hostname = &hostname
+	}
+	if f.Path != nil {
+		pathType := string(f.Path.Type)
+		result.PathType = &pathType
+		result.ReplaceFullPath = f.Path.ReplaceFullPath
+		result.ReplacePrefixMatch = f.Path.ReplacePrefixMatch
+	}
+	return result
+}
+
+func convertRequestRedirectFilter(f *gatewayv1.HTTPRequestRedirectFilter) *ghost.RequestRedirectFilter {
+	result := &ghost.RequestRedirectFilter{
+		StatusCode: 302, // default
+	}
+	if f.StatusCode != nil {
+		result.StatusCode = *f.StatusCode
+	}
+	result.Scheme = f.Scheme
+	if f.Hostname != nil {
+		hostname := string(*f.Hostname)
+		result.Hostname = &hostname
+	}
+	if f.Path != nil {
+		pathType := string(f.Path.Type)
+		result.PathType = &pathType
+		result.ReplaceFullPath = f.Path.ReplaceFullPath
+		result.ReplacePrefixMatch = f.Path.ReplacePrefixMatch
+	}
+	if f.Port != nil {
+		port := int(*f.Port)
+		result.Port = &port
+	}
+	return result
 }

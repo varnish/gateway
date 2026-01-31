@@ -196,6 +196,7 @@ pub struct RouteEntry {
     pub method: Option<String>,
     pub headers: Vec<HeaderMatchCompiled>,
     pub query_params: Vec<QueryParamMatchCompiled>,
+    pub filters: Option<Arc<crate::config::RouteFilters>>,
     pub backends: Vec<WeightedBackendRef>,
     pub priority: i32,
 }
@@ -271,11 +272,14 @@ pub fn build_routing_state(
                 .collect();
             let query_params = query_params.map_err(|e| VclError::new(format!("Invalid query param match: {}", e)))?;
 
+            let filters = route.filters.as_ref().map(|f| Arc::new(f.clone()));
+
             route_entries.push(RouteEntry {
                 path_match,
                 method: route.method.clone(),
                 headers,
                 query_params,
+                filters,
                 backends: backend_refs,
                 priority: route.priority,
             });
@@ -299,6 +303,7 @@ pub fn build_routing_state(
                 method: None,
                 headers: Vec::new(),
                 query_params: Vec::new(),
+                filters: None,
                 backends: default_refs,
                 priority: 0,
             });
@@ -375,11 +380,14 @@ pub fn build_vhost_directors(
                 .collect();
             let query_params = query_params.map_err(|e| VclError::new(format!("Invalid query param match: {}", e)))?;
 
+            let filters = route.filters.as_ref().map(|f| Arc::new(f.clone()));
+
             route_entries.push(RouteEntry {
                 path_match,
                 method: route.method.clone(),
                 headers,
                 query_params,
+                filters,
                 backends: backend_refs,
                 priority: route.priority,
             });
@@ -403,6 +411,7 @@ pub fn build_vhost_directors(
                 method: None,
                 headers: Vec::new(),
                 query_params: Vec::new(),
+                filters: None,
                 backends: default_refs,
                 priority: 0,
             });
@@ -1181,6 +1190,7 @@ mod tests {
                             method: None,
                             headers: Vec::new(),
                             query_params: Vec::new(),
+                            filters: None,
                             backends: vec![WeightedBackendRef {
                                 key: "10.0.0.1:8080".to_string(),
                                 weight: 100,
@@ -1192,6 +1202,7 @@ mod tests {
                             method: None,
                             headers: Vec::new(),
                             query_params: Vec::new(),
+                            filters: None,
                             backends: vec![WeightedBackendRef {
                                 key: "10.0.0.2:8080".to_string(),
                                 weight: 100,
@@ -1203,6 +1214,7 @@ mod tests {
                             method: None,
                             headers: Vec::new(),
                             query_params: Vec::new(),
+                            filters: None,
                             backends: vec![WeightedBackendRef {
                                 key: "10.0.0.3:8080".to_string(),
                                 weight: 100,
@@ -1220,6 +1232,7 @@ mod tests {
                     method: None,
                     headers: Vec::new(),
                     query_params: Vec::new(),
+                    filters: None,
                     backends: vec![WeightedBackendRef {
                         key: "10.0.2.1:8080".to_string(),
                         weight: 100,

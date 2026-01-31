@@ -167,6 +167,13 @@ This will be used for:
 - Authentication checks
 - Rate limiting intercepts
 
+### Function `VOID ghost.deliver()`
+
+Deliver hook for response header modification.
+
+Call this in `vcl_deliver` to apply ResponseHeaderModifier filters.
+Reads filter context from request headers set during route matching.
+
 ### Constructor `ghost.ghost_backend()`
 
 Ghost backend object for request routing.

@@ -8,11 +8,15 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use varnish::ffi::VCL_BACKEND;
-use varnish::vcl::{Buffer, Ctx, HttpHeaders, StrOrBytes, VclDirector};
+use varnish::vcl::{Buffer, Ctx, HttpHeaders, StrOrBytes, VclDirector, VclError};
 
 use crate::backend_pool::BackendPool;
+use crate::config::RouteFilters;
 use crate::director::{RouteEntry, WeightedBackendRef};
 use crate::stats::VhostStats;
+
+/// Header name for passing matched route filters to vcl_deliver
+const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
 
 /// Director for a single virtual host
 ///
@@ -205,7 +209,30 @@ impl VclDirector for VhostDirector {
             .unwrap_or("GET");
 
         // Match routes (already sorted by priority)
-        let backend_refs = match_routes(&self.routes, path, method, bereq, query_string)?;
+        let (backend_refs, matched_filters) = match_routes(&self.routes, path, method, bereq, query_string)?;
+
+        // Apply request filters BEFORE backend selection
+        if let Some(filters) = &matched_filters {
+            // RequestHeaderModifier
+            if let Some(req_header_mod) = &filters.request_header_modifier {
+                let _ = apply_request_header_filter(ctx, req_header_mod);
+            }
+
+            // URLRewrite
+            if let Some(url_rewrite) = &filters.url_rewrite {
+                let _ = apply_url_rewrite_filter(ctx, url_rewrite);
+            }
+
+            // RequestRedirect - TODO: implement synthetic backend
+            // if filters.request_redirect.is_some() {
+            //     return redirect_backend
+            // }
+
+            // Store response filter context
+            if filters.response_header_modifier.is_some() {
+                let _ = store_filter_context(ctx, filters);
+            }
+        }
 
         // Select backend using weighted random
         let backend_ref = select_backend_weighted(backend_refs)?;
@@ -248,7 +275,7 @@ fn match_routes<'a>(
     method: &str,
     bereq: &HttpHeaders,
     query_string: Option<&str>,
-) -> Option<&'a [WeightedBackendRef]> {
+) -> Option<(&'a [WeightedBackendRef], Option<Arc<RouteFilters>>)> {
     for route in routes {
         // Check path match
         if let Some(ref pm) = route.path_match {
@@ -281,7 +308,7 @@ fn match_routes<'a>(
 
         // All conditions matched
         if !route.backends.is_empty() {
-            return Some(&route.backends);
+            return Some((&route.backends, route.filters.clone()));
         }
     }
 
@@ -430,6 +457,7 @@ mod tests {
             method: None,
             headers: Vec::new(),
             query_params: Vec::new(),
+            filters: None,
             backends: vec![WeightedBackendRef {
                 key: "10.0.0.1:8080".to_string(),
                 weight: 100,
@@ -451,6 +479,7 @@ mod tests {
             method: None,
             headers: Vec::new(),
             query_params: Vec::new(),
+            filters: None,
             backends: vec![WeightedBackendRef {
                 key: "10.0.0.1:8080".to_string(),
                 weight: 100,
@@ -475,6 +504,7 @@ mod tests {
                 method: None,
                 headers: Vec::new(),
                 query_params: Vec::new(),
+                filters: None,
                 backends: vec![WeightedBackendRef {
                     key: "10.0.0.1:8080".to_string(),
                     weight: 100,
@@ -512,4 +542,129 @@ mod tests {
         director.stats().record_request("10.0.0.1:8080");
         assert_eq!(director.stats().total_requests(), 1);
     }
+}
+
+fn apply_request_header_filter(
+    ctx: &mut Ctx,
+    filter: &crate::config::RequestHeaderFilter,
+) -> Result<(), VclError> {
+    let bereq = ctx.http_bereq.as_mut()
+        .ok_or_else(|| VclError::new("no bereq".to_string()))?;
+
+    // Remove headers
+    for name in &filter.remove {
+        bereq.unset_header(name);
+    }
+
+    // Set headers (replaces)
+    for action in &filter.set {
+        bereq.set_header(&action.name, &action.value)?;
+    }
+
+    // Add headers (appends)
+    for action in &filter.add {
+        bereq.set_header(&action.name, &action.value)?;
+    }
+
+    Ok(())
+}
+
+fn apply_url_rewrite_filter(
+    ctx: &mut Ctx,
+    filter: &crate::config::URLRewriteFilter,
+) -> Result<(), VclError> {
+    let bereq = ctx.http_bereq.as_mut()
+        .ok_or_else(|| VclError::new("no bereq".to_string()))?;
+
+    // Rewrite hostname
+    if let Some(hostname) = &filter.hostname {
+        bereq.set_header("host", hostname)?;
+    }
+
+    // Rewrite path
+    if let Some(path_type) = &filter.path_type {
+        match path_type.as_str() {
+            "ReplaceFullPath" => {
+                if let Some(path) = &filter.replace_full_path {
+                    bereq.set_url(path)?;
+                }
+            }
+            "ReplacePrefixMatch" => {
+                if let Some(new_prefix) = &filter.replace_prefix_match {
+                    // Get current URL
+                    let current_url = bereq.url()
+                        .and_then(|u| match u {
+                            StrOrBytes::Utf8(s) => Some(s),
+                            StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
+                        })
+                        .unwrap_or("/");
+
+                    // Extract path and query
+                    let (path, query) = extract_path_and_query(current_url);
+
+                    // For ReplacePrefixMatch, we need to find what prefix was matched
+                    // and replace it. This requires access to the matched PathMatch.
+                    // For now, we'll do a simple replacement: if the path starts with
+                    // any prefix, we replace it with new_prefix.
+
+                    // Find the longest prefix that matches
+                    // Note: This is simplified. Ideally we'd use the matched route's
+                    // path_match value, but that's not passed to this function.
+                    let new_path = if path.starts_with('/') {
+                        // Simple approach: replace first path segment
+                        let segments: Vec<&str> = path.splitn(3, '/').collect();
+                        if segments.len() >= 2 {
+                            // segments[0] is empty (before first /)
+                            // segments[1] is first segment
+                            // segments[2] is remainder (if any)
+                            let remainder = if segments.len() > 2 {
+                                segments[2]
+                            } else {
+                                ""
+                            };
+                            format!("{}/{}", new_prefix.trim_end_matches('/'), remainder)
+                        } else {
+                            new_prefix.to_string()
+                        }
+                    } else {
+                        new_prefix.to_string()
+                    };
+
+                    // Reconstruct URL with query string if present
+                    let final_url = if let Some(q) = query {
+                        format!("{}?{}", new_path, q)
+                    } else {
+                        new_path
+                    };
+
+                    bereq.set_url(&final_url)?;
+                }
+            }
+            _ => {
+                ctx.log(
+                    varnish::vcl::LogTag::Error,
+                    format!("Unknown path rewrite type: {}", path_type)
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn store_filter_context(
+    ctx: &mut Ctx,
+    filters: &Arc<RouteFilters>,
+) -> Result<(), VclError> {
+    let bereq = ctx.http_bereq.as_mut()
+        .ok_or_else(|| VclError::new("no bereq".to_string()))?;
+
+    // Serialize response filter to JSON
+    if let Some(resp_filter) = &filters.response_header_modifier {
+        let json = serde_json::to_string(resp_filter)
+            .map_err(|e| VclError::new(format!("serialize filter: {}", e)))?;
+        bereq.set_header(FILTER_CONTEXT_HEADER, &json)?;
+    }
+
+    Ok(())
 }

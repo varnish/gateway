@@ -67,6 +67,65 @@ pub struct QueryParamMatch {
     pub match_type: MatchType,
 }
 
+/// HTTP header action for modification
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct HTTPHeaderAction {
+    pub name: String,
+    pub value: String,
+}
+
+/// Request header modification filter
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct RequestHeaderFilter {
+    #[serde(default)]
+    pub set: Vec<HTTPHeaderAction>,
+    #[serde(default)]
+    pub add: Vec<HTTPHeaderAction>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// Response header modification filter
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct ResponseHeaderFilter {
+    #[serde(default)]
+    pub set: Vec<HTTPHeaderAction>,
+    #[serde(default)]
+    pub add: Vec<HTTPHeaderAction>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// URL rewrite filter
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct URLRewriteFilter {
+    pub hostname: Option<String>,
+    pub path_type: Option<String>,
+    pub replace_full_path: Option<String>,
+    pub replace_prefix_match: Option<String>,
+}
+
+/// Request redirect filter
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct RequestRedirectFilter {
+    pub scheme: Option<String>,
+    pub hostname: Option<String>,
+    pub path_type: Option<String>,
+    pub replace_full_path: Option<String>,
+    pub replace_prefix_match: Option<String>,
+    pub port: Option<u16>,
+    pub status_code: u16,
+}
+
+/// Route filters container
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct RouteFilters {
+    pub request_header_modifier: Option<RequestHeaderFilter>,
+    pub response_header_modifier: Option<ResponseHeaderFilter>,
+    pub url_rewrite: Option<URLRewriteFilter>,
+    pub request_redirect: Option<RequestRedirectFilter>,
+}
+
 /// Maps a URL path pattern to a set of backend pods.
 /// Multiple routes per vhost enable path-based traffic splitting.
 #[derive(Debug, Clone, Deserialize)]
@@ -78,6 +137,8 @@ pub struct Route {
     pub headers: Vec<HeaderMatch>,
     #[serde(default)]
     pub query_params: Vec<QueryParamMatch>,
+    #[serde(default)]
+    pub filters: Option<RouteFilters>,
     pub backends: Vec<Backend>,
     pub priority: i32,
 }
