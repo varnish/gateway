@@ -1,23 +1,20 @@
-# NOTE: This file is kept for reference and backward compatibility.
+# Chaperone RBAC - ClusterRole and ClusterRoleBinding
 #
-# As of the automatic RBAC implementation, the operator now creates
-# namespace-scoped Role and RoleBinding resources automatically for each Gateway.
-# This means chaperone pods get permissions to watch EndpointSlices and Services
-# in their namespace without requiring manual RBAC setup.
+# The chaperone needs cluster-wide access to EndpointSlices because:
+# - HTTPRoutes can reference backend Services in any namespace (cross-namespace routing)
+# - The chaperone watches EndpointSlices cluster-wide to discover backend pod IPs
 #
-# The ClusterRole below is defined for reference, showing what permissions
-# chaperone needs. The static ClusterRoleBinding to the default namespace
-# is deprecated and can be removed if you're not using it.
+# The operator creates a ServiceAccount for each Gateway ({gateway-name}-chaperone),
+# but the ClusterRoleBinding below grants permissions to all service accounts in
+# the varnish-gateway-system namespace.
 #
-# For each Gateway, the operator automatically creates:
-# - Role: {gateway-name}-chaperone (in the Gateway's namespace)
-# - RoleBinding: {gateway-name}-chaperone (linking the Role to the ServiceAccount)
+# If you deploy Gateways in other namespaces, add additional ClusterRoleBindings
+# for those namespaces, e.g.:
 #
-# These resources are owned by the Gateway and cleaned up automatically when
-# the Gateway is deleted.
+#   kubectl create clusterrolebinding varnish-gateway-chaperone-{namespace} \
+#     --clusterrole=varnish-gateway-chaperone \
+#     --group=system:serviceaccounts:{namespace}
 
-# ClusterRole for reference - shows permissions needed by chaperone
-# (Operator creates namespace-scoped Roles with these same permissions)
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -26,7 +23,7 @@ metadata:
     app.kubernetes.io/name: varnish-gateway
     app.kubernetes.io/component: chaperone
 rules:
-  # Watch EndpointSlices for backend discovery
+  # Watch EndpointSlices for backend discovery (cluster-wide for cross-namespace routing)
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
@@ -39,14 +36,12 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
 ---
-# DEPRECATED: Static ClusterRoleBinding for default namespace only
-# This binding is kept for backward compatibility but is no longer needed.
-# The operator now creates RoleBindings automatically for each Gateway.
-# You can safely delete this if you're not relying on it.
+# ClusterRoleBinding for varnish-gateway-system namespace
+# This grants all chaperone pods in the namespace access to cluster-wide EndpointSlices
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: varnish-gateway-chaperone-default
+  name: varnish-gateway-chaperone
   labels:
     app.kubernetes.io/name: varnish-gateway
     app.kubernetes.io/component: chaperone
@@ -55,8 +50,6 @@ roleRef:
   kind: ClusterRole
   name: varnish-gateway-chaperone
 subjects:
-  # Bind to all ServiceAccounts in the default namespace
-  # The operator creates ServiceAccounts named {gateway-name}-chaperone
   - kind: Group
-    name: system:serviceaccounts:default
+    name: system:serviceaccounts:varnish-gateway-system
     apiGroup: rbac.authorization.k8s.io
