@@ -126,14 +126,18 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		"watchedServices", len(w.serviceWatch),
 	)
 
-	// Set up EndpointSlice informer (after routing config loaded to avoid race)
-	factory := informers.NewSharedInformerFactoryWithOptions(
+	// Set up EndpointSlice informer - cluster-wide to watch all namespaces
+	// Routes can reference services in any namespace, not just the Gateway's namespace
+	endpointSliceFactory := informers.NewSharedInformerFactory(w.client, 30*time.Second)
+
+	// Set up ConfigMap informer - namespace-scoped to Gateway's namespace only
+	configMapFactory := informers.NewSharedInformerFactoryWithOptions(
 		w.client,
 		30*time.Second,
 		informers.WithNamespace(w.namespace),
 	)
 
-	endpointSliceInformer := factory.Discovery().V1().EndpointSlices().Informer()
+	endpointSliceInformer := endpointSliceFactory.Discovery().V1().EndpointSlices().Informer()
 	_, err = endpointSliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if slice, ok := obj.(*discoveryv1.EndpointSlice); ok {
@@ -155,8 +159,8 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		return fmt.Errorf("endpointSliceInformer.AddEventHandler: %w", err)
 	}
 
-	// Set up ConfigMap informer
-	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
+	// Set up ConfigMap informer using namespace-scoped factory
+	configMapInformer := configMapFactory.Core().V1().ConfigMaps().Informer()
 	_, err = configMapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if cm, ok := obj.(*corev1.ConfigMap); ok {
@@ -178,8 +182,9 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		return fmt.Errorf("configMapInformer.AddEventHandler: %w", err)
 	}
 
-	// Start the informer
-	factory.Start(ctx.Done())
+	// Start both informer factories
+	endpointSliceFactory.Start(ctx.Done())
+	configMapFactory.Start(ctx.Done())
 
 	// Wait for both informers to sync
 	if !cache.WaitForCacheSync(ctx.Done(),
