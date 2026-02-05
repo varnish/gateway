@@ -1,0 +1,225 @@
+varnishtest "RequestRedirect filter tests"
+
+# Write initial config file
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+  "version": 2,
+  "vhosts": {
+    "api.example.com": {
+      "routes": [
+        {
+          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "priority": 100,
+          "filters": {
+            "request_redirect": {
+              "scheme": "https",
+              "status_code": 301
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+EOF
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        # Intercept reload requests
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+        # Bypass cache for testing
+        return (pass);
+    }
+
+    sub vcl_backend_fetch {
+        set bereq.backend = router.backend();
+    }
+} -start
+
+# Initial reload to load configuration
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# Test 1: Basic redirect with scheme change (HTTP → HTTPS)
+client c1 {
+    txreq -url "/users" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 301
+    expect resp.http.Location == "https://api.example.com/users"
+} -run
+
+# Test 2: Hostname redirect
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+  "version": 2,
+  "vhosts": {
+    "old.example.com": {
+      "routes": [
+        {
+          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "priority": 100,
+          "filters": {
+            "request_redirect": {
+              "hostname": "new.example.com",
+              "status_code": 302
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+EOF
+}
+
+client c_reload2 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c2 {
+    txreq -url "/api" -hdr "Host: old.example.com"
+    rxresp
+    expect resp.status == 302
+    expect resp.http.Location == "http://new.example.com/api"
+} -run
+
+# Test 3: Port handling - explicit port
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+  "version": 2,
+  "vhosts": {
+    "api.example.com": {
+      "routes": [
+        {
+          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "priority": 100,
+          "filters": {
+            "request_redirect": {
+              "scheme": "https",
+              "port": 8443,
+              "status_code": 307
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+EOF
+}
+
+client c_reload3 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c3 {
+    txreq -url "/users" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 307
+    expect resp.http.Location == "https://api.example.com:8443/users"
+} -run
+
+# Test 4: Path rewriting - ReplaceFullPath
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+  "version": 2,
+  "vhosts": {
+    "api.example.com": {
+      "routes": [
+        {
+          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "priority": 100,
+          "filters": {
+            "request_redirect": {
+              "replace_full_path": "/new/path",
+              "status_code": 301
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+EOF
+}
+
+client c_reload4 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c4 {
+    txreq -url "/old/path?foo=bar" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 301
+    expect resp.http.Location == "http://api.example.com/new/path?foo=bar"
+} -run
+
+# Test 5: Combined redirect - all fields
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+  "version": 2,
+  "vhosts": {
+    "old.example.com": {
+      "routes": [
+        {
+          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "priority": 100,
+          "filters": {
+            "request_redirect": {
+              "scheme": "https",
+              "hostname": "new.example.com",
+              "port": 443,
+              "replace_full_path": "/v2/api",
+              "status_code": 301
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+EOF
+}
+
+client c_reload5 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c5 {
+    txreq -url "/v1/api?token=abc" -hdr "Host: old.example.com:8080"
+    rxresp
+    expect resp.status == 301
+    expect resp.http.Location == "https://new.example.com/v2/api?token=abc"
+} -run
