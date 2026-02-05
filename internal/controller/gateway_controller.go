@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -162,6 +163,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		r.buildVCLConfigMap(gateway, vclContent),
 		r.buildAdminSecret(gateway),
 		r.buildServiceAccount(gateway),
+		r.buildClusterRoleBinding(gateway),
 		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash),
 		r.buildService(gateway),
 	}
@@ -748,6 +750,7 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.ClusterRoleBinding{}).
 		Watches(
 			&gatewayparamsv1alpha1.GatewayClassParameters{},
 			r.enqueueGatewaysForParams(),
