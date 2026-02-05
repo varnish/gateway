@@ -1,4 +1,5 @@
 VERSION := $(shell cat .version)
+CHART_VERSION := $(shell cat .version | sed 's/^v//')
 REGISTRY ?= ghcr.io/varnish
 OPERATOR_IMAGE := $(REGISTRY)/gateway-operator
 CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
@@ -198,7 +199,7 @@ helm-package:
 
 helm-push: helm-package
 	@echo "Pushing Helm chart to $(REGISTRY)/varnish/charts"
-	helm push dist/charts/varnish-gateway-$(VERSION).tgz oci://$(REGISTRY)/varnish/charts
+	helm push dist/charts/varnish-gateway-$(CHART_VERSION).tgz oci://$(REGISTRY)/varnish/charts
 
 helm-install:
 	helm install $(RELEASE_NAME) $(CHART_PATH) \
