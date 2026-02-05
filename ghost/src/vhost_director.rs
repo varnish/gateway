@@ -87,9 +87,10 @@ impl VhostDirector {
         &self.stats
     }
 
-    /// Check if this director has any routes with backends
+    /// Check if this director has any routes with backends or filters
+    /// Routes with redirect filters but no backends are considered "healthy"
     fn has_backends(&self) -> bool {
-        self.routes.iter().any(|r| !r.backends.is_empty())
+        self.routes.iter().any(|r| !r.backends.is_empty() || r.filters.is_some())
     }
 
     /// Collect all backend keys used by this director
@@ -411,7 +412,8 @@ fn match_routes<'a>(
         }
 
         // All conditions matched
-        if !route.backends.is_empty() {
+        // Allow routes with no backends if they have filters (e.g., RequestRedirect)
+        if !route.backends.is_empty() || route.filters.is_some() {
             return Some(RouteMatchResult {
                 backends: &route.backends,
                 filters: route.filters.clone(),
