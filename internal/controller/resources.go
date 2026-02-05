@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -96,6 +97,34 @@ func (r *GatewayReconciler) buildServiceAccount(gateway *gatewayv1.Gateway) *cor
 			Name:      fmt.Sprintf("%s-chaperone", gateway.Name),
 			Namespace: gateway.Namespace,
 			Labels:    r.buildLabels(gateway),
+		},
+	}
+}
+
+// buildClusterRoleBinding creates a ClusterRoleBinding that grants the chaperone ServiceAccount
+// permissions to watch EndpointSlices and ConfigMaps across the cluster.
+func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) *rbacv1.ClusterRoleBinding {
+	saName := fmt.Sprintf("%s-chaperone", gateway.Name)
+	return &rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "ClusterRoleBinding",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   fmt.Sprintf("%s-%s-chaperone", gateway.Namespace, gateway.Name),
+			Labels: r.buildLabels(gateway),
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     "varnish-gateway-chaperone",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      saName,
+				Namespace: gateway.Namespace,
+			},
 		},
 	}
 }
