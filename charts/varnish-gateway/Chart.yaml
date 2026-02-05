@@ -2,8 +2,8 @@ apiVersion: v2
 name: varnish-gateway
 description: Kubernetes Gateway API implementation using Varnish
 type: application
-version: 0.7.2
-appVersion: "0.7.2"
+version: 0.7.5
+appVersion: "0.7.5"
 
 keywords:
   - varnish

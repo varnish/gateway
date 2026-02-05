@@ -230,7 +230,10 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "version=$(cat .version)" >> $GITHUB_OUTPUT
+        run: |
+          VERSION=$(cat .version)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "chart_version=${VERSION#v}" >> $GITHUB_OUTPUT
 
       - name: Package Helm chart
         run: |
@@ -238,4 +241,4 @@ jobs:
 
       - name: Push Helm chart to OCI registry
         run: |
-          helm push dist/charts/varnish-gateway-${{ steps.version.outputs.version }}.tgz oci://${{ env.REGISTRY }}/varnish/charts
+          helm push dist/charts/varnish-gateway-${{ steps.version.outputs.chart_version }}.tgz oci://${{ env.REGISTRY }}/varnish/charts
