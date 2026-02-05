@@ -8,7 +8,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -97,65 +96,6 @@ func (r *GatewayReconciler) buildServiceAccount(gateway *gatewayv1.Gateway) *cor
 			Name:      fmt.Sprintf("%s-chaperone", gateway.Name),
 			Namespace: gateway.Namespace,
 			Labels:    r.buildLabels(gateway),
-		},
-	}
-}
-
-// buildChaperoneRole creates the Role for chaperone to watch EndpointSlices.
-func (r *GatewayReconciler) buildChaperoneRole(gateway *gatewayv1.Gateway) *rbacv1.Role {
-	return &rbacv1.Role{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "Role",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-chaperone", gateway.Name),
-			Namespace: gateway.Namespace,
-			Labels:    r.buildLabels(gateway),
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"discovery.k8s.io"},
-				Resources: []string{"endpointslices"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{""},
-				Resources: []string{"services"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{""},
-				Resources: []string{"configmaps"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-		},
-	}
-}
-
-// buildChaperoneRoleBinding creates the RoleBinding linking ServiceAccount to Role.
-func (r *GatewayReconciler) buildChaperoneRoleBinding(gateway *gatewayv1.Gateway) *rbacv1.RoleBinding {
-	return &rbacv1.RoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "RoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-chaperone", gateway.Name),
-			Namespace: gateway.Namespace,
-			Labels:    r.buildLabels(gateway),
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "Role",
-			Name:     fmt.Sprintf("%s-chaperone", gateway.Name),
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      fmt.Sprintf("%s-chaperone", gateway.Name),
-				Namespace: gateway.Namespace,
-			},
 		},
 	}
 }

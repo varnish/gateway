@@ -3,7 +3,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: varnish-gateway
-  namespace: default
+  namespace: varnish-gateway-system
 spec:
   gatewayClassName: varnish
   listeners:
@@ -17,11 +17,11 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: api-route
-  namespace: default
+  namespace: varnish-gateway-system
 spec:
   parentRefs:
     - name: varnish-gateway
-      namespace: default
+      namespace: varnish-gateway-system
   hostnames:
     - "api.example.com"
   rules:
@@ -72,11 +72,11 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: blog-route
-  namespace: default
+  namespace: varnish-gateway-system
 spec:
   parentRefs:
     - name: varnish-gateway
-      namespace: default
+      namespace: varnish-gateway-system
   hostnames:
     - "blog.example.com"
   rules:
@@ -118,11 +118,11 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: simple-route
-  namespace: default
+  namespace: varnish-gateway-system
 spec:
   parentRefs:
     - name: varnish-gateway
-      namespace: default
+      namespace: varnish-gateway-system
   hostnames:
     - "simple.example.com"
   rules:
