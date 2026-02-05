@@ -126,9 +126,16 @@ Two separate reload paths:
 
 ## Installation
 
-See [INSTALL.md](INSTALL.md) for detailed installation instructions, including Helm and kubectl installation methods.
+**Helm (Recommended):**
 
-Quick start (kubectl):
+```bash
+helm install varnish-gateway \
+  oci://ghcr.io/varnish/charts/varnish-gateway \
+  --namespace varnish-gateway-system \
+  --create-namespace
+```
+
+**kubectl (Alternative):**
 
 ```bash
 # Install Gateway API CRDs
@@ -137,5 +144,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 # Deploy the operator
 kubectl apply -f deploy/
 ```
+
+See [INSTALL.md](INSTALL.md) for detailed installation instructions and configuration options.
 
 See [CLAUDE.md](CLAUDE.md) for development setup and detailed documentation.

@@ -6,7 +6,7 @@ VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 
 .PHONY: help test build build-linux docker clean vendor act
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
-.PHONY: helm-lint helm-template helm-package helm-install helm-upgrade helm-uninstall
+.PHONY: helm-lint helm-template helm-package helm-push helm-install helm-upgrade helm-uninstall
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -42,7 +42,8 @@ help:
 	@echo "Helm:"
 	@echo "  make helm-lint        Lint Helm chart"
 	@echo "  make helm-template    Template Helm chart (dry-run)"
-	@echo "  make helm-package     Package Helm chart"
+	@echo "  make helm-package     Package Helm chart (.tgz)"
+	@echo "  make helm-push        Package and push to OCI registry (requires auth)"
 	@echo "  make helm-install     Install Helm chart to cluster"
 	@echo "  make helm-upgrade     Upgrade Helm chart on cluster"
 	@echo "  make helm-uninstall   Uninstall Helm chart from cluster"
@@ -194,6 +195,10 @@ helm-template:
 helm-package:
 	@mkdir -p dist/charts
 	helm package $(CHART_PATH) -d dist/charts
+
+helm-push: helm-package
+	@echo "Pushing Helm chart to $(REGISTRY)/varnish/charts"
+	helm push dist/charts/varnish-gateway-$(VERSION).tgz oci://$(REGISTRY)/varnish/charts
 
 helm-install:
 	helm install $(RELEASE_NAME) $(CHART_PATH) \

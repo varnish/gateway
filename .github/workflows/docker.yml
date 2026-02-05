@@ -206,3 +206,36 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  publish-helm-chart:
+    needs: [check-tag]
+    if: needs.check-tag.outputs.is-tag == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.14.0'
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Extract version
+        id: version
+        run: echo "version=$(cat .version)" >> $GITHUB_OUTPUT
+
+      - name: Package Helm chart
+        run: |
+          helm package charts/varnish-gateway -d dist/charts
+
+      - name: Push Helm chart to OCI registry
+        run: |
+          helm push dist/charts/varnish-gateway-${{ steps.version.outputs.version }}.tgz oci://${{ env.REGISTRY }}/varnish/charts
