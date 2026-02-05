@@ -121,6 +121,19 @@ func (r *GatewayReconciler) reconcileDelete(ctx context.Context, gateway *gatewa
 	log := r.Logger.With("gateway", types.NamespacedName{Name: gateway.Name, Namespace: gateway.Namespace})
 	log.Info("handling gateway deletion")
 
+	// Clean up cluster-scoped resources (not handled by owner references)
+	crbName := fmt.Sprintf("%s-%s-chaperone", gateway.Namespace, gateway.Name)
+	crb := &rbacv1.ClusterRoleBinding{}
+	err := r.Get(ctx, types.NamespacedName{Name: crbName}, crb)
+	if err == nil {
+		if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("r.Delete(ClusterRoleBinding): %w", err)
+		}
+		log.Info("deleted ClusterRoleBinding", "name", crbName)
+	} else if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("r.Get(ClusterRoleBinding): %w", err)
+	}
+
 	// Remove finalizer to allow deletion
 	if controllerutil.ContainsFinalizer(gateway, FinalizerName) {
 		controllerutil.RemoveFinalizer(gateway, FinalizerName)
@@ -179,9 +192,12 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 
 // reconcileResource creates or updates a single child resource.
 func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gatewayv1.Gateway, desired client.Object) error {
-	// Set owner reference
-	if err := controllerutil.SetControllerReference(gateway, desired, r.Scheme); err != nil {
-		return fmt.Errorf("controllerutil.SetControllerReference: %w", err)
+	// Set owner reference only for namespace-scoped resources
+	// Cluster-scoped resources (like ClusterRoleBinding) cannot have namespace-scoped owners
+	if desired.GetNamespace() != "" {
+		if err := controllerutil.SetControllerReference(gateway, desired, r.Scheme); err != nil {
+			return fmt.Errorf("controllerutil.SetControllerReference: %w", err)
+		}
 	}
 
 	// Check if resource exists
@@ -750,7 +766,8 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.ServiceAccount{}).
-		Owns(&rbacv1.ClusterRoleBinding{}).
+		// Note: ClusterRoleBinding is cluster-scoped, so it cannot be owned by namespace-scoped Gateway
+		// We manage its lifecycle manually in reconcileResources without owner references
 		Watches(
 			&gatewayparamsv1alpha1.GatewayClassParameters{},
 			r.enqueueGatewaysForParams(),
