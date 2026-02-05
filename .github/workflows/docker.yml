@@ -1,15 +1,13 @@
 name: Build and Push Docker Images
 
 # This workflow builds and pushes Docker images on version tags.
-# It runs automatically after CI completes successfully on a tagged commit.
+# It runs after CI completes successfully and checks if the commit has a version tag.
 
 on:
   workflow_run:
     workflows: ["CI"]
     types:
       - completed
-    branches:
-      - main
 
 env:
   REGISTRY: ghcr.io
