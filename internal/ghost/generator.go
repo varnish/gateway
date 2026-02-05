@@ -188,10 +188,10 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			allBackends = append(allBackends, backends...)
 		}
 
-		// Only create RouteBackends if we have backends
-		if len(allBackends) > 0 {
-			// Use the first route's match criteria (all routes in group have identical criteria)
-			firstRoute := routeGroup[0]
+		// Create RouteBackends if we have backends OR filters (e.g., RequestRedirect)
+		// Use the first route's match criteria (all routes in group have identical criteria)
+		firstRoute := routeGroup[0]
+		if len(allBackends) > 0 || firstRoute.Filters != nil {
 			result = append(result, RouteBackends{
 				PathMatch:   firstRoute.PathMatch,
 				Method:      firstRoute.Method,
