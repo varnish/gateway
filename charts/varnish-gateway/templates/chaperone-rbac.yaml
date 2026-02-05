@@ -1,0 +1,53 @@
+{{- if .Values.rbac.create -}}
+# Chaperone RBAC - ClusterRole and ClusterRoleBinding
+#
+# The chaperone needs cluster-wide access to EndpointSlices because:
+# - HTTPRoutes can reference backend Services in any namespace (cross-namespace routing)
+# - The chaperone watches EndpointSlices cluster-wide to discover backend pod IPs
+#
+# The operator creates a ServiceAccount for each Gateway ({gateway-name}-chaperone),
+# but the ClusterRoleBinding below grants permissions to all service accounts in
+# the varnish-gateway-system namespace.
+#
+# If you deploy Gateways in other namespaces, add additional ClusterRoleBindings
+# for those namespaces.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "varnish-gateway.fullname" . }}-chaperone
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chaperone
+rules:
+  # Watch EndpointSlices for backend discovery (cluster-wide for cross-namespace routing)
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Watch Services for port resolution
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch"]
+  # Watch ConfigMaps for routing.json updates
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+# ClusterRoleBinding for varnish-gateway-system namespace
+# This grants all chaperone pods in the namespace access to cluster-wide EndpointSlices
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "varnish-gateway.fullname" . }}-chaperone
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+    app.kubernetes.io/component: chaperone
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "varnish-gateway.fullname" . }}-chaperone
+subjects:
+  - kind: Group
+    name: system:serviceaccounts:{{ include "varnish-gateway.namespace" . }}
+    apiGroup: rbac.authorization.k8s.io
+{{- end }}

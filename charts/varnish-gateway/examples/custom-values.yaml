@@ -1,0 +1,57 @@
+# Example custom values for production deployment
+#
+# Install with:
+#   helm install varnish-gateway ./charts/varnish-gateway -f examples/custom-values.yaml
+
+# Use specific version tags
+operator:
+  image:
+    tag: "v0.7.2"
+  replicas: 2  # High availability
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+
+chaperone:
+  image:
+    tag: "v0.7.2"
+  imagePullSecrets: "regcred"  # If using private registry
+
+# Custom VCL configuration
+gatewayClass:
+  defaultParams:
+    userVCL:
+      enabled: true
+      content: |
+        # Custom error handling
+        sub vcl_backend_error {
+            set beresp.http.Content-Type = "application/json";
+            synthetic({"{"error": "Backend unavailable"}"});
+            return (deliver);
+        }
+
+        # Add custom headers
+        sub vcl_deliver {
+            set resp.http.X-Cache = "HIT";
+        }
+
+    # Production varnishd settings
+    varnishdExtraArgs:
+      - "-p"
+      - "thread_pools=4"
+      - "-p"
+      - "thread_pool_min=100"
+      - "-p"
+      - "thread_pool_max=5000"
+      - "-s"
+      - "malloc,2g"  # 2GB cache
+
+    # Use varnishncsa for Apache-style logs
+    logging:
+      enabled: true
+      mode: varnishncsa
+      format: "%h %l %u %t \"%r\" %s %b \"%{Referer}i\" \"%{User-agent}i\""

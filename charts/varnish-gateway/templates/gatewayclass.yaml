@@ -1,0 +1,70 @@
+{{- if .Values.gatewayClass.createDefaultParams }}
+{{- if .Values.gatewayClass.defaultParams.userVCL.enabled }}
+---
+# ConfigMap with user VCL
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.gatewayClass.defaultParams.userVCL.configMap.name }}
+  namespace: {{ include "varnish-gateway.namespace" . }}
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+data:
+  {{ .Values.gatewayClass.defaultParams.userVCL.configMap.key }}: |
+{{ .Values.gatewayClass.defaultParams.userVCL.content | nindent 4 }}
+{{- end }}
+---
+# GatewayClassParameters for Varnish configuration
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: {{ .Values.gatewayClass.defaultParams.name }}
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+spec:
+  {{- if .Values.gatewayClass.defaultParams.userVCL.enabled }}
+  # Reference to user VCL
+  userVCLConfigMapRef:
+    name: {{ .Values.gatewayClass.defaultParams.userVCL.configMap.name }}
+    namespace: {{ include "varnish-gateway.namespace" . }}
+    key: {{ .Values.gatewayClass.defaultParams.userVCL.configMap.key }}
+  {{- end }}
+
+  {{- if .Values.gatewayClass.defaultParams.logging.enabled }}
+  # Logging configuration
+  logging:
+    mode: {{ .Values.gatewayClass.defaultParams.logging.mode }}
+    {{- with .Values.gatewayClass.defaultParams.logging.format }}
+    format: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.gatewayClass.defaultParams.logging.extraArgs }}
+    extraArgs:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+
+  {{- with .Values.gatewayClass.defaultParams.varnishdExtraArgs }}
+  # Extra varnishd command-line arguments
+  varnishdExtraArgs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+---
+# GatewayClass for Varnish Gateway
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.gatewayClass.name }}
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+spec:
+  controllerName: {{ .Values.gatewayClass.controllerName }}
+  {{- with .Values.gatewayClass.description }}
+  description: {{ . }}
+  {{- end }}
+  {{- if .Values.gatewayClass.createDefaultParams }}
+  parametersRef:
+    group: gateway.varnish-software.com
+    kind: GatewayClassParameters
+    name: {{ .Values.gatewayClass.defaultParams.name }}
+  {{- end }}

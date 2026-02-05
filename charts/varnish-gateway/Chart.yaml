@@ -1,0 +1,27 @@
+apiVersion: v2
+name: varnish-gateway
+description: Kubernetes Gateway API implementation using Varnish
+type: application
+version: 0.7.2
+appVersion: "0.7.2"
+
+keywords:
+  - varnish
+  - gateway
+  - gateway-api
+  - load-balancer
+  - caching
+
+home: https://github.com/varnish/gateway
+sources:
+  - https://github.com/varnish/gateway
+
+maintainers:
+  - name: Varnish Software
+    url: https://varnish-software.com
+
+# Minimum Kubernetes version required
+kubeVersion: ">=1.26.0-0"
+
+# Dependencies - none for now, but could add cert-manager etc in future
+dependencies: []

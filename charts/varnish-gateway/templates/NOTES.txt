@@ -1,0 +1,60 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+The Varnish Gateway operator has been deployed to namespace: {{ include "varnish-gateway.namespace" . }}
+
+Gateway API Resources Created:
+  - GatewayClass: {{ .Values.gatewayClass.name }}
+{{- if .Values.gatewayClass.createDefaultParams }}
+  - GatewayClassParameters: {{ .Values.gatewayClass.defaultParams.name }}
+{{- end }}
+
+To get started:
+
+1. Create a Gateway resource:
+
+   kubectl apply -f - <<EOF
+   apiVersion: gateway.networking.k8s.io/v1
+   kind: Gateway
+   metadata:
+     name: my-gateway
+     namespace: default
+   spec:
+     gatewayClassName: {{ .Values.gatewayClass.name }}
+     listeners:
+       - name: http
+         protocol: HTTP
+         port: 80
+   EOF
+
+2. Create an HTTPRoute to route traffic:
+
+   kubectl apply -f - <<EOF
+   apiVersion: gateway.networking.k8s.io/v1
+   kind: HTTPRoute
+   metadata:
+     name: my-route
+     namespace: default
+   spec:
+     parentRefs:
+       - name: my-gateway
+     hostnames:
+       - "example.com"
+     rules:
+       - backendRefs:
+           - name: my-service
+             port: 8080
+   EOF
+
+3. Check the Gateway status:
+
+   kubectl get gateway my-gateway -n default
+
+4. View operator logs:
+
+   kubectl logs -n {{ include "varnish-gateway.namespace" . }} -l app.kubernetes.io/component=operator -f
+
+For more information, visit:
+  - Documentation: https://github.com/varnish/gateway
+  - Issues: https://github.com/varnish/gateway/issues

@@ -1,0 +1,77 @@
+{{- if .Values.rbac.create -}}
+# ClusterRole for the operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "varnish-gateway.fullname" . }}-operator
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+rules:
+  # Gateway API resources
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes/status"]
+    verbs: ["get", "update", "patch"]
+  # Our custom resource
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["gatewayclassparameters"]
+    verbs: ["get", "list", "watch"]
+  # Core resources the operator creates for Gateways
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # RBAC resources for chaperone
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # EndpointSlices access (needed to grant to chaperone)
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+# ClusterRoleBinding for the operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "varnish-gateway.fullname" . }}-operator
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "varnish-gateway.fullname" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "varnish-gateway.serviceAccountName" . }}
+    namespace: {{ include "varnish-gateway.namespace" . }}
+{{- end }}

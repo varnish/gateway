@@ -1,0 +1,105 @@
+# GatewayClassParameters CRD for user VCL configuration
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gatewayclassparameters.gateway.varnish-software.com
+spec:
+  group: gateway.varnish-software.com
+  names:
+    kind: GatewayClassParameters
+    listKind: GatewayClassParametersList
+    plural: gatewayclassparameters
+    singular: gatewayclassparameters
+    shortNames:
+      - gcp
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: GatewayClassParameters contains configuration for a GatewayClass.
+          properties:
+            apiVersion:
+              type: string
+              description: API version of the resource
+            kind:
+              type: string
+              description: Kind of the resource
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: Specification of the GatewayClassParameters
+              properties:
+                userVCLConfigMapRef:
+                  type: object
+                  description: |
+                    Reference to a ConfigMap containing user VCL.
+                    The user VCL will be appended to the generated VCL.
+                  required:
+                    - name
+                    - namespace
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the ConfigMap
+                      minLength: 1
+                    namespace:
+                      type: string
+                      description: Namespace of the ConfigMap
+                      minLength: 1
+                    key:
+                      type: string
+                      description: Key in the ConfigMap data containing the VCL. Defaults to "user.vcl"
+                varnishdExtraArgs:
+                  type: array
+                  description: |
+                    Additional command-line arguments to pass to varnishd.
+                    Each element is a separate argument (e.g., ["-p", "thread_pools=4"]).
+                    Protected arguments (-M, -S, -F, -f, -n) cannot be overridden.
+                  items:
+                    type: string
+                logging:
+                  type: object
+                  description: |
+                    Logging configures varnish log output via a sidecar container.
+                    When enabled, a sidecar container runs varnishlog or varnishncsa,
+                    streaming logs to stdout where they're captured by Kubernetes.
+                  required:
+                    - mode
+                  properties:
+                    mode:
+                      type: string
+                      description: |
+                        Mode determines which varnish logging tool to use.
+                        Valid values: "varnishlog", "varnishncsa"
+                        Future: "varnishlog-json" when available
+                      enum:
+                        - varnishlog
+                        - varnishncsa
+                    format:
+                      type: string
+                      description: |
+                        Format specifies the output format for varnishncsa.
+                        Only used when mode is "varnishncsa".
+                        Example: "%h %l %u %t \"%r\" %s %b"
+                        See varnishncsa(1) for format specification.
+                    extraArgs:
+                      type: array
+                      description: |
+                        ExtraArgs specifies additional arguments to pass to the logging tool.
+                        Each element is a separate argument (e.g., ["-g", "request", "-q", "ReqURL ~ \"/api\""])
+                      items:
+                        type: string
+                    image:
+                      type: string
+                      description: |
+                        Image specifies the container image containing varnish logging tools.
+                        Defaults to the same image as the gateway if not specified.
+      additionalPrinterColumns:
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

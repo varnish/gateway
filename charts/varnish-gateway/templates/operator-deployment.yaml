@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "varnish-gateway.fullname" . }}-operator
+  namespace: {{ include "varnish-gateway.namespace" . }}
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "varnish-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "varnish-gateway.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "varnish-gateway.serviceAccountName" . }}
+      {{- with .Values.operator.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: {{ include "varnish-gateway.operatorImage" . }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          args:
+            {{- if .Values.operator.leaderElection.enabled }}
+            - --leader-elect=true
+            {{- else }}
+            - --leader-elect=false
+            {{- end }}
+          env:
+            - name: GATEWAY_CLASS_NAME
+              value: {{ .Values.gatewayClass.name | quote }}
+            - name: GATEWAY_IMAGE
+              value: {{ include "varnish-gateway.chaperoneImage" . | quote }}
+            {{- if .Values.chaperone.imagePullSecrets }}
+            - name: IMAGE_PULL_SECRETS
+              value: {{ .Values.chaperone.imagePullSecrets | quote }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.operator.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.operator.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.operator.securityContext | nindent 12 }}
+      terminationGracePeriodSeconds: 10

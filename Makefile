@@ -6,6 +6,7 @@ VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 
 .PHONY: help test build build-linux docker clean vendor act
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
+.PHONY: helm-lint helm-template helm-package helm-install helm-upgrade helm-uninstall
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -37,6 +38,14 @@ help:
 	@echo "Deploy:"
 	@echo "  make deploy-update    Update deploy/ manifests with current version"
 	@echo "  make deploy           Update manifests and apply to cluster"
+	@echo ""
+	@echo "Helm:"
+	@echo "  make helm-lint        Lint Helm chart"
+	@echo "  make helm-template    Template Helm chart (dry-run)"
+	@echo "  make helm-package     Package Helm chart"
+	@echo "  make helm-install     Install Helm chart to cluster"
+	@echo "  make helm-upgrade     Upgrade Helm chart on cluster"
+	@echo "  make helm-uninstall   Uninstall Helm chart from cluster"
 	@echo ""
 	@echo "Other:"
 	@echo "  make vendor           Update Go vendor directory"
@@ -167,6 +176,36 @@ deploy-update:
 
 deploy: deploy-update
 	kubectl apply -f deploy/
+
+# ============================================================================
+# Helm
+# ============================================================================
+
+CHART_PATH := charts/varnish-gateway
+RELEASE_NAME ?= varnish-gateway
+NAMESPACE ?= varnish-gateway-system
+
+helm-lint:
+	helm lint $(CHART_PATH)
+
+helm-template:
+	helm template $(RELEASE_NAME) $(CHART_PATH) --debug
+
+helm-package:
+	@mkdir -p dist/charts
+	helm package $(CHART_PATH) -d dist/charts
+
+helm-install:
+	helm install $(RELEASE_NAME) $(CHART_PATH) \
+		--namespace $(NAMESPACE) \
+		--create-namespace
+
+helm-upgrade:
+	helm upgrade $(RELEASE_NAME) $(CHART_PATH) \
+		--namespace $(NAMESPACE)
+
+helm-uninstall:
+	helm uninstall $(RELEASE_NAME) --namespace $(NAMESPACE)
 
 # ============================================================================
 # Maintenance

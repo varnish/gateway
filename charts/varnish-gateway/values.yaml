@@ -1,0 +1,139 @@
+# Default values for varnish-gateway
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Namespace where the operator will be installed
+namespace: varnish-gateway-system
+
+# Operator configuration
+operator:
+  # Number of operator replicas
+  replicas: 1
+
+  # Operator container image
+  image:
+    repository: ghcr.io/varnish/gateway-operator
+    pullPolicy: IfNotPresent
+    # Overrides the image tag whose default is the chart appVersion
+    tag: ""
+
+  # Image pull secrets for the operator
+  imagePullSecrets: []
+
+  # Leader election settings
+  leaderElection:
+    enabled: true
+
+  # Resource limits and requests
+  resources:
+    limits:
+      cpu: 500m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 64Mi
+
+  # Security context
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 65532
+
+  # Probes
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: health
+    initialDelaySeconds: 15
+    periodSeconds: 20
+
+  readinessProbe:
+    httpGet:
+      path: /readyz
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+
+# Gateway class configuration
+gatewayClass:
+  # Name of the GatewayClass resource
+  name: varnish
+
+  # Controller name (must match what the operator expects)
+  controllerName: varnish-software.com/gateway
+
+  # Description
+  description: Varnish-based Gateway implementation with caching support
+
+  # Create default GatewayClassParameters
+  createDefaultParams: true
+
+  # Default parameters configuration
+  defaultParams:
+    # Name of the GatewayClassParameters resource
+    name: varnish-params
+
+    # User VCL configuration
+    userVCL:
+      enabled: true
+      # ConfigMap containing user VCL
+      configMap:
+        name: varnish-user-vcl
+        key: user.vcl
+      # Content of user VCL (if enabled, creates ConfigMap)
+      content: |
+        # Disable caching for all requests
+        sub vcl_recv {
+            # pass all the things!
+            return (pass);
+        }
+
+    # Logging configuration
+    logging:
+      enabled: true
+      mode: varnishlog  # varnishlog or varnishncsa
+      # format: "%h %l %u %t \"%r\" %s %b"  # For varnishncsa
+      # extraArgs: []
+
+    # Extra varnishd command-line arguments
+    varnishdExtraArgs:
+      - "-p"
+      - "thread_pools=2"
+      - "-s"
+      - "malloc,512m"
+
+# Chaperone (gateway data plane) configuration
+chaperone:
+  # Chaperone container image (used by operator to create Gateway pods)
+  image:
+    repository: ghcr.io/varnish/gateway-chaperone
+    pullPolicy: IfNotPresent
+    tag: ""
+
+  # Image pull secrets for chaperone pods (comma-separated list)
+  imagePullSecrets: ""
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+
+# Service account configuration
+serviceAccount:
+  # Create service account for operator
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use (if not creating)
+  # name: ""
+
+# Install Gateway API CRDs
+# Set to false if you've already installed them cluster-wide
+installGatewayAPICRDs: true
+
+# Additional labels to add to all resources
+commonLabels: {}
+
+# Additional annotations to add to all resources
+commonAnnotations: {}
