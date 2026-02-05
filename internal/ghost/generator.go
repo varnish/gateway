@@ -182,7 +182,8 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 	result := make([]RouteBackends, 0, len(grouped))
 	for key, routeGroup := range grouped {
 		// Collect all backends from all routes in this group
-		var allBackends []Backend
+		// Initialize to empty slice, not nil - nil marshals to null in JSON
+		allBackends := make([]Backend, 0)
 		for _, route := range routeGroup {
 			backends := routeToBackends(route, endpoints)
 			allBackends = append(allBackends, backends...)
