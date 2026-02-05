@@ -138,6 +138,12 @@ func (r *GatewayReconciler) reconcileDelete(ctx context.Context, gateway *gatewa
 	if controllerutil.ContainsFinalizer(gateway, FinalizerName) {
 		controllerutil.RemoveFinalizer(gateway, FinalizerName)
 		if err := r.Update(ctx, gateway); err != nil {
+			// If the namespace is being deleted, we can't update the Gateway.
+			// That's fine - the resource will be garbage collected with the namespace.
+			if apierrors.IsNotFound(err) {
+				log.Info("namespace being deleted, skipping finalizer removal")
+				return ctrl.Result{}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("r.Update (remove finalizer): %w", err)
 		}
 	}
