@@ -124,7 +124,11 @@ Two separate reload paths:
 }
 ```
 
-## Quick Start
+## Installation
+
+See [INSTALL.md](INSTALL.md) for detailed installation instructions, including Helm and kubectl installation methods.
+
+Quick start (kubectl):
 
 ```bash
 # Install Gateway API CRDs
@@ -134,4 +138,4 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 kubectl apply -f deploy/
 ```
 
-See CLAUDE.md for development setup and detailed documentation.
+See [CLAUDE.md](CLAUDE.md) for development setup and detailed documentation.
