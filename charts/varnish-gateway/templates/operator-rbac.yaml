@@ -45,7 +45,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # RBAC resources for chaperone
   - apiGroups: ["rbac.authorization.k8s.io"]
-    resources: ["roles", "rolebindings"]
+    resources: ["roles", "rolebindings", "clusterrolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # EndpointSlices access (needed to grant to chaperone)
   - apiGroups: ["discovery.k8s.io"]
