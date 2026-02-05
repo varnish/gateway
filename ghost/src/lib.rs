@@ -38,6 +38,7 @@ mod config;
 mod director;
 pub mod format;
 mod not_found_backend;
+mod redirect_backend;
 mod stats;
 mod vhost_director;
 
@@ -45,6 +46,7 @@ use backend_pool::BackendPool;
 use config::ResponseHeaderFilter;
 use director::{GhostDirector, SharedGhostDirector};
 use not_found_backend::{NotFoundBackend, NotFoundBody};
+use redirect_backend::{RedirectBackend, RedirectBody};
 
 /// Header name for passing matched route filters to vcl_deliver
 const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
@@ -67,6 +69,8 @@ pub struct ghost_backend {
     ghost_director: Arc<GhostDirector>,
     // Keep not_found_backend alive for the lifetime of this ghost_backend
     _not_found_backend: varnish::vcl::Backend<NotFoundBackend, NotFoundBody>,
+    // Keep redirect_backend alive for the lifetime of this ghost_backend
+    _redirect_backend: varnish::vcl::Backend<RedirectBackend, RedirectBody>,
 }
 
 /// Ghost VMOD - Gateway API routing for Varnish
@@ -343,7 +347,7 @@ mod ghost {
             let backend_pool = BackendPool::new();
 
             // Create director (Arc-wrapped so we can clone for reload access)
-            let (ghost_director_impl, not_found_backend) =
+            let (ghost_director_impl, not_found_backend, redirect_backend) =
                 GhostDirector::new(ctx, Arc::new(vhost_directors), backend_pool, config_path)?;
             let ghost_director = Arc::new(ghost_director_impl);
             let shared_director = SharedGhostDirector(Arc::clone(&ghost_director));
@@ -353,6 +357,7 @@ mod ghost {
                 director,
                 ghost_director,
                 _not_found_backend: not_found_backend,
+                _redirect_backend: redirect_backend,
             })
         }
 

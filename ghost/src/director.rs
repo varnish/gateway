@@ -18,6 +18,7 @@ use varnish::vcl::{Backend, Buffer, Ctx, HttpHeaders, LogTag, StrOrBytes, VclDir
 use crate::backend_pool::BackendPool;
 use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
+use crate::redirect_backend::{RedirectBackend, RedirectBody};
 use crate::vhost_director::VhostDirector;
 
 /// Wrapper for VCL_BACKEND pointer that implements Send + Sync
@@ -207,6 +208,7 @@ pub fn build_vhost_directors(
     config: &Config,
     backend_pool: &mut BackendPool,
     ctx: &mut Ctx,
+    redirect_backend: VCL_BACKEND,
 ) -> Result<VhostDirectorMap, VclError> {
     let mut exact = HashMap::new();
     let mut wildcards = Vec::new();
@@ -306,6 +308,7 @@ pub fn build_vhost_directors(
             hostname.clone(),
             route_entries,
             Arc::clone(&backend_pool_arc),
+            redirect_backend,
         ));
 
         // Categorize into exact or wildcard
@@ -350,6 +353,8 @@ pub struct GhostDirector {
     config_path: PathBuf,
     /// Synthetic 404 backend for undefined vhosts (stored backend must outlive this director)
     not_found_backend: SendSyncBackend,
+    /// Synthetic redirect backend for RequestRedirect filters (stored backend must outlive this director)
+    redirect_backend: SendSyncBackend,
     /// Last reload error message (for debugging)
     last_error: RwLock<Option<String>>,
 }
@@ -357,27 +362,32 @@ pub struct GhostDirector {
 impl GhostDirector {
     /// Create a new Ghost director with vhost directors
     ///
-    /// Returns (director, not_found_backend). The Backend must be kept alive
+    /// Returns (director, not_found_backend, redirect_backend). The Backends must be kept alive
     /// for the lifetime of the director.
     pub fn new(
         ctx: &mut Ctx,
         vhost_directors: Arc<VhostDirectorMap>,
         backends: BackendPool,
         config_path: PathBuf,
-    ) -> Result<(Self, Backend<NotFoundBackend, NotFoundBody>), VclError> {
+    ) -> Result<(Self, Backend<NotFoundBackend, NotFoundBody>, Backend<RedirectBackend, RedirectBody>), VclError> {
         // Create synthetic 404 backend
         let not_found_backend = Backend::new(ctx, "ghost", "ghost_404", NotFoundBackend, false)?;
         let not_found_ptr = SendSyncBackend(not_found_backend.vcl_ptr());
+
+        // Create synthetic redirect backend
+        let redirect_backend = Backend::new(ctx, "ghost", "ghost_redirect", RedirectBackend, false)?;
+        let redirect_ptr = SendSyncBackend(redirect_backend.vcl_ptr());
 
         let director = Self {
             vhost_directors: ArcSwap::new(Arc::clone(&vhost_directors)),
             backends: ArcSwap::new(Arc::new(backends)),
             config_path,
             not_found_backend: not_found_ptr,
+            redirect_backend: redirect_ptr,
             last_error: RwLock::new(None),
         };
 
-        Ok((director, not_found_backend))
+        Ok((director, not_found_backend, redirect_backend))
     }
 
     /// Reload configuration from disk
@@ -397,7 +407,7 @@ impl GhostDirector {
         })?;
 
         // Build new vhost directors
-        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx).map_err(|e| {
+        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx, self.redirect_backend.0).map_err(|e| {
             let error_msg = format!("Ghost reload failed: {}", e);
             // Log to VSL for visibility in varnishlog
             ctx.log(LogTag::Error, &error_msg);

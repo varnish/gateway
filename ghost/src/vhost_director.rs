@@ -13,7 +13,21 @@ use varnish::vcl::{Buffer, Ctx, HttpHeaders, LogTag, StrOrBytes, VclDirector, Vc
 use crate::backend_pool::BackendPool;
 use crate::config::RouteFilters;
 use crate::director::{PathMatchCompiled, RouteEntry, WeightedBackendRef};
+use crate::redirect_backend::RedirectConfig;
 use crate::stats::VhostStats;
+
+/// Wrapper for VCL_BACKEND pointer that implements Send + Sync
+///
+/// SAFETY: VCL_BACKEND is an opaque Varnish handle designed for multi-threaded use.
+/// While individual Varnish workers are single-threaded, we use Arc and atomic
+/// operations because multiple workers may access the same director concurrently
+/// (via shared VCL state). The raw pointer is managed by Varnish's backend
+/// infrastructure which provides its own synchronization guarantees.
+#[derive(Debug)]
+struct SendSyncBackend(VCL_BACKEND);
+
+unsafe impl Send for SendSyncBackend {}
+unsafe impl Sync for SendSyncBackend {}
 
 /// Header name for passing matched route filters to vcl_deliver
 const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
@@ -38,6 +52,8 @@ pub struct VhostDirector {
     routes: Vec<RouteEntry>,
     /// Shared backend pool (shared with GhostDirector)
     backend_pool: Arc<BackendPool>,
+    /// Synthetic redirect backend for RequestRedirect filters
+    redirect_backend: SendSyncBackend,
     /// Statistics for this vhost
     stats: Arc<VhostStats>,
 }
@@ -48,11 +64,13 @@ impl VhostDirector {
         hostname: String,
         routes: Vec<RouteEntry>,
         backend_pool: Arc<BackendPool>,
+        redirect_backend: VCL_BACKEND,
     ) -> Self {
         Self {
             hostname,
             routes,
             backend_pool,
+            redirect_backend: SendSyncBackend(redirect_backend),
             stats: Arc::new(VhostStats::new()),
         }
     }
@@ -180,36 +198,126 @@ impl VhostDirector {
 
 impl VclDirector for VhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
+        // Extract request components (owned strings to avoid borrow conflicts with ctx.log)
+        let (path_owned, query_string_owned, method_owned) = {
+            let bereq = ctx.http_bereq.as_ref()?;
+
+            // Extract URL from bereq
+            let url = bereq
+                .url()
+                .and_then(|u| match u {
+                    StrOrBytes::Utf8(s) => Some(s),
+                    StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
+                })
+                .unwrap_or("/");
+
+            // Extract path and query string (borrow from url)
+            let (path, query_string) = extract_path_and_query(url);
+
+            // Extract method
+            let method = bereq
+                .method()
+                .and_then(|m| match m {
+                    StrOrBytes::Utf8(s) => Some(s),
+                    StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
+                })
+                .unwrap_or("GET");
+
+            // Clone to owned strings
+            (
+                path.to_string(),
+                query_string.map(|s| s.to_string()),
+                method.to_string(),
+            )
+        };
+
+        // Re-borrow bereq for route matching
         let bereq = ctx.http_bereq.as_ref()?;
 
-        // Extract URL from bereq
-        let url = bereq
-            .url()
-            .and_then(|u| match u {
-                StrOrBytes::Utf8(s) => Some(s),
-                StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
-            })
-            .unwrap_or("/");
-
-        // Extract path and query string
-        let (path, query_string) = extract_path_and_query(url);
-
-        // Extract method
-        let method = bereq
-            .method()
-            .and_then(|m| match m {
-                StrOrBytes::Utf8(s) => Some(s),
-                StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
-            })
-            .unwrap_or("GET");
-
         // Match routes (already sorted by priority)
-        let match_result = match_routes(&self.routes, path, method, bereq, query_string)?;
+        let match_result =
+            match_routes(&self.routes, &path_owned, &method_owned, bereq, query_string_owned.as_deref())?;
         let backend_refs = match_result.backends;
         let matched_filters = match_result.filters.as_ref();
 
         // Apply request filters BEFORE backend selection
         if let Some(filters) = matched_filters {
+            // RequestRedirect - takes precedence over all other filters
+            if let Some(redirect_filter) = &filters.request_redirect {
+                ctx.log(LogTag::Debug, "Applying request redirect filter");
+
+                // Extract original request components from bereq
+                let (original_scheme, original_hostname, original_port) = {
+                    let bereq_mut = ctx.http_bereq.as_ref()?;
+
+                    // Get Host header and parse host:port
+                    let host_header = bereq_mut
+                        .header("Host")
+                        .and_then(|h| match h {
+                            StrOrBytes::Utf8(s) => Some(s),
+                            StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
+                        })
+                        .unwrap_or("localhost");
+                    let (hostname, port_opt) = parse_host_and_port(host_header);
+
+                    // Get scheme from X-Forwarded-Proto or default to http
+                    let scheme = bereq_mut
+                        .header("X-Forwarded-Proto")
+                        .and_then(|h| match h {
+                            StrOrBytes::Utf8(s) => Some(s),
+                            StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
+                        })
+                        .unwrap_or("http");
+
+                    // Determine port (u16)
+                    let port = port_opt.unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
+
+                    (scheme.to_string(), hostname.to_string(), port)
+                };
+
+                // Extract matched prefix string (for ReplacePrefixMatch logic)
+                let matched_path_str = match_result.matched_path.and_then(|pm| match pm {
+                    PathMatchCompiled::PathPrefix(prefix) => Some(prefix.clone()),
+                    PathMatchCompiled::Exact(path) => Some(path.clone()),
+                    PathMatchCompiled::Regex(_) => None, // Can't extract from regex
+                });
+
+                // Store redirect configuration in internal header
+                let redirect_config = RedirectConfig {
+                    filter: redirect_filter.clone(),
+                    original_scheme,
+                    original_hostname,
+                    original_port,
+                    original_path: path_owned.clone(),
+                    original_query: query_string_owned.clone().unwrap_or_default(),
+                    matched_path: matched_path_str,
+                };
+
+                let config_json = match serde_json::to_string(&redirect_config) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        ctx.log(
+                            LogTag::Error,
+                            &format!("Failed to serialize redirect config: {}", e),
+                        );
+                        return None;
+                    }
+                };
+
+                let bereq_mut = ctx.http_bereq.as_mut()?;
+                if let Err(e) = bereq_mut.set_header("X-Ghost-Redirect-Config", &config_json) {
+                    ctx.log(
+                        LogTag::Error,
+                        &format!("Failed to set redirect config header: {}", e),
+                    );
+                    return None;
+                }
+
+                // Return redirect backend pointer
+                return Some(self.redirect_backend.0);
+            }
+
+            // Apply other filters only if NOT redirecting
             // RequestHeaderModifier
             if let Some(req_header_mod) = &filters.request_header_modifier {
                 let _ = apply_request_header_filter(ctx, req_header_mod);
@@ -217,16 +325,12 @@ impl VclDirector for VhostDirector {
 
             // URLRewrite
             if let Some(url_rewrite) = &filters.url_rewrite {
-                ctx.log(varnish::vcl::LogTag::Debug, "Applying URL rewrite filter");
-                if let Err(e) = apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path) {
-                    ctx.log(varnish::vcl::LogTag::Error, format!("URL rewrite failed: {}", e));
+                ctx.log(LogTag::Debug, "Applying URL rewrite filter");
+                if let Err(e) = apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path)
+                {
+                    ctx.log(LogTag::Error, &format!("URL rewrite failed: {}", e));
                 }
             }
-
-            // RequestRedirect - TODO: implement synthetic backend
-            // if filters.request_redirect.is_some() {
-            //     return redirect_backend
-            // }
 
             // Store response filter context
             if filters.response_header_modifier.is_some() {
@@ -504,6 +608,7 @@ mod tests {
     #[test]
     fn test_vhost_director_has_backends() {
         let backend_pool = Arc::new(BackendPool::new());
+        let redirect_backend = VCL_BACKEND(std::ptr::null());
 
         // Director with routes that have backends
         let director = VhostDirector::new(
@@ -521,6 +626,7 @@ mod tests {
                 priority: 100,
             }],
             backend_pool.clone(),
+            redirect_backend,
         );
 
         assert!(director.has_backends());
@@ -530,6 +636,7 @@ mod tests {
             "empty.example.com".to_string(),
             vec![],
             backend_pool,
+            redirect_backend,
         );
 
         assert!(!empty_director.has_backends());
@@ -538,10 +645,12 @@ mod tests {
     #[test]
     fn test_vhost_director_stats() {
         let backend_pool = Arc::new(BackendPool::new());
+        let redirect_backend = VCL_BACKEND(std::ptr::null());
         let director = VhostDirector::new(
             "api.example.com".to_string(),
             vec![],
             backend_pool,
+            redirect_backend,
         );
 
         // Initial stats should be zero
@@ -812,11 +921,43 @@ fn replace_first_segment_heuristic(path: &str, new_prefix: &str) -> String {
     }
 }
 
+/// Parse hostname and port from Host header
+///
+/// Handles both regular `host:port` format and IPv6 `[::1]:port` format.
+/// Returns (hostname, Some(port)) or (hostname, None) if no port specified.
+fn parse_host_and_port(host_header: &str) -> (&str, Option<u16>) {
+    // Handle IPv6: [::1]:8080 or [::1]
+    if host_header.starts_with('[') {
+        if let Some(bracket_end) = host_header.find(']') {
+            let host = &host_header[0..=bracket_end];
+            let port_part = &host_header[bracket_end + 1..];
+            if port_part.starts_with(':') {
+                let port = port_part[1..].parse::<u16>().ok();
+                return (host, port);
+            }
+            return (host, None);
+        }
+    }
+
+    // Handle regular host:port or just host
+    if let Some(colon_pos) = host_header.rfind(':') {
+        let host = &host_header[..colon_pos];
+        let port_str = &host_header[colon_pos + 1..];
+        if let Ok(port) = port_str.parse::<u16>() {
+            return (host, Some(port));
+        }
+    }
+
+    (host_header, None)
+}
+
 fn store_filter_context(
     ctx: &mut Ctx,
     filters: &Arc<RouteFilters>,
 ) -> Result<(), VclError> {
-    let bereq = ctx.http_bereq.as_mut()
+    let bereq = ctx
+        .http_bereq
+        .as_mut()
         .ok_or_else(|| VclError::new("no bereq".to_string()))?;
 
     // Serialize response filter to JSON
