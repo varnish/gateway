@@ -41,7 +41,7 @@ impl VclBackend<RedirectBody> for RedirectBackend {
         let config: RedirectConfig = serde_json::from_str(&config_json).map_err(|e| {
             ctx.log(
                 LogTag::Error,
-                &format!("Invalid redirect config: {}", e),
+                format!("Invalid redirect config: {}", e),
             );
             VclError::new(format!("Invalid redirect config: {}", e))
         })?;
@@ -50,7 +50,7 @@ impl VclBackend<RedirectBody> for RedirectBackend {
         let location = build_location(&config).map_err(|e| {
             ctx.log(
                 LogTag::Error,
-                &format!("Failed to build location: {}", e),
+                format!("Failed to build location: {}", e),
             );
             e
         })?;
@@ -76,7 +76,7 @@ impl VclBackend<RedirectBody> for RedirectBackend {
 
         ctx.log(
             LogTag::Debug,
-            &format!("Redirect {} -> {}", config.filter.status_code, location),
+            format!("Redirect {} -> {}", config.filter.status_code, location),
         );
 
         Ok(Some(RedirectBody::new()))
@@ -153,8 +153,7 @@ fn rewrite_path(
     if let Some(new_prefix) = &filter.replace_prefix_match {
         if let Some(matched_prefix) = matched_path_str {
             // We have a matched prefix, use it
-            if original_path.starts_with(matched_prefix) {
-                let remainder = &original_path[matched_prefix.len()..];
+            if let Some(remainder) = original_path.strip_prefix(matched_prefix) {
                 let trimmed_new = new_prefix.trim_end_matches('/');
                 return Ok(if remainder.is_empty() {
                     trimmed_new.to_string()

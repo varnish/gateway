@@ -298,7 +298,7 @@ impl VclDirector for VhostDirector {
                     Err(e) => {
                         ctx.log(
                             LogTag::Error,
-                            &format!("Failed to serialize redirect config: {}", e),
+                            format!("Failed to serialize redirect config: {}", e),
                         );
                         return None;
                     }
@@ -308,7 +308,7 @@ impl VclDirector for VhostDirector {
                 if let Err(e) = bereq_mut.set_header("X-Ghost-Redirect-Config", &config_json) {
                     ctx.log(
                         LogTag::Error,
-                        &format!("Failed to set redirect config header: {}", e),
+                        format!("Failed to set redirect config header: {}", e),
                     );
                     return None;
                 }
@@ -328,7 +328,7 @@ impl VclDirector for VhostDirector {
                 ctx.log(LogTag::Debug, "Applying URL rewrite filter");
                 if let Err(e) = apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path)
                 {
-                    ctx.log(LogTag::Error, &format!("URL rewrite failed: {}", e));
+                    ctx.log(LogTag::Error, format!("URL rewrite failed: {}", e));
                 }
             }
 
@@ -931,8 +931,8 @@ fn parse_host_and_port(host_header: &str) -> (&str, Option<u16>) {
         if let Some(bracket_end) = host_header.find(']') {
             let host = &host_header[0..=bracket_end];
             let port_part = &host_header[bracket_end + 1..];
-            if port_part.starts_with(':') {
-                let port = port_part[1..].parse::<u16>().ok();
+            if let Some(port_str) = port_part.strip_prefix(':') {
+                let port = port_str.parse::<u16>().ok();
                 return (host, port);
             }
             return (host, None);

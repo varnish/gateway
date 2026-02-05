@@ -359,6 +359,13 @@ pub struct GhostDirector {
     last_error: RwLock<Option<String>>,
 }
 
+/// Return type for GhostDirector::new() containing all necessary components
+pub type GhostDirectorCreationResult = (
+    GhostDirector,
+    Backend<NotFoundBackend, NotFoundBody>,
+    Backend<RedirectBackend, RedirectBody>,
+);
+
 impl GhostDirector {
     /// Create a new Ghost director with vhost directors
     ///
@@ -369,7 +376,7 @@ impl GhostDirector {
         vhost_directors: Arc<VhostDirectorMap>,
         backends: BackendPool,
         config_path: PathBuf,
-    ) -> Result<(Self, Backend<NotFoundBackend, NotFoundBody>, Backend<RedirectBackend, RedirectBody>), VclError> {
+    ) -> Result<GhostDirectorCreationResult, VclError> {
         // Create synthetic 404 backend
         let not_found_backend = Backend::new(ctx, "ghost", "ghost_404", NotFoundBackend, false)?;
         let not_found_ptr = SendSyncBackend(not_found_backend.vcl_ptr());
