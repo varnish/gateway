@@ -325,6 +325,24 @@ func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) 
 							filters = extractFilters(rule.Filters)
 						}
 
+						// If there are no backends but there are filters (e.g., RequestRedirect),
+						// create a single route with the filters
+						if len(rule.BackendRefs) == 0 && filters != nil {
+							collectedRoutes = append(collectedRoutes, ghost.Route{
+								Hostname:    string(hostname),
+								PathMatch:   pathMatch,
+								Method:      method,
+								Headers:     headers,
+								QueryParams: queryParams,
+								Filters:     filters,
+								Service:     "", // No backend for filter-only routes
+								Namespace:   routeNS,
+								Port:        0,
+								Weight:      0,
+								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
+							})
+						}
+
 						// Create a route entry for each backend
 						for _, backend := range rule.BackendRefs {
 							if backend.Name == "" {
