@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -123,6 +124,17 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 		return nil
 	}
 
+	// Check if the route's namespace is allowed by the Gateway's listeners
+	allowed, reason := r.isRouteAllowedByGateway(ctx, route, gateway)
+	if !allowed {
+		log.Info("route namespace not allowed by Gateway listeners", "reason", reason)
+		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
+			string(gatewayv1.RouteReasonNotAllowedByListeners), reason)
+		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
+			string(gatewayv1.RouteReasonResolvedRefs), "All references resolved")
+		return nil
+	}
+
 	// List all HTTPRoutes attached to this Gateway
 	routes, err := r.listRoutesForGateway(ctx, gateway)
 	if err != nil {
@@ -183,9 +195,14 @@ func (r *HTTPRouteReconciler) listRoutesForGateway(ctx context.Context, gateway 
 
 	var attached []gatewayv1.HTTPRoute
 	for _, route := range routeList.Items {
-		if r.routeAttachedToGateway(&route, gateway) {
-			attached = append(attached, route)
+		if !r.routeAttachedToGateway(&route, gateway) {
+			continue
 		}
+		allowed, _ := r.isRouteAllowedByGateway(ctx, &route, gateway)
+		if !allowed {
+			continue
+		}
+		attached = append(attached, route)
 	}
 
 	return attached, nil
@@ -221,6 +238,64 @@ func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute,
 		return true
 	}
 	return false
+}
+
+// isRouteAllowedByGateway checks if the route's namespace is allowed by any of the Gateway's listeners.
+// Returns (true, "") if any listener allows the route, or (false, reason) if none do.
+func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string) {
+	if len(gateway.Spec.Listeners) == 0 {
+		return false, "Gateway has no listeners"
+	}
+
+	for _, listener := range gateway.Spec.Listeners {
+		allowed, err := r.listenerAllowsRouteNamespace(ctx, route, gateway, listener)
+		if err != nil {
+			r.Logger.Error("failed to check listener namespace policy",
+				"listener", listener.Name, "error", err)
+			continue
+		}
+		if allowed {
+			return true, ""
+		}
+	}
+
+	return false, fmt.Sprintf("Route namespace %q is not allowed by any listener on Gateway %s/%s",
+		route.Namespace, gateway.Namespace, gateway.Name)
+}
+
+// listenerAllowsRouteNamespace checks if a specific listener allows routes from the route's namespace.
+func (r *HTTPRouteReconciler) listenerAllowsRouteNamespace(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, listener gatewayv1.Listener) (bool, error) {
+	// Determine the "from" policy. Default is Same when AllowedRoutes or Namespaces or From is nil.
+	from := gatewayv1.NamespacesFromSame
+	if listener.AllowedRoutes != nil && listener.AllowedRoutes.Namespaces != nil && listener.AllowedRoutes.Namespaces.From != nil {
+		from = *listener.AllowedRoutes.Namespaces.From
+	}
+
+	switch from {
+	case gatewayv1.NamespacesFromAll:
+		return true, nil
+
+	case gatewayv1.NamespacesFromSame:
+		return route.Namespace == gateway.Namespace, nil
+
+	case gatewayv1.NamespacesFromSelector:
+		if listener.AllowedRoutes.Namespaces.Selector == nil {
+			return false, nil
+		}
+		selector, err := metav1.LabelSelectorAsSelector(listener.AllowedRoutes.Namespaces.Selector)
+		if err != nil {
+			return false, fmt.Errorf("metav1.LabelSelectorAsSelector: %w", err)
+		}
+		// Fetch the route's namespace to check labels
+		var ns corev1.Namespace
+		if err := r.Get(ctx, types.NamespacedName{Name: route.Namespace}, &ns); err != nil {
+			return false, fmt.Errorf("r.Get(Namespace %s): %w", route.Namespace, err)
+		}
+		return selector.Matches(labels.Set(ns.Labels)), nil
+
+	default:
+		return false, fmt.Errorf("unknown FromNamespaces value: %s", from)
+	}
 }
 
 // updateConfigMap updates the Gateway's ConfigMap with routing.json (preserves main.vcl).

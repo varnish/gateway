@@ -621,4 +621,327 @@ func TestFindHTTPRoutesForGateway_DifferentGatewayClass(t *testing.T) {
 	}
 }
 
+func TestIsRouteAllowedByGateway(t *testing.T) {
+	scheme := newTestScheme()
+	fromAll := gatewayv1.NamespacesFromAll
+	fromSame := gatewayv1.NamespacesFromSame
+	fromSelector := gatewayv1.NamespacesFromSelector
+
+	tests := []struct {
+		name    string
+		route   *gatewayv1.HTTPRoute
+		gateway *gatewayv1.Gateway
+		objs    []runtime.Object // extra objects (namespaces)
+		allowed bool
+	}{
+		{
+			name: "nil AllowedRoutes defaults to Same - same namespace allowed",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "default"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+					},
+				},
+			},
+			allowed: true,
+		},
+		{
+			name: "nil AllowedRoutes defaults to Same - different namespace denied",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "other"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+					},
+				},
+			},
+			allowed: false,
+		},
+		{
+			name: "explicit Same - same namespace allowed",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "default"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{From: &fromSame},
+							},
+						},
+					},
+				},
+			},
+			allowed: true,
+		},
+		{
+			name: "explicit Same - different namespace denied",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "other"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{From: &fromSame},
+							},
+						},
+					},
+				},
+			},
+			allowed: false,
+		},
+		{
+			name: "All - any namespace allowed",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "any-namespace"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{From: &fromAll},
+							},
+						},
+					},
+				},
+			},
+			allowed: true,
+		},
+		{
+			name: "Selector - matching labels allowed",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "team-a"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{
+									From: &fromSelector,
+									Selector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{"env": "prod"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			objs: []runtime.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "team-a",
+						Labels: map[string]string{"env": "prod"},
+					},
+				},
+			},
+			allowed: true,
+		},
+		{
+			name: "Selector - non-matching labels denied",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "team-b"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{
+									From: &fromSelector,
+									Selector: &metav1.LabelSelector{
+										MatchLabels: map[string]string{"env": "prod"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			objs: []runtime.Object{
+				&corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   "team-b",
+						Labels: map[string]string{"env": "staging"},
+					},
+				},
+			},
+			allowed: false,
+		},
+		{
+			name: "Selector with nil selector - denied",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "team-a"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{
+									From:     &fromSelector,
+									Selector: nil,
+								},
+							},
+						},
+					},
+				},
+			},
+			allowed: false,
+		},
+		{
+			name: "multiple listeners - one allows one denies - allowed",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "other"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{
+						{
+							Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{From: &fromSame},
+							},
+						},
+						{
+							Name: "http-all", Port: 8080, Protocol: gatewayv1.HTTPProtocolType,
+							AllowedRoutes: &gatewayv1.AllowedRoutes{
+								Namespaces: &gatewayv1.RouteNamespaces{From: &fromAll},
+							},
+						},
+					},
+				},
+			},
+			allowed: true,
+		},
+		{
+			name: "no listeners - denied",
+			route: &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "default"},
+			},
+			gateway: &gatewayv1.Gateway{
+				ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+				Spec: gatewayv1.GatewaySpec{
+					Listeners: []gatewayv1.Listener{},
+				},
+			},
+			allowed: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := append([]runtime.Object{}, tc.objs...)
+			r := newHTTPRouteTestReconciler(scheme, objs...)
+			got, _ := r.isRouteAllowedByGateway(context.Background(), tc.route, tc.gateway)
+			if got != tc.allowed {
+				t.Errorf("expected allowed=%v, got %v", tc.allowed, got)
+			}
+		})
+	}
+}
+
+func TestReconcile_NotAllowedByListeners(t *testing.T) {
+	scheme := newTestScheme()
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				// No AllowedRoutes → defaults to Same
+			},
+		},
+	}
+
+	// Route in a different namespace
+	gwNs := gatewayv1.Namespace("default")
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cross-ns-route",
+			Namespace: "other",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Name: "test-gateway", Namespace: &gwNs},
+				},
+			},
+			Hostnames: []gatewayv1.Hostname{"example.com"},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gateway, route)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "cross-ns-route", Namespace: "other"},
+	})
+
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue")
+	}
+
+	// Verify HTTPRoute status shows Accepted=false with NotAllowedByListeners
+	var updatedRoute gatewayv1.HTTPRoute
+	err = r.Get(context.Background(),
+		types.NamespacedName{Name: "cross-ns-route", Namespace: "other"},
+		&updatedRoute)
+	if err != nil {
+		t.Fatalf("failed to get HTTPRoute: %v", err)
+	}
+
+	if len(updatedRoute.Status.Parents) != 1 {
+		t.Fatalf("expected 1 parent status, got %d", len(updatedRoute.Status.Parents))
+	}
+
+	ps := updatedRoute.Status.Parents[0]
+	var foundAccepted bool
+	for _, cond := range ps.Conditions {
+		if cond.Type == string(gatewayv1.RouteConditionAccepted) {
+			foundAccepted = true
+			if cond.Status != metav1.ConditionFalse {
+				t.Errorf("expected Accepted=False, got %s", cond.Status)
+			}
+			if cond.Reason != string(gatewayv1.RouteReasonNotAllowedByListeners) {
+				t.Errorf("expected reason NotAllowedByListeners, got %s", cond.Reason)
+			}
+		}
+	}
+	if !foundAccepted {
+		t.Error("expected Accepted condition to be set")
+	}
+}
+
 // NOTE: getUserVCL tests removed - functionality moved to Gateway controller
