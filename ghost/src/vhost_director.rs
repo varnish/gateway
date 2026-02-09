@@ -7,8 +7,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use varnish::ffi::VCL_BACKEND;
-use varnish::vcl::{Buffer, Ctx, HttpHeaders, LogTag, StrOrBytes, VclDirector, VclError};
+use varnish::vcl::{BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector, VclError};
 
 use crate::backend_pool::BackendPool;
 use crate::config::RouteFilters;
@@ -16,18 +15,19 @@ use crate::director::{PathMatchCompiled, RouteEntry, WeightedBackendRef};
 use crate::redirect_backend::RedirectConfig;
 use crate::stats::VhostStats;
 
-/// Wrapper for VCL_BACKEND pointer that implements Send + Sync
+/// Wrapper for BackendRef that implements Send + Sync
 ///
-/// SAFETY: VCL_BACKEND is an opaque Varnish handle designed for multi-threaded use.
-/// While individual Varnish workers are single-threaded, we use Arc and atomic
-/// operations because multiple workers may access the same director concurrently
-/// (via shared VCL state). The raw pointer is managed by Varnish's backend
-/// infrastructure which provides its own synchronization guarantees.
+/// SAFETY: BackendRef wraps a VCL_BACKEND opaque Varnish handle designed for
+/// multi-threaded use. While individual Varnish workers are single-threaded,
+/// we use Arc and atomic operations because multiple workers may access the
+/// same director concurrently (via shared VCL state). The raw pointer is
+/// managed by Varnish's backend infrastructure which provides its own
+/// synchronization guarantees.
 #[derive(Debug)]
-struct SendSyncBackend(VCL_BACKEND);
+struct SendSyncBackendRef(BackendRef);
 
-unsafe impl Send for SendSyncBackend {}
-unsafe impl Sync for SendSyncBackend {}
+unsafe impl Send for SendSyncBackendRef {}
+unsafe impl Sync for SendSyncBackendRef {}
 
 /// Header name for passing matched route filters to vcl_deliver
 const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
@@ -53,7 +53,7 @@ pub struct VhostDirector {
     /// Shared backend pool (shared with GhostDirector)
     backend_pool: Arc<BackendPool>,
     /// Synthetic redirect backend for RequestRedirect filters
-    redirect_backend: SendSyncBackend,
+    redirect_backend: Option<SendSyncBackendRef>,
     /// Statistics for this vhost
     stats: Arc<VhostStats>,
 }
@@ -64,13 +64,13 @@ impl VhostDirector {
         hostname: String,
         routes: Vec<RouteEntry>,
         backend_pool: Arc<BackendPool>,
-        redirect_backend: VCL_BACKEND,
+        redirect_backend: Option<BackendRef>,
     ) -> Self {
         Self {
             hostname,
             routes,
             backend_pool,
-            redirect_backend: SendSyncBackend(redirect_backend),
+            redirect_backend: redirect_backend.map(SendSyncBackendRef),
             stats: Arc::new(VhostStats::new()),
         }
     }
@@ -198,7 +198,7 @@ impl VhostDirector {
 }
 
 impl VclDirector for VhostDirector {
-    fn resolve(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
+    fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         // Extract request components (owned strings to avoid borrow conflicts with ctx.log)
         let (path_owned, query_string_owned, method_owned) = {
             let bereq = ctx.http_bereq.as_ref()?;
@@ -314,8 +314,8 @@ impl VclDirector for VhostDirector {
                     return None;
                 }
 
-                // Return redirect backend pointer
-                return Some(self.redirect_backend.0);
+                // Return redirect backend ref
+                return self.redirect_backend.as_ref().map(|r| r.0.clone());
             }
 
             // Apply other filters only if NOT redirecting
@@ -348,27 +348,32 @@ impl VclDirector for VhostDirector {
         // Look up in backend pool
         let backend = self.backend_pool.get(&backend_ref.key)?;
 
-        Some(backend.vcl_ptr())
+        Some(AsRef::<BackendRef>::as_ref(&*backend).clone())
     }
 
-    fn healthy(&self, _ctx: &mut Ctx) -> (bool, SystemTime) {
+    fn probe(&self, _ctx: &mut Ctx) -> ProbeResult {
         // Simple health check: return false if no backends available
         // Otherwise trust Kubernetes health checks via EndpointSlices
-        (self.has_backends(), SystemTime::now())
-    }
-
-    fn release(&self) {
-        // Nothing to do - backends are owned by the pool
-    }
-
-    fn list(&self, _ctx: &mut Ctx, vsb: &mut Buffer, detailed: bool, json: bool) {
-        if json {
-            self.list_json(vsb);
-        } else if detailed {
-            self.list_detailed(vsb);
-        } else {
-            self.list_brief(vsb);
+        ProbeResult {
+            healthy: self.has_backends(),
+            last_changed: SystemTime::now(),
         }
+    }
+
+    fn report(&self, _ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.list_brief(vsb);
+    }
+
+    fn report_details(&self, _ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.list_detailed(vsb);
+    }
+
+    fn report_json(&self, _ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.list_json(vsb);
+    }
+
+    fn report_details_json(&self, _ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.list_json(vsb);
     }
 }
 
@@ -610,7 +615,6 @@ mod tests {
     #[test]
     fn test_vhost_director_has_backends() {
         let backend_pool = Arc::new(BackendPool::new());
-        let redirect_backend = VCL_BACKEND(std::ptr::null());
 
         // Director with routes that have backends
         let director = VhostDirector::new(
@@ -628,7 +632,7 @@ mod tests {
                 priority: 100,
             }],
             backend_pool.clone(),
-            redirect_backend,
+            None,
         );
 
         assert!(director.has_backends());
@@ -638,7 +642,7 @@ mod tests {
             "empty.example.com".to_string(),
             vec![],
             backend_pool,
-            redirect_backend,
+            None,
         );
 
         assert!(!empty_director.has_backends());
@@ -647,12 +651,11 @@ mod tests {
     #[test]
     fn test_vhost_director_stats() {
         let backend_pool = Arc::new(BackendPool::new());
-        let redirect_backend = VCL_BACKEND(std::ptr::null());
         let director = VhostDirector::new(
             "api.example.com".to_string(),
             vec![],
             backend_pool,
-            redirect_backend,
+            None,
         );
 
         // Initial stats should be zero

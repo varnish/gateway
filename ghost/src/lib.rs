@@ -386,7 +386,7 @@ mod ghost {
         /// }
         /// ```
         pub unsafe fn backend(&self) -> VCL_BACKEND {
-            self.director.vcl_ptr()
+            self.director.as_ref().vcl_ptr()
         }
 
         /// Reload the configuration for this ghost backend.

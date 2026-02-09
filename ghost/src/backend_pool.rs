@@ -4,10 +4,11 @@
 //! Backends are stored per-director instance (not globally) due to thread safety constraints.
 
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use varnish::vcl::{Ctx, Endpoint, NativeBackend, NativeBackendConfig, VclError};
+use varnish::vcl::{Ctx, NativeBackend, NativeBackendBuilder, VclError};
 
 /// Backend pool for a single director instance
 ///
@@ -67,15 +68,11 @@ impl BackendPool {
         // Create socket address
         let addr = SocketAddr::new(ip, port);
 
-        // Create endpoint
-        let endpoint = Endpoint::ip(addr);
-
-        // Create backend config with a descriptive name
+        // Create backend with builder
         let backend_name = format!("ghost_{}", key.replace([':', '.'], "_"));
-        let config = NativeBackendConfig::new(&backend_name, endpoint);
-
-        // Create native backend
-        let backend = NativeBackend::new(ctx, &config, None)?;
+        let c_name = CString::new(backend_name)
+            .map_err(|e| VclError::new(format!("Invalid backend name: {}", e)))?;
+        let backend = NativeBackendBuilder::new_ip(&c_name, addr).build(ctx)?;
 
         // Insert into pool (wrapped in Arc)
         // SAFETY: NativeBackend contains VCL_BACKEND pointers which are thread-safe

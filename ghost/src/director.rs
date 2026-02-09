@@ -12,8 +12,7 @@ use std::time::SystemTime;
 use arc_swap::ArcSwap;
 use parking_lot::RwLock;
 use regex::Regex;
-use varnish::ffi::VCL_BACKEND;
-use varnish::vcl::{Backend, Buffer, Ctx, HttpHeaders, LogTag, StrOrBytes, VclDirector, VclError};
+use varnish::vcl::{Backend, BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector, VclError};
 
 use crate::backend_pool::BackendPool;
 use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
@@ -21,17 +20,18 @@ use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
 use crate::vhost_director::VhostDirector;
 
-/// Wrapper for VCL_BACKEND pointer that implements Send + Sync
+/// Wrapper for BackendRef that implements Send + Sync
 ///
-/// SAFETY: VCL_BACKEND is an opaque Varnish handle designed for multi-threaded use.
-/// While individual Varnish workers are single-threaded, we use Arc and atomic
-/// operations because multiple workers may access the same director concurrently
-/// (via shared VCL state). The raw pointer is managed by Varnish's backend
-/// infrastructure which provides its own synchronization guarantees.
-struct SendSyncBackend(VCL_BACKEND);
+/// SAFETY: BackendRef wraps a VCL_BACKEND opaque Varnish handle designed for
+/// multi-threaded use. While individual Varnish workers are single-threaded,
+/// we use Arc and atomic operations because multiple workers may access the
+/// same director concurrently (via shared VCL state). The raw pointer is
+/// managed by Varnish's backend infrastructure which provides its own
+/// synchronization guarantees.
+struct SendSyncBackendRef(BackendRef);
 
-unsafe impl Send for SendSyncBackend {}
-unsafe impl Sync for SendSyncBackend {}
+unsafe impl Send for SendSyncBackendRef {}
+unsafe impl Sync for SendSyncBackendRef {}
 
 /// Backend reference with weight for routing
 #[derive(Debug, Clone)]
@@ -208,7 +208,7 @@ pub fn build_vhost_directors(
     config: &Config,
     backend_pool: &mut BackendPool,
     ctx: &mut Ctx,
-    redirect_backend: VCL_BACKEND,
+    redirect_backend: BackendRef,
 ) -> Result<VhostDirectorMap, VclError> {
     let mut exact = HashMap::new();
     let mut wildcards = Vec::new();
@@ -308,7 +308,7 @@ pub fn build_vhost_directors(
             hostname.clone(),
             route_entries,
             Arc::clone(&backend_pool_arc),
-            redirect_backend,
+            Some(redirect_backend.clone()),
         ));
 
         // Categorize into exact or wildcard
@@ -352,9 +352,9 @@ pub struct GhostDirector {
     /// Path to config file (for reload)
     config_path: PathBuf,
     /// Synthetic 404 backend for undefined vhosts (stored backend must outlive this director)
-    not_found_backend: SendSyncBackend,
+    not_found_backend: SendSyncBackendRef,
     /// Synthetic redirect backend for RequestRedirect filters (stored backend must outlive this director)
-    redirect_backend: SendSyncBackend,
+    redirect_backend: SendSyncBackendRef,
     /// Last reload error message (for debugging)
     last_error: RwLock<Option<String>>,
 }
@@ -379,18 +379,18 @@ impl GhostDirector {
     ) -> Result<GhostDirectorCreationResult, VclError> {
         // Create synthetic 404 backend
         let not_found_backend = Backend::new(ctx, "ghost", "ghost_404", NotFoundBackend, false)?;
-        let not_found_ptr = SendSyncBackend(not_found_backend.vcl_ptr());
+        let not_found_ref = SendSyncBackendRef(not_found_backend.as_ref().clone());
 
         // Create synthetic redirect backend
         let redirect_backend = Backend::new(ctx, "ghost", "ghost_redirect", RedirectBackend, false)?;
-        let redirect_ptr = SendSyncBackend(redirect_backend.vcl_ptr());
+        let redirect_ref = SendSyncBackendRef(redirect_backend.as_ref().clone());
 
         let director = Self {
             vhost_directors: ArcSwap::new(Arc::clone(&vhost_directors)),
             backends: ArcSwap::new(Arc::new(backends)),
             config_path,
-            not_found_backend: not_found_ptr,
-            redirect_backend: redirect_ptr,
+            not_found_backend: not_found_ref,
+            redirect_backend: redirect_ref,
             last_error: RwLock::new(None),
         };
 
@@ -414,7 +414,7 @@ impl GhostDirector {
         })?;
 
         // Build new vhost directors
-        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx, self.redirect_backend.0).map_err(|e| {
+        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx, self.redirect_backend.0.clone()).map_err(|e| {
             let error_msg = format!("Ghost reload failed: {}", e);
             // Log to VSL for visibility in varnishlog
             ctx.log(LogTag::Error, &error_msg);
@@ -463,7 +463,7 @@ impl GhostDirector {
                 "name": format!("ghost.{}", director.hostname()),
                 "type": "vhost_director",
                 "admin": "auto",
-                "health": if director.healthy(ctx).0 { "healthy" } else { "sick" },
+                "health": if director.probe(ctx).healthy { "healthy" } else { "sick" },
                 "routes": director.backend_keys().len(),
                 "total_requests": total,
                 "last_request": director.stats().last_request().map(|t| {
@@ -487,7 +487,7 @@ impl GhostDirector {
                 "name": format!("ghost.{}", director.hostname()),
                 "type": "vhost_director",
                 "admin": "auto",
-                "health": if director.healthy(ctx).0 { "healthy" } else { "sick" },
+                "health": if director.probe(ctx).healthy { "healthy" } else { "sick" },
                 "routes": director.backend_keys().len(),
                 "total_requests": total,
                 "last_request": director.stats().last_request().map(|t| {
@@ -512,7 +512,7 @@ impl GhostDirector {
 }
 
 impl VclDirector for GhostDirector {
-    fn resolve(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
+    fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         // Get bereq for Host header extraction
         let bereq = ctx.http_bereq.as_ref()?;
 
@@ -528,7 +528,7 @@ impl VclDirector for GhostDirector {
             None => {
                 // No vhost found for this hostname
                 // Return 404 backend
-                return Some(self.not_found_backend.0);
+                return Some(self.not_found_backend.0.clone());
             }
         };
 
@@ -538,64 +538,74 @@ impl VclDirector for GhostDirector {
             None => {
                 // No backend found for this path/method/headers
                 // Return 404 backend
-                Some(self.not_found_backend.0)
+                Some(self.not_found_backend.0.clone())
             }
         }
     }
 
-    fn healthy(&self, ctx: &mut Ctx) -> (bool, SystemTime) {
+    fn probe(&self, ctx: &mut Ctx) -> ProbeResult {
         // Aggregate health across all vhost directors
         // Report healthy if any vhost has backends
         let directors = self.vhost_directors.load();
 
         // Check if any vhost director is healthy
         for director in directors.exact.values() {
-            let (healthy, _) = director.healthy(ctx);
-            if healthy {
-                return (true, SystemTime::now());
+            if director.probe(ctx).healthy {
+                return ProbeResult {
+                    healthy: true,
+                    last_changed: SystemTime::now(),
+                };
             }
         }
 
         for (_, director) in &directors.wildcards {
-            let (healthy, _) = director.healthy(ctx);
-            if healthy {
-                return (true, SystemTime::now());
+            if director.probe(ctx).healthy {
+                return ProbeResult {
+                    healthy: true,
+                    last_changed: SystemTime::now(),
+                };
             }
         }
 
         // No healthy vhosts
-        (false, SystemTime::now())
+        ProbeResult {
+            healthy: false,
+            last_changed: SystemTime::now(),
+        }
     }
 
-    fn release(&self) {
-        // Backends are dropped when director is dropped
-    }
-
-    fn list(&self, ctx: &mut Ctx, vsb: &mut Buffer, detailed: bool, json: bool) {
+    fn report(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
         let directors = self.vhost_directors.load();
 
-        if json {
-            self.list_json(ctx, vsb);
-        } else if detailed {
-            // Detailed: each vhost gets detailed output
-            for director in directors.exact.values() {
-                director.list(ctx, vsb, true, false);
-            }
-            for (_, director) in &directors.wildcards {
-                director.list(ctx, vsb, true, false);
-            }
-        } else {
-            // Brief: table header + rows
-            let header = "Backend name                      Admin    Health    Requests\n";
-            let _ = vsb.write(&header);
+        // Brief: table header + rows
+        let header = "Backend name                      Admin    Health    Requests\n";
+        let _ = vsb.write(&header);
 
-            for director in directors.exact.values() {
-                director.list(ctx, vsb, false, false);
-            }
-            for (_, director) in &directors.wildcards {
-                director.list(ctx, vsb, false, false);
-            }
+        for director in directors.exact.values() {
+            director.report(ctx, vsb);
         }
+        for (_, director) in &directors.wildcards {
+            director.report(ctx, vsb);
+        }
+    }
+
+    fn report_details(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        let directors = self.vhost_directors.load();
+
+        for director in directors.exact.values() {
+            director.report_details(ctx, vsb);
+        }
+        for (_, director) in &directors.wildcards {
+            director.report_details(ctx, vsb);
+        }
+    }
+
+    fn report_json(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.list_json(ctx, vsb);
+    }
+
+    fn report_details_json(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.list_json(ctx, vsb);
     }
 }
 
@@ -628,20 +638,28 @@ fn match_hostname<'a>(
 pub struct SharedGhostDirector(pub Arc<GhostDirector>);
 
 impl VclDirector for SharedGhostDirector {
-    fn resolve(&self, ctx: &mut Ctx) -> Option<VCL_BACKEND> {
+    fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         self.0.resolve(ctx)
     }
 
-    fn healthy(&self, ctx: &mut Ctx) -> (bool, SystemTime) {
-        self.0.healthy(ctx)
+    fn probe(&self, ctx: &mut Ctx) -> ProbeResult {
+        self.0.probe(ctx)
     }
 
-    fn release(&self) {
-        self.0.release()
+    fn report(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.0.report(ctx, vsb)
     }
 
-    fn list(&self, ctx: &mut Ctx, vsb: &mut Buffer, detailed: bool, json: bool) {
-        self.0.list(ctx, vsb, detailed, json)
+    fn report_details(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.0.report_details(ctx, vsb)
+    }
+
+    fn report_json(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.0.report_json(ctx, vsb)
+    }
+
+    fn report_details_json(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
+        self.0.report_details_json(ctx, vsb)
     }
 }
 
