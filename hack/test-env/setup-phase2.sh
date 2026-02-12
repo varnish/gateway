@@ -30,8 +30,8 @@ echo ""
 # 3. Check if gateway exists
 echo -e "${YELLOW}3. Checking for varnish-gateway...${NC}"
 if ! kubectl get gateway varnish-gateway -n default &>/dev/null; then
-    echo "Gateway not found. Deploying from deploy/04-sample-gateway.yaml..."
-    kubectl apply -f "$SCRIPT_DIR/../../deploy/04-sample-gateway.yaml"
+    echo "Gateway not found. Deploying from deploy/sample-gateway.yaml..."
+    kubectl apply -f "$SCRIPT_DIR/../../deploy/sample-gateway.yaml"
     sleep 5
 else
     echo "Gateway already exists"

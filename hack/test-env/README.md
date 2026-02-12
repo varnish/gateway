@@ -12,7 +12,7 @@ This directory contains test resources for validating the Varnish Gateway implem
 
 ### Phase 1 Tests (Basic Host-Based Routing)
 
-Phase 1 routes are defined in `/deploy/04-sample-gateway.yaml`:
+Phase 1 routes are defined in `/deploy/sample-gateway.yaml`:
 - `alpha.example.com` → app-alpha
 - `beta.example.com` → app-beta
 
@@ -38,7 +38,7 @@ kubectl get pods -w
 ### 2. Deploy Phase 1 routes (if not already deployed)
 
 ```bash
-kubectl apply -f deploy/04-sample-gateway.yaml
+kubectl apply -f deploy/sample-gateway.yaml
 ```
 
 ### 3. Deploy Phase 2 routes
@@ -218,5 +218,5 @@ kubectl delete -f hack/test-env/phase2-routes.yaml
 kubectl delete -f hack/test-env/deployments.yaml
 
 # Remove gateway and Phase 1 routes
-kubectl delete -f deploy/04-sample-gateway.yaml
+kubectl delete -f deploy/sample-gateway.yaml
 ```

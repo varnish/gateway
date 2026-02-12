@@ -386,7 +386,7 @@ deploy/
 ├── 01-operator.yaml      # ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment
 ├── 02-chaperone-rbac.yaml # ClusterRole for chaperone to watch EndpointSlices
 ├── 03-gatewayclass.yaml  # GatewayClass "varnish"
-└── 04-sample-gateway.yaml # Sample Gateway
+└── sample-gateway.yaml   # Sample Gateway (not applied by make deploy)
 ```
 
 Deploy to cluster:
