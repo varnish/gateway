@@ -24,6 +24,7 @@ type Reloader struct {
 	fatalErrCh    chan error
 	fatalErrOnce  sync.Once
 	debounceDelay time.Duration
+	reloadMu      sync.Mutex // protects reloadAllCerts from concurrent execution
 }
 
 // New creates a new TLS Reloader.
@@ -99,6 +100,15 @@ func (r *Reloader) LoadAll() error {
 // list current certs, discard them, load all .pem files from disk, and commit.
 // This handles additions, removals, and updates in a single transaction.
 func (r *Reloader) reloadAllCerts() error {
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+
+	// Read all .pem files from disk first, before modifying Varnish state
+	entries, err := os.ReadDir(r.certDir)
+	if err != nil {
+		return fmt.Errorf("os.ReadDir(%s): %w", r.certDir, err)
+	}
+
 	// List currently loaded certificates
 	result, err := r.varnishadm.TLSCertListStructured()
 	if err != nil {
@@ -115,18 +125,6 @@ func (r *Reloader) reloadAllCerts() error {
 			return fmt.Errorf("tls.cert.discard %s failed (status %d): %s",
 				entry.CertificateID, resp.StatusCode(), resp.Payload())
 		}
-	}
-
-	// Read all .pem files from disk
-	entries, err := os.ReadDir(r.certDir)
-	if err != nil {
-		// Rollback discards if we can't read the directory
-		if len(result.Entries) > 0 {
-			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
-				r.logger.Error("TLS cert rollback failed after directory read error", "error", rbErr)
-			}
-		}
-		return fmt.Errorf("os.ReadDir(%s): %w", r.certDir, err)
 	}
 
 	var loaded int
