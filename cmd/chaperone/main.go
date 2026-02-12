@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/varnish/gateway/internal/ghost"
+	vtls "github.com/varnish/gateway/internal/tls"
 	"github.com/varnish/gateway/internal/varnishadm"
 	"github.com/varnish/gateway/internal/vcl"
 	"github.com/varnish/gateway/internal/vrun"
@@ -87,6 +88,10 @@ type Config struct {
 	Namespace     string // kubernetes namespace to watch
 	ConfigMapName string // name of ConfigMap containing routing.json and main.vcl
 
+	// TLS configuration
+	TLSCertDir string   // path to TLS cert directory (empty = no TLS)
+	TLSListen  []string // -a arguments for HTTPS (e.g., ":8443,https")
+
 	// Health endpoint
 	HealthAddr string // address for health endpoint
 }
@@ -109,6 +114,8 @@ func loadConfig() (*Config, error) {
 		VCLPath:           getEnvOrDefault("VCL_PATH", "/var/run/varnish/main.vcl"),
 		Namespace:         getEnvOrDefault("NAMESPACE", "default"),
 		ConfigMapName:     getEnvOrDefault("CONFIGMAP_NAME", "gateway-vcl"),
+		TLSCertDir:        os.Getenv("TLS_CERT_DIR"),                           // empty by default
+		TLSListen:         parseList(os.Getenv("VARNISH_TLS_LISTEN")),           // empty by default
 		HealthAddr:        getEnvOrDefault("HEALTH_ADDR", ":8080"),
 	}
 
@@ -269,16 +276,26 @@ func run() error {
 		logger.With("component", "vcl"),
 	)
 
+	// 4. TLS reloader - watches TLS cert directory and hot-reloads certs (if TLS enabled)
+	var tlsReloader *vtls.Reloader
+	if cfg.TLSCertDir != "" {
+		tlsReloader = vtls.New(vadm, cfg.TLSCertDir, logger.With("component", "tls"))
+	}
+
 	// Start all components concurrently
 	var wg sync.WaitGroup
-	errCh := make(chan error, 5) // buffer for all components
+	errCh := make(chan error, 6) // buffer for all components
 
 	// Build varnishd arguments
+	listenAddrs := cfg.VarnishListen
+	if len(cfg.TLSListen) > 0 {
+		listenAddrs = append(listenAddrs, cfg.TLSListen...)
+	}
 	varnishCfg := &vrun.Config{
 		WorkDir:    cfg.WorkDir,
 		AdminPort:  cfg.AdminPort,
 		VarnishDir: cfg.VarnishDir,
-		Listen:     cfg.VarnishListen,
+		Listen:     listenAddrs,
 		Storage:    cfg.VarnishStorage,
 		ExtraArgs:  cfg.VarnishdExtraArgs,
 	}
@@ -343,6 +360,29 @@ func run() error {
 		}
 	}()
 
+	// Start TLS reloader (if TLS enabled)
+	if tlsReloader != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := tlsReloader.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- fmt.Errorf("tlsReloader.Run: %w", err)
+			}
+		}()
+
+		// Listen for fatal TLS reload errors
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case err := <-tlsReloader.FatalError():
+				slog.Error("fatal TLS reload error - exiting", "error", err)
+				errCh <- err
+			case <-ctx.Done():
+			}
+		}()
+	}
+
 	// Start health server with drain endpoint for graceful shutdown
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -393,6 +433,17 @@ func run() error {
 			return
 		}
 		slog.Info("initial VCL loaded")
+
+		// Step 2.5: Load TLS certificates (if TLS enabled)
+		if tlsReloader != nil {
+			slog.Debug("loading TLS certificates", "dir", cfg.TLSCertDir)
+			if err := tlsReloader.LoadAll(); err != nil {
+				slog.Error("initial TLS cert load failed", "error", err)
+				errCh <- fmt.Errorf("initial TLS cert load: %w", err)
+				return
+			}
+			slog.Info("TLS certificates loaded")
+		}
 
 		// Step 3: Start the child process
 		slog.Debug("starting Varnish child process")

@@ -98,6 +98,11 @@ available  label/warm          - label-catz -> vcl-catz-orig (1 return(vcl))
 available   auto/warm          - vcl-root-orig`,
 	}
 
+	m.responses["tls.cert.reload"] = VarnishResponse{
+		statusCode: ClisOk,
+		payload:    "TLS certificates reloaded",
+	}
+
 	m.responses["tls.cert.list"] = VarnishResponse{
 		statusCode: ClisOk,
 		payload: `Frontend State   Hostname         Certificate ID  Expiration date           OCSP stapling

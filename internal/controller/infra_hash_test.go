@@ -169,6 +169,49 @@ func TestInfrastructureConfig_ArgOrderDoesNotAffectHash(t *testing.T) {
 	}
 }
 
+func TestInfrastructureConfig_TLSCertRefsChangeHash(t *testing.T) {
+	baseConfig := InfrastructureConfig{
+		GatewayImage: "ghcr.io/varnish/gateway:v1.0.0",
+		TLSCertRefs:  nil,
+	}
+	baseHash := baseConfig.ComputeHash()
+
+	withTLS := InfrastructureConfig{
+		GatewayImage: "ghcr.io/varnish/gateway:v1.0.0",
+		TLSCertRefs:  []string{"my-tls-cert"},
+	}
+	tlsHash := withTLS.ComputeHash()
+
+	if baseHash == tlsHash {
+		t.Error("Adding TLSCertRefs should change the hash")
+	}
+
+	differentTLS := InfrastructureConfig{
+		GatewayImage: "ghcr.io/varnish/gateway:v1.0.0",
+		TLSCertRefs:  []string{"other-cert"},
+	}
+	differentHash := differentTLS.ComputeHash()
+
+	if tlsHash == differentHash {
+		t.Error("Different TLSCertRefs should produce different hashes")
+	}
+}
+
+func TestInfrastructureConfig_TLSCertRefOrderDoesNotAffectHash(t *testing.T) {
+	config1 := InfrastructureConfig{
+		GatewayImage: "ghcr.io/varnish/gateway:v1.0.0",
+		TLSCertRefs:  []string{"cert-a", "cert-b", "cert-c"},
+	}
+	config2 := InfrastructureConfig{
+		GatewayImage: "ghcr.io/varnish/gateway:v1.0.0",
+		TLSCertRefs:  []string{"cert-c", "cert-a", "cert-b"},
+	}
+
+	if config1.ComputeHash() != config2.ComputeHash() {
+		t.Error("TLSCertRef order should not affect hash")
+	}
+}
+
 func TestInfrastructureConfig_SecretOrderDoesNotAffectHash(t *testing.T) {
 	// Secrets in different order should produce same hash (they get sorted)
 	config1 := InfrastructureConfig{

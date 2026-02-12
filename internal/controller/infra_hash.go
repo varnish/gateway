@@ -29,6 +29,10 @@ type InfrastructureConfig struct {
 
 	// ImagePullSecrets for pulling the gateway image
 	ImagePullSecrets []string
+
+	// TLSCertRefs are the names of TLS Secrets referenced by HTTPS listeners.
+	// Adding/removing a certificateRef changes the hash and triggers pod restart.
+	TLSCertRefs []string
 }
 
 // ComputeHash returns a deterministic SHA256 hash of the infrastructure configuration
@@ -68,6 +72,13 @@ func (c *InfrastructureConfig) ComputeHash() string {
 	copy(sortedSecrets, c.ImagePullSecrets)
 	sort.Strings(sortedSecrets)
 	h.Write([]byte(strings.Join(sortedSecrets, "\x00")))
+	h.Write([]byte{0}) // separator
+
+	// Include TLS cert refs (already sorted by caller)
+	sortedCertRefs := make([]string, len(c.TLSCertRefs))
+	copy(sortedCertRefs, c.TLSCertRefs)
+	sort.Strings(sortedCertRefs)
+	h.Write([]byte(strings.Join(sortedCertRefs, "\x00")))
 
 	return hex.EncodeToString(h.Sum(nil))
 }

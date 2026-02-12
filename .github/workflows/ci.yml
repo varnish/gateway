@@ -55,6 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/varnish/varnish-base:8.0
+      options: --user root
     steps:
       - name: Install build tools and git
         run: |
