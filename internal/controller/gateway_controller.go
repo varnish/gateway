@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -169,7 +168,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	imagePullSecrets := r.parseImagePullSecrets()
 
 	// Collect TLS certificate data from HTTPS listeners
-	tlsCertData, tlsCertRefs := r.collectTLSCertData(ctx, gateway)
+	tlsCertData := r.collectTLSCertData(ctx, gateway)
 	hasTLS := len(tlsCertData) > 0
 
 	// Compute infrastructure hash for pod restart detection
@@ -178,7 +177,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		VarnishdExtraArgs: varnishdExtraArgs,
 		Logging:           logging,
 		ImagePullSecrets:  imagePullSecrets,
-		TLSCertRefs:       tlsCertRefs,
+		HasTLS:            hasTLS,
 	}
 	infraHash := infraConfig.ComputeHash()
 
@@ -717,9 +716,8 @@ func (r *GatewayReconciler) parseImagePullSecrets() []string {
 // collectTLSCertData iterates Gateway listeners and collects TLS certificate data
 // from referenced Secrets. Returns a map of {secret-name}.pem → combined PEM data
 // and a sorted list of referenced Secret names for the infrastructure hash.
-func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gatewayv1.Gateway) (map[string][]byte, []string) {
+func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gatewayv1.Gateway) map[string][]byte {
 	certData := make(map[string][]byte)
-	var certRefs []string
 
 	for _, listener := range gateway.Spec.Listeners {
 		if listener.Protocol != gatewayv1.HTTPSProtocolType {
@@ -792,12 +790,10 @@ func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gat
 			}
 			combined = append(combined, key...)
 			certData[secretName+".pem"] = combined
-			certRefs = append(certRefs, secretName)
 		}
 	}
 
-	sort.Strings(certRefs)
-	return certData, certRefs
+	return certData
 }
 
 // buildLabels returns labels for resources owned by a Gateway.

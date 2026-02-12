@@ -36,6 +36,7 @@ type VarnishadmInterface interface {
 	TLSCertList() (VarnishResponse, error)
 	TLSCertListStructured() (*TLSCertListResult, error)
 	TLSCertLoad(name, certFile string, privateKeyFile string) (VarnishResponse, error)
+	TLSCertDiscard(id string) (VarnishResponse, error)
 	TLSCertCommit() (VarnishResponse, error)
 	TLSCertRollback() (VarnishResponse, error)
 	TLSCertReload() (VarnishResponse, error)

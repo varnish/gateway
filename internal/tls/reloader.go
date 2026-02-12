@@ -15,7 +15,8 @@ import (
 )
 
 // Reloader loads and hot-reloads TLS certificates into Varnish via varnishadm.
-// It watches a directory of .pem files and triggers tls.cert.reload on changes.
+// It watches a directory of .pem files and performs a full load/commit cycle on changes,
+// which handles new, updated, and removed certificates.
 type Reloader struct {
 	varnishadm    varnishadm.VarnishadmInterface
 	certDir       string
@@ -94,6 +95,93 @@ func (r *Reloader) LoadAll() error {
 	return nil
 }
 
+// reloadAllCerts performs a full TLS certificate reload cycle:
+// list current certs, discard them, load all .pem files from disk, and commit.
+// This handles additions, removals, and updates in a single transaction.
+func (r *Reloader) reloadAllCerts() error {
+	// List currently loaded certificates
+	result, err := r.varnishadm.TLSCertListStructured()
+	if err != nil {
+		return fmt.Errorf("varnishadm.TLSCertListStructured: %w", err)
+	}
+
+	// Discard each currently loaded cert (starts a transaction)
+	for _, entry := range result.Entries {
+		resp, err := r.varnishadm.TLSCertDiscard(entry.CertificateID)
+		if err != nil {
+			return fmt.Errorf("varnishadm.TLSCertDiscard(%s): %w", entry.CertificateID, err)
+		}
+		if resp.StatusCode() != varnishadm.ClisOk {
+			return fmt.Errorf("tls.cert.discard %s failed (status %d): %s",
+				entry.CertificateID, resp.StatusCode(), resp.Payload())
+		}
+	}
+
+	// Read all .pem files from disk
+	entries, err := os.ReadDir(r.certDir)
+	if err != nil {
+		// Rollback discards if we can't read the directory
+		if len(result.Entries) > 0 {
+			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+				r.logger.Error("TLS cert rollback failed after directory read error", "error", rbErr)
+			}
+		}
+		return fmt.Errorf("os.ReadDir(%s): %w", r.certDir, err)
+	}
+
+	var loaded int
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".pem") {
+			continue
+		}
+
+		name := strings.TrimSuffix(entry.Name(), ".pem")
+		path := filepath.Join(r.certDir, entry.Name())
+
+		r.logger.Debug("loading TLS certificate", "name", name, "path", path)
+
+		resp, err := r.varnishadm.TLSCertLoad(name, path, "")
+		if err != nil {
+			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+				r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
+			}
+			return fmt.Errorf("varnishadm.TLSCertLoad(%s, %s): %w", name, path, err)
+		}
+		if resp.StatusCode() != varnishadm.ClisOk {
+			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+				r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
+			}
+			return fmt.Errorf("tls.cert.load %s failed (status %d): %s",
+				name, resp.StatusCode(), resp.Payload())
+		}
+		loaded++
+	}
+
+	// If nothing was discarded and nothing loaded, no transaction was started
+	if len(result.Entries) == 0 && loaded == 0 {
+		r.logger.Warn("no TLS certificates to load or discard")
+		return nil
+	}
+
+	// Commit the transaction
+	resp, err := r.varnishadm.TLSCertCommit()
+	if err != nil {
+		if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+			r.logger.Error("TLS cert rollback failed after commit error", "error", rbErr)
+		}
+		return fmt.Errorf("varnishadm.TLSCertCommit: %w", err)
+	}
+	if resp.StatusCode() != varnishadm.ClisOk {
+		if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+			r.logger.Error("TLS cert rollback failed after commit error", "error", rbErr)
+		}
+		return fmt.Errorf("tls.cert.commit failed (status %d): %s", resp.StatusCode(), resp.Payload())
+	}
+
+	r.logger.Info("TLS certificates reloaded via load/commit cycle", "count", loaded)
+	return nil
+}
+
 // Run starts watching the cert directory for changes and reloads certs when files change.
 // It blocks until the context is cancelled.
 func (r *Reloader) Run(ctx context.Context) error {
@@ -117,12 +205,8 @@ func (r *Reloader) Run(ctx context.Context) error {
 				return nil
 			}
 
-			// Only react to write/create events on .pem files
-			if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) {
-				if event.Has(fsnotify.Remove) {
-					r.logger.Warn("TLS cert file removed, will fail on next reload",
-						"file", event.Name)
-				}
+			// React to write, create, and remove events on .pem files
+			if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) && !event.Has(fsnotify.Remove) {
 				continue
 			}
 
@@ -139,19 +223,10 @@ func (r *Reloader) Run(ctx context.Context) error {
 			}
 			debounceTimer = time.AfterFunc(r.debounceDelay, func() {
 				r.logger.Info("reloading TLS certificates")
-				resp, err := r.varnishadm.TLSCertReload()
-				if err != nil {
+				if err := r.reloadAllCerts(); err != nil {
 					r.logger.Error("TLS cert reload failed", "error", err)
 					r.fatalErrOnce.Do(func() {
 						r.fatalErrCh <- fmt.Errorf("TLS cert reload failed: %w", err)
-					})
-					return
-				}
-				if resp.StatusCode() != varnishadm.ClisOk {
-					r.logger.Error("TLS cert reload returned error",
-						"status", resp.StatusCode(), "payload", resp.Payload())
-					r.fatalErrOnce.Do(func() {
-						r.fatalErrCh <- fmt.Errorf("tls.cert.reload failed (status %d): %s", resp.StatusCode(), resp.Payload())
 					})
 					return
 				}
