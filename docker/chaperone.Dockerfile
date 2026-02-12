@@ -10,20 +10,21 @@ COPY internal/ internal/
 RUN CGO_ENABLED=0 go build -mod=vendor -o /chaperone ./cmd/chaperone
 
 # Stage 2: Build ghost VMOD (Rust)
-FROM rust:1.92-bookworm AS rust-builder
+# Base on varnish image so headers match exactly at compile time
+FROM ghcr.io/varnish/varnish-base:8.0 AS rust-builder
+USER root
 
-# Install Varnish 8.0 development headers and build dependencies
+# Install Rust toolchain and build dependencies
 RUN apt-get update && apt-get install -y \
     curl \
-    gnupg \
-    apt-transport-https \
+    build-essential \
+    pkg-config \
     clang \
     libclang-dev \
-    && curl -fsSL https://packagecloud.io/varnishcache/varnish80/gpgkey | gpg --dearmor -o /usr/share/keyrings/varnish.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/varnish.gpg] https://packagecloud.io/varnishcache/varnish80/debian/ bookworm main" > /etc/apt/sources.list.d/varnish.list \
-    && apt-get update \
-    && apt-get install -y varnish-dev \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
     && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 
@@ -35,7 +36,7 @@ COPY ghost/src ./src
 RUN cargo build --release
 
 # Stage 3: Runtime image based on Varnish
-FROM varnish:8.0
+FROM ghcr.io/varnish/varnish-base:8.0
 
 USER root
 

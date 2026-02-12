@@ -53,44 +53,21 @@ jobs:
 
   test-rust:
     runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/varnish/varnish-base:8.0
     steps:
+      - name: Install build tools and git
+        run: |
+          apt-get update && apt-get install -y \
+            curl build-essential pkg-config clang libclang-dev git
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Cache Varnish packages
-        uses: actions/cache@v4
-        id: varnish-cache
-        with:
-          path: |
-            /var/cache/apt/archives
-            /var/lib/apt/lists
-          key: varnish-dev-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
-
-      - name: Install Varnish
-        if: steps.varnish-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
-          sudo apt-get install -y varnish-dev
-
-      - name: Install cached Varnish
-        if: steps.varnish-cache.outputs.cache-hit == 'true'
-        run: |
-          sudo apt-get install -y varnish-dev || {
-            curl -s https://packagecloud.io/install/repositories/varnishcache/varnish80/script.deb.sh | sudo bash
-            sudo apt-get install -y varnish-dev
-          }
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-dev llvm-dev clang
-
       - name: Set up Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: true
-          cache-workspaces: ghost
-          components: clippy
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 --component clippy
+          echo "/root/.cargo/bin" >> $GITHUB_PATH
 
       - name: Run clippy (warnings as errors)
         run: cd ghost && cargo clippy --release -- -D warnings

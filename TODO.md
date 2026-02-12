@@ -379,6 +379,10 @@ Use Policy Attachment instead of GatewayClass-specific fields for Varnish config
 - Kubebuilder markers (validation, defaults) automatically applied
 - Less error-prone than manual YAML editing
 
+## Future Enhancements
+
+- **HTTPRoute data-plane readiness signal**: Currently `Accepted=True` is set by the operator immediately, but the route isn't active until chaperone reloads ghost. Consider having chaperone set a custom `Programmed` condition on HTTPRoute after successful ghost reload. Note: Gateway API spec only defines `Programmed` on Gateway/Listener, not HTTPRoute — this would be a custom condition. Requires adding route identity (name/namespace) to routing.json so chaperone can trace back to HTTPRoute objects.
+
 ## Open Questions
 
 - Config size limits: ghost.json in ConfigMap has 1MB limit (consider using multiple ConfigMaps or custom storage)
