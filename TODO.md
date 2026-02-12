@@ -1,119 +1,27 @@
 # TODO
 
-## Phase 1: Complete
+## Phase:  Client-Side TLS (Complete)
 
-- Basic vhost-based routing
+### Known Limitations
 
-## Phase 2: Complete
+- **Service update on listener change**: Adding an HTTPS listener doesn't update an existing Service (operator skips
+  Service updates). Workaround: delete the Service and let the operator recreate it. Should add Service update logic to
+  `reconcileResource`.
+- **~~New cert discovery requires pod restart~~**: Resolved. The file watcher now uses a full discard/load/commit
+  cycle, so adding or removing `certificateRef` entries is handled without pod restart. The infra hash only includes
+  a `HasTLS` flag (not individual cert refs), so only adding/removing an HTTPS listener itself triggers a restart.
+- **No cross-namespace Secret support**: certificateRefs must be in the same namespace as the Gateway.
 
-- Path-based routing with exact, prefix, and regex matching
-- Route ordering by specificity
-- Extended ghost.json format with path rules
+### Not Yet Implemented
 
-## Phase 3: Complete
-
-- Header matching (`rule.Matches[].Headers`)
-- Method matching (`rule.Matches[].Method`)
-- Query parameter matching (`rule.Matches[].QueryParams`)
-- Priority-based route selection with additive specificity bonuses
-
-## Phase 4: Complete
-
-- Traffic splitting (weighted backendRefs)
-  - HTTPRoute controller extracts weights from Gateway API BackendRefs
-  - Routes with identical match criteria are merged with weighted backends
-  - Ghost VMOD implements weighted random backend selection
-  - Full test coverage including VTC canary deployment test
-
-## Phase 5: Request/Response Modification (Partial)
-
-### Implemented
-
-- RequestHeaderModifier filter (Set, Add, Remove)
-- ResponseHeaderModifier filter (Set, Add, Remove)
-- URLRewrite filter - hostname rewriting
-- URLRewrite filter - ReplaceFullPath
-- URLRewrite filter - ReplacePrefixMatch (accurate implementation)
-  - Tracks exact matched prefix from route selection
-  - Replaces only the matched portion, preserving remainder
-  - Handles query string preservation
-  - VTC test coverage included
-- Add `ghost.deliver()` call to VCL preamble
-
-### Not Implemented
-
-#### RequestRedirect Filter
-
-**Status**: Not implemented
-
-**Gateway API Requirement**: Support for synthetic HTTP redirect responses.
-
-**Specification**:
-```yaml
-filters:
-- type: RequestRedirect
-  requestRedirect:
-    scheme: https
-    hostname: new-host.example.com
-    path:
-      type: ReplaceFullPath
-      replaceFullPath: /new/path
-    port: 8443
-    statusCode: 301
-```
-
-**Implementation Requirements**:
-1. Create synthetic redirect backend (similar to `NotFoundBackend`)
-2. Generate `Location` header from redirect config components:
-   - scheme (default: use current scheme)
-   - hostname (default: use current host)
-   - path (apply path rewrite if specified)
-   - port (default: use current port)
-3. Return appropriate 3xx status code (301, 302, 307, 308)
-4. Ensure redirect backend works with Varnish director pattern
-
-**Files to Create/Modify**:
-- `ghost/src/redirect_backend.rs` - New synthetic backend for redirects
-- `ghost/src/vhost_director.rs:resolve()` - Return redirect backend when filter present
-- `ghost/src/director.rs` - Register redirect backend in pool
-
-**Test Coverage Needed**:
-- VTC tests for all redirect status codes (301, 302, 307, 308)
-- Test scheme rewriting
-- Test hostname rewriting
-- Test path rewriting in redirects
-- Test port modification
-- Test Location header construction
-- Test with HTTPS redirects
-
-**Gateway API Conformance Impact**:
-- Core feature required for conformance
-- Many real-world use cases (HTTP→HTTPS redirect, domain migration, etc.)
-- Blocking for production readiness
-
-### Implementation Priority
-
-**Critical for Release**:
-1. RequestRedirect implementation (missing core feature)
-
-**Nice to Have**:
-- Enhanced error reporting for filter application failures
-- Metrics for filter application (success/failure counts)
-- VTC integration tests for all filter combinations
-
-## Phase 6: client-side TLS
-
-- Listener TLS termination (watch `certificateRefs` Secrets)
-- Certificate hot-reload on Secret changes
-- BackendTLSPolicy support (upstream TLS)
-
-Note: In k8s, cert-manager handles ACME. We just consume `kubernetes.io/tls` Secrets.
+- BackendTLSPolicy support
 
 ## Phase 7: Connection Draining and Stats
 
 ### Overview
 
-When a chaperone pod is being replaced (k8s sends SIGTERM), we need to gracefully drain existing connections before shutting down varnishd.
+When a chaperone pod is being replaced (k8s sends SIGTERM), we need to gracefully drain existing connections before
+shutting down varnishd.
 
 ### Requirements
 
@@ -178,14 +86,14 @@ When a chaperone pod is being replaced (k8s sends SIGTERM), we need to gracefull
 // Collector collects varnish statistics via varnishstat -j
 // and chaperone internal metrics
 type Collector struct {
-    varnishDir string
+varnishDir string
 }
 
 // Snapshot represents a point-in-time stats snapshot
 // Contains both varnishd counters and chaperone metrics
 type Snapshot struct {
-    Timestamp time.Time
-    Counters  map[string]int64
+Timestamp time.Time
+Counters  map[string]int64
 }
 
 // Get returns a one-shot snapshot of all stats
@@ -202,47 +110,49 @@ func (s *Snapshot) GetCounter(name string) (int64, bool)
 #### Usage Examples
 
 **Connection Draining:**
+
 ```go
 collector := stats.New(cfg.VarnishDir)
 snapshots := collector.Watch(ctx, 1*time.Second)
 
 ticker := time.NewTicker(10*time.Second)
 for {
-    select {
-    case snap := <-snapshots:
-        sessConn, _ := snap.GetCounter("MAIN.sess_conn")
-        if sessConn == 0 {
-            // Drain complete
-            return
-        }
-        select {
-        case <-ticker.C:
-            slog.Info("draining connections", "remaining", sessConn)
-        default:
-        }
-    case <-ctx.Done():
-        return
-    }
+select {
+case snap := <-snapshots:
+sessConn, _ := snap.GetCounter("MAIN.sess_conn")
+if sessConn == 0 {
+// Drain complete
+return
+}
+select {
+case <-ticker.C:
+slog.Info("draining connections", "remaining", sessConn)
+default:
+}
+case <-ctx.Done():
+return
+}
 }
 ```
 
 **Prometheus Metrics:**
+
 ```go
 collector := stats.New(cfg.VarnishDir)
 
-http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-    snap, err := collector.Get()
-    if err != nil {
-        // handle error
-    }
+http.HandleFunc("/metrics", func (w http.ResponseWriter, r *http.Request) {
+snap, err := collector.Get()
+if err != nil {
+// handle error
+}
 
-    // Export varnish counters
-    for name, value := range snap.Counters {
-        fmt.Fprintf(w, "varnish_%s %d\n", sanitize(name), value)
-    }
+// Export varnish counters
+for name, value := range snap.Counters {
+fmt.Fprintf(w, "varnish_%s %d\n", sanitize(name), value)
+}
 
-    // Add chaperone-specific metrics
-    fmt.Fprintf(w, "chaperone_vcl_reloads_total %d\n", vclReloadCount)
+// Add chaperone-specific metrics
+fmt.Fprintf(w, "chaperone_vcl_reloads_total %d\n", vclReloadCount)
 })
 ```
 
@@ -266,44 +176,48 @@ http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 
 ### Per-Gateway ClusterRoleBinding (OPEN ISSUE)
 
-**Problem**: Chaperone pods need permissions to watch EndpointSlices, but the current RBAC setup only grants permissions to the `default` namespace. When deploying a Gateway to other namespaces, chaperone cannot discover backends.
+**Problem**: Chaperone pods need permissions to watch EndpointSlices, but the current RBAC setup only grants permissions
+to the `default` namespace. When deploying a Gateway to other namespaces, chaperone cannot discover backends.
 
 **Root Cause**:
+
 - Operator creates namespace-specific ServiceAccounts for each Gateway
 - Existing ClusterRoleBinding only grants to `system:serviceaccounts:default` group
 - ServiceAccounts in other namespaces don't have permissions
 
 **Recommended Solution** (Option 1 from RBAC.md):
+
 - Operator creates a ClusterRoleBinding for each Gateway's ServiceAccount
 - Binding references the existing `varnish-gateway-chaperone` ClusterRole
 - Use label-based tracking for cleanup (`gateway.networking.k8s.io/gateway-name`)
 - On Gateway deletion, query and delete ClusterRoleBindings with matching labels
 
 **Implementation**:
+
 ```go
 // In Gateway reconciler
 func (r *GatewayReconciler) createChaperoneCRB(ctx context.Context, gw *gatewayv1.Gateway) error {
-    crb := &rbacv1.ClusterRoleBinding{
-        ObjectMeta: metav1.ObjectMeta{
-            Name: fmt.Sprintf("varnish-gateway-chaperone-%s-%s", gw.Namespace, gw.Name),
-            Labels: map[string]string{
-                "gateway.networking.k8s.io/gateway-name": gw.Name,
-            },
-        },
-        RoleRef: rbacv1.RoleRef{
-            APIGroup: "rbac.authorization.k8s.io",
-            Kind:     "ClusterRole",
-            Name:     "varnish-gateway-chaperone",
-        },
-        Subjects: []rbacv1.Subject{
-            {
-                Kind:      "ServiceAccount",
-                Name:      fmt.Sprintf("%s-chaperone", gw.Name),
-                Namespace: gw.Namespace,
-            },
-        },
-    }
-    return r.Create(ctx, crb)
+crb := &rbacv1.ClusterRoleBinding{
+ObjectMeta: metav1.ObjectMeta{
+Name: fmt.Sprintf("varnish-gateway-chaperone-%s-%s", gw.Namespace, gw.Name),
+Labels: map[string]string{
+"gateway.networking.k8s.io/gateway-name": gw.Name,
+},
+},
+RoleRef: rbacv1.RoleRef{
+APIGroup: "rbac.authorization.k8s.io",
+Kind:     "ClusterRole",
+Name:     "varnish-gateway-chaperone",
+},
+Subjects: []rbacv1.Subject{
+{
+Kind:      "ServiceAccount",
+Name:      fmt.Sprintf("%s-chaperone", gw.Name),
+Namespace: gw.Namespace,
+},
+},
+}
+return r.Create(ctx, crb)
 }
 ```
 
@@ -316,6 +230,7 @@ func (r *GatewayReconciler) createChaperoneCRB(ctx context.Context, gw *gatewayv
 Implement spec-defined conflict resolution for overlapping routes (e.g., two HTTPRoutes claiming the same hostname):
 
 **Precedence Rules** (from [GEP-713](https://gateway-api.sigs.k8s.io/geps/gep-713/)):
+
 1. **Oldest** resource (by `CreationTimestamp`) wins
 2. If still tied, **Alphabetical** order (by `Namespace/Name`) wins
 
@@ -359,32 +274,40 @@ Use Policy Attachment instead of GatewayClass-specific fields for Varnish config
 - Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency - Complete
 - Future: Add varnishlog-json support when available
 - Future: Create VarnishLoggingPolicy CRD using Gateway API policy attachment pattern
-  - Policy targets Gateway via `targetRef`, overrides class defaults when present
-  - Enables per-gateway logging config (e.g., verbose for staging, minimal for prod)
+    - Policy targets Gateway via `targetRef`, overrides class defaults when present
+    - Enables per-gateway logging config (e.g., verbose for staging, minimal for prod)
 
 ## Development Workflow
 
 ### CRD Generation
 
-**Problem**: Currently maintaining CRD schema manually in `deploy/00-prereqs.yaml`, which can drift from Go types in `api/v1alpha1/`.
+**Problem**: Currently maintaining CRD schema manually in `deploy/00-prereqs.yaml`, which can drift from Go types in
+`api/v1alpha1/`.
 
 **Solution**: Set up controller-gen workflow:
+
 1. Add `make manifests` target to regenerate CRDs from Go types
 2. Auto-copy generated CRD into `deploy/00-prereqs.yaml` (preserving namespace header)
 3. Make Go types the source of truth for schema
 4. Run `make manifests` before commits that change CRD types
 
 **Benefits**:
+
 - Prevents schema drift
 - Kubebuilder markers (validation, defaults) automatically applied
 - Less error-prone than manual YAML editing
 
 ## Future Enhancements
 
-- **HTTPRoute data-plane readiness signal**: Currently `Accepted=True` is set by the operator immediately, but the route isn't active until chaperone reloads ghost. Consider having chaperone set a custom `Programmed` condition on HTTPRoute after successful ghost reload. Note: Gateway API spec only defines `Programmed` on Gateway/Listener, not HTTPRoute — this would be a custom condition. Requires adding route identity (name/namespace) to routing.json so chaperone can trace back to HTTPRoute objects.
+- **HTTPRoute data-plane readiness signal**: Currently `Accepted=True` is set by the operator immediately, but the route
+  isn't active until chaperone reloads ghost. Consider having chaperone set a custom `Programmed` condition on HTTPRoute
+  after successful ghost reload. Note: Gateway API spec only defines `Programmed` on Gateway/Listener, not HTTPRoute —
+  this would be a custom condition. Requires adding route identity (name/namespace) to routing.json so chaperone can
+  trace back to HTTPRoute objects.
 
 ## Open Questions
 
 - Config size limits: ghost.json in ConfigMap has 1MB limit (consider using multiple ConfigMaps or custom storage)
 - Reload rate limiting: Add debouncing for rapid HTTPRoute changes?
-- Cross-namespace backend discovery: When ReferenceGrant support is added, chaperone will need cluster-wide EndpointSlice watch permissions
+- Cross-namespace backend discovery: When ReferenceGrant support is added, chaperone will need cluster-wide
+  EndpointSlice watch permissions

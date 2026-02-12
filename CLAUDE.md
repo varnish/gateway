@@ -17,6 +17,10 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 
 ## Progress
 
+### Phase 6 Complete
+
+Client-side TLS termination is fully implemented. The operator extracts TLS certificates from Gateway listener `certificateRefs`, builds a combined PEM bundle Secret, and configures the Deployment with HTTPS listen address, volume mount, and container port. The chaperone loads certs via `tls.cert.load`/`tls.cert.commit` on startup and watches the cert directory with fsnotify for hot-reload on cert rotation. Works with cert-manager and Let's Encrypt. See TODO.md for known limitations.
+
 ### Phase 3 Complete
 
 Advanced request matching (method, header, query parameter) is now fully implemented across all components.
