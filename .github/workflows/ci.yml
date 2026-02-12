@@ -68,7 +68,7 @@ jobs:
       - name: Set up Rust
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 --component clippy
-          echo "/root/.cargo/bin" >> $GITHUB_PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Run clippy (warnings as errors)
         run: cd ghost && cargo clippy --release -- -D warnings
