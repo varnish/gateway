@@ -434,17 +434,6 @@ func run() error {
 		}
 		slog.Info("initial VCL loaded")
 
-		// Step 2.5: Load TLS certificates (if TLS enabled)
-		if tlsReloader != nil {
-			slog.Debug("loading TLS certificates", "dir", cfg.TLSCertDir)
-			if err := tlsReloader.LoadAll(); err != nil {
-				slog.Error("initial TLS cert load failed", "error", err)
-				errCh <- fmt.Errorf("initial TLS cert load: %w", err)
-				return
-			}
-			slog.Info("TLS certificates loaded")
-		}
-
 		// Step 3: Start the child process
 		slog.Debug("starting Varnish child process")
 		if _, err := vadm.Start(); err != nil {
@@ -456,9 +445,21 @@ func run() error {
 		// Step 4: Wait for child to signal readiness
 		select {
 		case <-readyCh:
-			// Varnish is ready, but we still need to wait for ghost to load backends
+			// Varnish child is running
 		case <-ctx.Done():
 			return
+		}
+
+		// Step 4.5: Load TLS certificates (if TLS enabled)
+		// Must happen after child starts — tls.cert.load is a child-level command
+		if tlsReloader != nil {
+			slog.Debug("loading TLS certificates", "dir", cfg.TLSCertDir)
+			if err := tlsReloader.LoadAll(); err != nil {
+				slog.Error("initial TLS cert load failed", "error", err)
+				errCh <- fmt.Errorf("initial TLS cert load: %w", err)
+				return
+			}
+			slog.Info("TLS certificates loaded")
 		}
 
 		// Step 5: Wait for ghost watcher to complete first backend reload
