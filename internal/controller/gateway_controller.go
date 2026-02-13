@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/status"
@@ -315,8 +316,9 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *ga
 			Kind:       "Gateway",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      gateway.Name,
-			Namespace: gateway.Namespace,
+			Name:       gateway.Name,
+			Namespace:  gateway.Namespace,
+			Generation: gateway.Generation,
 		},
 	}
 
@@ -338,7 +340,7 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *ga
 	}
 
 	// Set listener statuses (conditions and SupportedKinds only, not AttachedRoutes)
-	r.setListenerStatusesForPatch(patch, gateway)
+	r.setListenerStatusesForPatch(ctx, patch, gateway)
 
 	// Apply the patch
 	if err := r.Status().Patch(ctx, patch, client.Apply,
@@ -375,7 +377,7 @@ func (r *GatewayReconciler) setConditions(gateway *gatewayv1.Gateway, success bo
 // setListenerStatusesForPatch sets listener statuses for SSA patch.
 // Only sets fields owned by Gateway controller (conditions, SupportedKinds).
 // Does NOT set AttachedRoutes (owned by HTTPRoute controller).
-func (r *GatewayReconciler) setListenerStatusesForPatch(patch *gatewayv1.Gateway, original *gatewayv1.Gateway) {
+func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, patch *gatewayv1.Gateway, original *gatewayv1.Gateway) {
 	// Build map of existing listener statuses to preserve condition times
 	existingStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
 	for _, ls := range original.Status.Listeners {
@@ -422,7 +424,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(patch *gatewayv1.Gateway
 
 		// Add ResolvedRefs condition for HTTPS listeners
 		if listener.Protocol == gatewayv1.HTTPSProtocolType {
-			resolvedRefs := r.validateListenerTLSRefs(original, &listener)
+			resolvedRefs := r.validateListenerTLSRefs(ctx, original, &listener)
 			conditions = append(conditions, resolvedRefs)
 		}
 
@@ -442,7 +444,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(patch *gatewayv1.Gateway
 
 // validateListenerTLSRefs validates TLS certificate references for an HTTPS listener.
 // Returns a ResolvedRefs condition reflecting the validation result.
-func (r *GatewayReconciler) validateListenerTLSRefs(gateway *gatewayv1.Gateway, listener *gatewayv1.Listener) metav1.Condition {
+func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway *gatewayv1.Gateway, listener *gatewayv1.Listener) metav1.Condition {
 	now := metav1.Now()
 
 	if listener.TLS == nil || listener.TLS.Mode == nil || *listener.TLS.Mode != gatewayv1.TLSModeTerminate {
@@ -468,15 +470,40 @@ func (r *GatewayReconciler) validateListenerTLSRefs(gateway *gatewayv1.Gateway, 
 	}
 
 	for _, certRef := range listener.TLS.CertificateRefs {
-		// Check for cross-namespace refs
+		// Check for cross-namespace refs — require ReferenceGrant
 		if certRef.Namespace != nil && string(*certRef.Namespace) != gateway.Namespace {
-			return metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: now,
-				Reason:             string(gatewayv1.ListenerReasonRefNotPermitted),
-				Message:            fmt.Sprintf("Cross-namespace certificateRef %s/%s not supported", string(*certRef.Namespace), string(certRef.Name)),
+			allowed, err := IsReferenceAllowed(ctx, r.Client, CrossNamespaceRef{
+				FromGroup:     "gateway.networking.k8s.io",
+				FromKind:      "Gateway",
+				FromNamespace: gateway.Namespace,
+				ToGroup:       "",
+				ToKind:        "Secret",
+				ToNamespace:   string(*certRef.Namespace),
+				ToName:        string(certRef.Name),
+			})
+			if err != nil {
+				r.Logger.Error("failed to check ReferenceGrant",
+					"secretNamespace", string(*certRef.Namespace),
+					"secretName", string(certRef.Name),
+					"error", err)
+				return metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: now,
+					Reason:             string(gatewayv1.ListenerReasonRefNotPermitted),
+					Message:            fmt.Sprintf("Failed to validate cross-namespace certificateRef %s/%s: %v", string(*certRef.Namespace), string(certRef.Name), err),
+				}
+			}
+			if !allowed {
+				return metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: now,
+					Reason:             string(gatewayv1.ListenerReasonRefNotPermitted),
+					Message:            fmt.Sprintf("Cross-namespace certificateRef %s/%s not allowed by any ReferenceGrant", string(*certRef.Namespace), string(certRef.Name)),
+				}
 			}
 		}
 
@@ -728,15 +755,6 @@ func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gat
 		}
 
 		for _, certRef := range listener.TLS.CertificateRefs {
-			// Skip cross-namespace refs (not supported yet)
-			if certRef.Namespace != nil && string(*certRef.Namespace) != gateway.Namespace {
-				r.Logger.Warn("cross-namespace TLS certificateRef not supported, skipping",
-					"secretNamespace", string(*certRef.Namespace),
-					"secretName", string(certRef.Name),
-					"gatewayNamespace", gateway.Namespace)
-				continue
-			}
-
 			// Only support core/v1 Secrets
 			if certRef.Group != nil && *certRef.Group != "" {
 				continue
@@ -746,19 +764,57 @@ func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gat
 			}
 
 			secretName := string(certRef.Name)
+			secretNamespace := gateway.Namespace
+			if certRef.Namespace != nil && string(*certRef.Namespace) != "" {
+				secretNamespace = string(*certRef.Namespace)
+			}
+
+			// For cross-namespace refs, verify ReferenceGrant allows access
+			if secretNamespace != gateway.Namespace {
+				allowed, err := IsReferenceAllowed(ctx, r.Client, CrossNamespaceRef{
+					FromGroup:     "gateway.networking.k8s.io",
+					FromKind:      "Gateway",
+					FromNamespace: gateway.Namespace,
+					ToGroup:       "",
+					ToKind:        "Secret",
+					ToNamespace:   secretNamespace,
+					ToName:        secretName,
+				})
+				if err != nil {
+					r.Logger.Error("failed to check ReferenceGrant for TLS Secret",
+						"secretNamespace", secretNamespace,
+						"secretName", secretName,
+						"error", err)
+					continue
+				}
+				if !allowed {
+					r.Logger.Warn("cross-namespace TLS certificateRef not allowed by ReferenceGrant, skipping",
+						"secretNamespace", secretNamespace,
+						"secretName", secretName,
+						"gatewayNamespace", gateway.Namespace)
+					continue
+				}
+			}
+
+			// Use namespace-qualified PEM key for cross-namespace secrets to avoid collisions
+			pemKey := secretName + ".pem"
+			if secretNamespace != gateway.Namespace {
+				pemKey = secretNamespace + "-" + secretName + ".pem"
+			}
+
 			// Avoid duplicates
-			if _, exists := certData[secretName+".pem"]; exists {
+			if _, exists := certData[pemKey]; exists {
 				continue
 			}
 
 			var secret corev1.Secret
 			if err := r.Get(ctx, types.NamespacedName{
 				Name:      secretName,
-				Namespace: gateway.Namespace,
+				Namespace: secretNamespace,
 			}, &secret); err != nil {
 				if apierrors.IsNotFound(err) {
 					r.Logger.Warn("TLS Secret not found",
-						"secret", secretName, "namespace", gateway.Namespace)
+						"secret", secretName, "namespace", secretNamespace)
 				} else {
 					r.Logger.Error("failed to get TLS Secret",
 						"secret", secretName, "error", err)
@@ -789,7 +845,7 @@ func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gat
 				combined = append(combined, '\n')
 			}
 			combined = append(combined, key...)
-			certData[secretName+".pem"] = combined
+			certData[pemKey] = combined
 		}
 	}
 
@@ -959,9 +1015,9 @@ func (r *GatewayReconciler) enqueueGatewaysForTLSSecret() handler.EventHandler {
 			return nil
 		}
 
-		// Find all Gateways in this namespace that reference this Secret
+		// Find all Gateways that reference this Secret (including cross-namespace)
 		var gateways gatewayv1.GatewayList
-		if err := r.List(ctx, &gateways, client.InNamespace(secret.Namespace)); err != nil {
+		if err := r.List(ctx, &gateways); err != nil {
 			r.Logger.Error("failed to list Gateways", "error", err)
 			return nil
 		}
@@ -971,7 +1027,7 @@ func (r *GatewayReconciler) enqueueGatewaysForTLSSecret() handler.EventHandler {
 			if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
 				continue
 			}
-			if r.gatewayReferencesSecret(&gw, secret.Name) {
+			if r.gatewayReferencesSecret(&gw, secret.Name, secret.Namespace) {
 				requests = append(requests, ctrl.Request{
 					NamespacedName: types.NamespacedName{
 						Name:      gw.Name,
@@ -992,18 +1048,107 @@ func (r *GatewayReconciler) enqueueGatewaysForTLSSecret() handler.EventHandler {
 }
 
 // gatewayReferencesSecret checks if a Gateway references the named Secret
-// in any of its listener TLS certificateRefs.
-func (r *GatewayReconciler) gatewayReferencesSecret(gateway *gatewayv1.Gateway, secretName string) bool {
+// in any of its listener TLS certificateRefs (same-namespace or cross-namespace).
+func (r *GatewayReconciler) gatewayReferencesSecret(gateway *gatewayv1.Gateway, secretName, secretNamespace string) bool {
 	for _, listener := range gateway.Spec.Listeners {
 		if listener.TLS == nil {
 			continue
 		}
 		for _, certRef := range listener.TLS.CertificateRefs {
-			// Only match same-namespace refs (cross-namespace not supported)
-			if certRef.Namespace != nil && string(*certRef.Namespace) != gateway.Namespace {
+			if string(certRef.Name) != secretName {
 				continue
 			}
-			if string(certRef.Name) == secretName {
+			// Determine the effective namespace of the ref
+			refNS := gateway.Namespace
+			if certRef.Namespace != nil && string(*certRef.Namespace) != "" {
+				refNS = string(*certRef.Namespace)
+			}
+			if refNS == secretNamespace {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// enqueueGatewaysForReferenceGrant returns an EventHandler that enqueues
+// Gateways when a ReferenceGrant changes, if the grant could affect
+// cross-namespace TLS certificate references.
+func (r *GatewayReconciler) enqueueGatewaysForReferenceGrant() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+		grant, ok := obj.(*gatewayv1beta1.ReferenceGrant)
+		if !ok {
+			return nil
+		}
+
+		// Check if any To entry targets Secrets (core group, kind Secret)
+		hasSecretTo := false
+		for _, to := range grant.Spec.To {
+			if (string(to.Group) == "" || string(to.Group) == "core") && string(to.Kind) == "Secret" {
+				hasSecretTo = true
+				break
+			}
+		}
+		if !hasSecretTo {
+			return nil
+		}
+
+		// Collect namespaces from From entries that allow Gateways
+		fromNamespaces := make(map[string]bool)
+		for _, from := range grant.Spec.From {
+			if string(from.Group) == "gateway.networking.k8s.io" && string(from.Kind) == "Gateway" {
+				fromNamespaces[string(from.Namespace)] = true
+			}
+		}
+		if len(fromNamespaces) == 0 {
+			return nil
+		}
+
+		// Find Gateways in those namespaces with cross-namespace cert refs
+		// pointing to the grant's namespace
+		var requests []ctrl.Request
+		for ns := range fromNamespaces {
+			var gateways gatewayv1.GatewayList
+			if err := r.List(ctx, &gateways, client.InNamespace(ns)); err != nil {
+				r.Logger.Error("failed to list Gateways for ReferenceGrant", "namespace", ns, "error", err)
+				continue
+			}
+			for _, gw := range gateways.Items {
+				if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+					continue
+				}
+				if gatewayHasCrossNSCertRefTo(&gw, grant.Namespace) {
+					requests = append(requests, ctrl.Request{
+						NamespacedName: types.NamespacedName{
+							Name:      gw.Name,
+							Namespace: gw.Namespace,
+						},
+					})
+				}
+			}
+		}
+
+		if len(requests) > 0 {
+			r.Logger.Info("ReferenceGrant changed, enqueuing Gateways for reconciliation",
+				"grant", fmt.Sprintf("%s/%s", grant.Namespace, grant.Name),
+				"gateways", len(requests))
+		}
+
+		return requests
+	})
+}
+
+// gatewayHasCrossNSCertRefTo checks if a Gateway has any listener with a
+// cross-namespace certificateRef pointing to the given target namespace.
+func gatewayHasCrossNSCertRefTo(gateway *gatewayv1.Gateway, targetNamespace string) bool {
+	for _, listener := range gateway.Spec.Listeners {
+		if listener.TLS == nil {
+			continue
+		}
+		for _, certRef := range listener.TLS.CertificateRefs {
+			if certRef.Namespace != nil &&
+				string(*certRef.Namespace) != gateway.Namespace &&
+				string(*certRef.Namespace) == targetNamespace {
 				return true
 			}
 		}
@@ -1033,6 +1178,10 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Secret{},
 			r.enqueueGatewaysForTLSSecret(),
+		).
+		Watches(
+			&gatewayv1beta1.ReferenceGrant{},
+			r.enqueueGatewaysForReferenceGrant(),
 		).
 		Complete(r)
 }

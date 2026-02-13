@@ -22,6 +22,9 @@ rules:
     resources: ["gatewayclasses"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gatewayclasses/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["gateway.networking.k8s.io"]
@@ -33,6 +36,9 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["httproutes/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["referencegrants"]
+    verbs: ["get", "list", "watch"]
   # Our custom resource
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["gatewayclassparameters"]
@@ -110,14 +116,14 @@ spec:
       serviceAccountName: varnish-gateway-operator
       containers:
         - name: operator
-          image: ghcr.io/varnish/gateway-operator:v0.8.3
+          image: ghcr.io/varnish/gateway-operator:v0.8.4
           args:
             - --leader-elect=true
           env:
             - name: GATEWAY_CLASS_NAME
               value: "varnish"
             - name: GATEWAY_IMAGE
-              value: "ghcr.io/varnish/gateway-chaperone:v0.8.3"
+              value: "ghcr.io/varnish/gateway-chaperone:v0.8.4"
           ports:
             - name: metrics
               containerPort: 8080
