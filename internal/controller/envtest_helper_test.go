@@ -13,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
@@ -32,6 +33,9 @@ func SetupEnvtest() (*EnvtestEnvironment, error) {
 		return nil, err
 	}
 	if err := gatewayv1.Install(scheme); err != nil {
+		return nil, err
+	}
+	if err := gatewayv1beta1.Install(scheme); err != nil {
 		return nil, err
 	}
 	if err := gatewayparamsv1alpha1.AddToScheme(scheme); err != nil {

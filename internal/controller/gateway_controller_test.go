@@ -14,6 +14,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
@@ -22,6 +23,7 @@ func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = gatewayv1.Install(scheme)
+	_ = gatewayv1beta1.Install(scheme)
 	_ = gatewayparamsv1alpha1.AddToScheme(scheme)
 	return scheme
 }
@@ -323,6 +325,228 @@ func TestReconcile_SkipsDifferentGatewayClass(t *testing.T) {
 // TestReconcile_CreatesResources was removed and replaced with TestReconcile_CreatesResources_Envtest
 // in gateway_controller_envtest_test.go. The fake client doesn't support SSA properly, so we use
 // envtest with a real API server instead. See ENVTEST-IMPLEMENTATION.md for details.
+
+func TestValidateListenerTLSRefs_CrossNamespace_NoReferenceGrant(t *testing.T) {
+	scheme := newTestScheme()
+	r := newTestReconciler(scheme)
+
+	tlsMode := gatewayv1.TLSModeTerminate
+	certNS := gatewayv1.Namespace("cert-ns")
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gw",
+			Namespace: "default",
+			Generation: 1,
+		},
+	}
+
+	listener := &gatewayv1.Listener{
+		Name:     "https",
+		Port:     443,
+		Protocol: gatewayv1.HTTPSProtocolType,
+		TLS: &gatewayv1.GatewayTLSConfig{
+			Mode: &tlsMode,
+			CertificateRefs: []gatewayv1.SecretObjectReference{
+				{
+					Name:      "my-cert",
+					Namespace: &certNS,
+				},
+			},
+		},
+	}
+
+	cond := r.validateListenerTLSRefs(context.Background(), gateway, listener)
+
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("expected ConditionFalse, got %s", cond.Status)
+	}
+	if cond.Reason != string(gatewayv1.ListenerReasonRefNotPermitted) {
+		t.Errorf("expected reason RefNotPermitted, got %s", cond.Reason)
+	}
+}
+
+func TestValidateListenerTLSRefs_CrossNamespace_WithReferenceGrant(t *testing.T) {
+	scheme := newTestScheme()
+
+	grant := &gatewayv1beta1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "allow-gw-secrets",
+			Namespace: "cert-ns",
+		},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1beta1.ReferenceGrantFrom{
+				{
+					Group:     "gateway.networking.k8s.io",
+					Kind:      "Gateway",
+					Namespace: "default",
+				},
+			},
+			To: []gatewayv1beta1.ReferenceGrantTo{
+				{
+					Group: "",
+					Kind:  "Secret",
+				},
+			},
+		},
+	}
+
+	r := newTestReconciler(scheme, grant)
+
+	tlsMode := gatewayv1.TLSModeTerminate
+	certNS := gatewayv1.Namespace("cert-ns")
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gw",
+			Namespace: "default",
+			Generation: 1,
+		},
+	}
+
+	listener := &gatewayv1.Listener{
+		Name:     "https",
+		Port:     443,
+		Protocol: gatewayv1.HTTPSProtocolType,
+		TLS: &gatewayv1.GatewayTLSConfig{
+			Mode: &tlsMode,
+			CertificateRefs: []gatewayv1.SecretObjectReference{
+				{
+					Name:      "my-cert",
+					Namespace: &certNS,
+				},
+			},
+		},
+	}
+
+	cond := r.validateListenerTLSRefs(context.Background(), gateway, listener)
+
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("expected ConditionTrue, got %s", cond.Status)
+	}
+	if cond.Reason != string(gatewayv1.ListenerReasonResolvedRefs) {
+		t.Errorf("expected reason ResolvedRefs, got %s", cond.Reason)
+	}
+}
+
+func TestValidateListenerTLSRefs_SameNamespace(t *testing.T) {
+	scheme := newTestScheme()
+	r := newTestReconciler(scheme)
+
+	tlsMode := gatewayv1.TLSModeTerminate
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gw",
+			Namespace: "default",
+			Generation: 1,
+		},
+	}
+
+	listener := &gatewayv1.Listener{
+		Name:     "https",
+		Port:     443,
+		Protocol: gatewayv1.HTTPSProtocolType,
+		TLS: &gatewayv1.GatewayTLSConfig{
+			Mode: &tlsMode,
+			CertificateRefs: []gatewayv1.SecretObjectReference{
+				{
+					Name: "my-cert",
+				},
+			},
+		},
+	}
+
+	cond := r.validateListenerTLSRefs(context.Background(), gateway, listener)
+
+	if cond.Status != metav1.ConditionTrue {
+		t.Errorf("expected ConditionTrue for same-namespace ref, got %s", cond.Status)
+	}
+}
+
+func TestGatewayReferencesSecret_CrossNamespace(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{GatewayClassName: "varnish"},
+	}
+
+	certNS := gatewayv1.Namespace("cert-ns")
+	tlsMode := gatewayv1.TLSModeTerminate
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gw",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: gatewayv1.HTTPSProtocolType,
+					TLS: &gatewayv1.GatewayTLSConfig{
+						Mode: &tlsMode,
+						CertificateRefs: []gatewayv1.SecretObjectReference{
+							{
+								Name:      "my-cert",
+								Namespace: &certNS,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Should match cross-namespace ref
+	if !r.gatewayReferencesSecret(gateway, "my-cert", "cert-ns") {
+		t.Error("expected gateway to reference cross-namespace secret")
+	}
+
+	// Should not match wrong namespace
+	if r.gatewayReferencesSecret(gateway, "my-cert", "other-ns") {
+		t.Error("expected gateway NOT to reference secret in wrong namespace")
+	}
+
+	// Should not match wrong name
+	if r.gatewayReferencesSecret(gateway, "other-cert", "cert-ns") {
+		t.Error("expected gateway NOT to reference secret with wrong name")
+	}
+}
+
+func TestGatewayHasCrossNSCertRefTo(t *testing.T) {
+	certNS := gatewayv1.Namespace("cert-ns")
+	tlsMode := gatewayv1.TLSModeTerminate
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: gatewayv1.HTTPSProtocolType,
+					TLS: &gatewayv1.GatewayTLSConfig{
+						Mode: &tlsMode,
+						CertificateRefs: []gatewayv1.SecretObjectReference{
+							{Name: "cert", Namespace: &certNS},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if !gatewayHasCrossNSCertRefTo(gateway, "cert-ns") {
+		t.Error("expected true for matching target namespace")
+	}
+	if gatewayHasCrossNSCertRefTo(gateway, "other-ns") {
+		t.Error("expected false for non-matching target namespace")
+	}
+	if gatewayHasCrossNSCertRefTo(gateway, "default") {
+		t.Error("expected false for same namespace as gateway (not cross-namespace)")
+	}
+}
 
 func TestReconcile_NotFoundReturnsNoError(t *testing.T) {
 	scheme := newTestScheme()

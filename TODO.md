@@ -10,7 +10,9 @@
 - **~~New cert discovery requires pod restart~~**: Resolved. The file watcher now uses a full discard/load/commit
   cycle, so adding or removing `certificateRef` entries is handled without pod restart. The infra hash only includes
   a `HasTLS` flag (not individual cert refs), so only adding/removing an HTTPS listener itself triggers a restart.
-- **No cross-namespace Secret support**: certificateRefs must be in the same namespace as the Gateway.
+- **~~No cross-namespace Secret support~~**: Resolved. Cross-namespace certificateRefs are now supported
+  via ReferenceGrant validation. A ReferenceGrant in the Secret's namespace must explicitly allow the
+  Gateway's namespace to reference it.
 
 ### Not Yet Implemented
 
@@ -236,13 +238,14 @@ Implement spec-defined conflict resolution for overlapping routes (e.g., two HTT
 
 **Critical**: Follow the spec exactly to ensure conformance.
 
-### ReferenceGrant Validation
+### ReferenceGrant Validation (Complete)
 
-Implement the ReferenceGrant pattern for cross-namespace Secret access (TLS certificates):
+Cross-namespace Secret references for TLS certificates are validated via ReferenceGrant:
 
 - Gateway in Namespace A referencing Secret in Namespace B requires ReferenceGrant in Namespace B
-- Prevents "Secret data exfiltration" where users steal certificates from namespaces they don't own
-- Required for Gateway API conformance
+- Operator watches ReferenceGrant changes and re-reconciles affected Gateways
+- Listener status reports `ResolvedRefs=False` with reason `RefNotPermitted` when no grant exists
+- Future: extend ReferenceGrant validation to cross-namespace HTTPRoute backends
 
 ### Conformance Testing
 
