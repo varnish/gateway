@@ -8,6 +8,7 @@ VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 .PHONY: help test build build-linux docker clean vendor act
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
 .PHONY: helm-lint helm-template helm-package helm-push helm-install helm-upgrade helm-uninstall
+.PHONY: test-conformance test-conformance-report
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -35,6 +36,10 @@ help:
 	@echo ""
 	@echo "CI/Testing:"
 	@echo "  make act              Run CI workflow locally with act (requires act tool)"
+	@echo ""
+	@echo "Conformance:"
+	@echo "  make test-conformance         Run Gateway API conformance tests (requires live cluster)"
+	@echo "  make test-conformance-report  Run conformance tests and generate report"
 	@echo ""
 	@echo "Deploy:"
 	@echo "  make deploy-update    Update deploy/ manifests with current version"
@@ -166,6 +171,21 @@ docker-varnish:
 # Requires: act tool installed (go install github.com/nektos/act@latest)
 act:
 	act -W .github/workflows/ci.yml push -P ubuntu-latest=catthehacker/ubuntu:act-latest
+
+# ============================================================================
+# Gateway API Conformance Tests (requires live cluster with operator deployed)
+# ============================================================================
+
+test-conformance:
+	go test -tags=conformance -v -timeout 30m -count=1 ./conformance/ \
+		-args --gateway-class=varnish
+
+test-conformance-report:
+	@mkdir -p dist
+	CONFORMANCE_REPORT_PATH=dist/conformance-report.yaml \
+	GATEWAY_VERSION=$(VERSION) \
+	go test -tags=conformance -v -timeout 30m -count=1 ./conformance/ \
+		-args --gateway-class=varnish
 
 # ============================================================================
 # Deploy

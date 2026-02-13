@@ -73,6 +73,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup GatewayClass controller
+	if err := (&controller.GatewayClassReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: cfg,
+		Logger: logger.With("controller", "GatewayClass"),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create controller", "controller", "GatewayClass", "error", err)
+		os.Exit(1)
+	}
+
 	// Setup Gateway controller
 	if err := (&controller.GatewayReconciler{
 		Client: mgr.GetClient(),

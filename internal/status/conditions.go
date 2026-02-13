@@ -5,6 +5,25 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
+// SetGatewayClassAccepted sets the Accepted condition on a GatewayClass.
+func SetGatewayClassAccepted(gc *gatewayv1.GatewayClass, accepted bool, reason, message string) {
+	status := metav1.ConditionTrue
+	if !accepted {
+		status = metav1.ConditionFalse
+	}
+
+	condition := metav1.Condition{
+		Type:               string(gatewayv1.GatewayClassConditionStatusAccepted),
+		Status:             status,
+		ObservedGeneration: gc.Generation,
+		LastTransitionTime: metav1.Now(),
+		Reason:             reason,
+		Message:            message,
+	}
+
+	setCondition(&gc.Status.Conditions, condition)
+}
+
 // SetGatewayAccepted sets the Accepted condition on a Gateway.
 func SetGatewayAccepted(gateway *gatewayv1.Gateway, accepted bool, reason, message string) {
 	status := metav1.ConditionTrue
