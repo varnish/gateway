@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
@@ -203,4 +205,136 @@ func TestReconcile_CreatesResources_Envtest(t *testing.T) {
 	_ = testEnv.Client.Delete(ctx, &configMap)
 	_ = testEnv.Client.Delete(ctx, &secret)
 	_ = testEnv.Client.Delete(ctx, &sa)
+}
+
+// TestHTTPSListener_MissingSecret_ProgrammedFalse tests that an HTTPS listener
+// referencing a non-existent Secret gets Programmed: False and ResolvedRefs: False.
+func TestHTTPSListener_MissingSecret_ProgrammedFalse(t *testing.T) {
+	ctx := context.Background()
+
+	// Create GatewayClass
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "varnish-tls-test",
+		},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: "varnish.io/gateway-controller",
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gatewayClass); err != nil {
+		t.Fatalf("failed to create gatewayclass: %v", err)
+	}
+	defer func() {
+		_ = testEnv.Client.Delete(ctx, gatewayClass)
+	}()
+
+	// Create Gateway with HTTPS listener referencing non-existent Secret
+	tlsMode := gatewayv1.TLSModeTerminate
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gw-tls-missing",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish-tls-test",
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: gatewayv1.HTTPSProtocolType,
+					TLS: &gatewayv1.GatewayTLSConfig{
+						Mode: &tlsMode,
+						CertificateRefs: []gatewayv1.SecretObjectReference{
+							{Name: "nonexistent-secret"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gateway); err != nil {
+		t.Fatalf("failed to create gateway: %v", err)
+	}
+	defer func() {
+		_ = testEnv.Client.Delete(ctx, gateway)
+	}()
+
+	// Create reconciler using the test GatewayClass name
+	r := &GatewayReconciler{
+		Client: testEnv.Client,
+		Scheme: testEnv.Scheme,
+		Config: Config{
+			GatewayClassName: "varnish-tls-test",
+			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+		},
+		Logger: slog.Default(),
+	}
+
+	// First reconcile adds finalizer
+	_, err := r.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-gw-tls-missing", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("first reconcile failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// Second reconcile creates resources and sets status
+	_, err = r.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-gw-tls-missing", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("second reconcile failed: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Fetch the updated gateway
+	var updatedGateway gatewayv1.Gateway
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: "test-gw-tls-missing", Namespace: "default"}, &updatedGateway); err != nil {
+		t.Fatalf("failed to get updated gateway: %v", err)
+	}
+
+	if len(updatedGateway.Status.Listeners) == 0 {
+		t.Fatal("expected listener statuses to be set")
+	}
+
+	listener := updatedGateway.Status.Listeners[0]
+
+	// Check ResolvedRefs: False
+	foundResolvedRefs := false
+	for _, c := range listener.Conditions {
+		if c.Type == string(gatewayv1.ListenerConditionResolvedRefs) {
+			foundResolvedRefs = true
+			if c.Status != metav1.ConditionFalse {
+				t.Errorf("expected ResolvedRefs=False, got %s (reason: %s)", c.Status, c.Reason)
+			}
+		}
+	}
+	if !foundResolvedRefs {
+		t.Error("expected ResolvedRefs condition on HTTPS listener")
+	}
+
+	// Check Programmed: False
+	foundProgrammed := false
+	for _, c := range listener.Conditions {
+		if c.Type == string(gatewayv1.ListenerConditionProgrammed) {
+			foundProgrammed = true
+			if c.Status != metav1.ConditionFalse {
+				t.Errorf("expected Programmed=False when ResolvedRefs=False, got %s (reason: %s)", c.Status, c.Reason)
+			}
+			if c.Reason != string(gatewayv1.ListenerReasonInvalid) {
+				t.Errorf("expected Programmed reason=Invalid, got %s", c.Reason)
+			}
+		}
+	}
+	if !foundProgrammed {
+		t.Error("expected Programmed condition on HTTPS listener")
+	}
+
+	// Cleanup
+	_ = testEnv.Client.DeleteAllOf(ctx, &appsv1.Deployment{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Service{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ConfigMap{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ServiceAccount{}, client.InNamespace("default"))
 }

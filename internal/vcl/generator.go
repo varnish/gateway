@@ -102,10 +102,10 @@ func SanitizeServiceName(name string) string {
 //   - RegularExpression: 5000
 //   - No path match: 0
 //
-// Additional bonuses (never override path specificity):
-//   - Header matches: +200 per header (max 16)
-//   - Query param matches: +100 per param (max 16)
-//   - Method specified: +50
+// Additional bonuses (ordered per Gateway API spec precedence):
+//   - Method specified: +5000 (must outweigh max headers+query)
+//   - Header matches: +200 per header (max 16 = 3200)
+//   - Query param matches: +100 per param (max 16 = 1600)
 func CalculateRoutePriority(
 	pathMatch *ghost.PathMatch,
 	method *string,
@@ -126,9 +126,9 @@ func CalculateRoutePriority(
 		}
 	}
 
-	// Method specificity (+50)
+	// Method specificity (+5000, must outweigh max headers + query params)
 	if method != nil {
-		priority += 50
+		priority += 5000
 	}
 
 	// Header specificity (200 per header, max 3200)

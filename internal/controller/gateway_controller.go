@@ -407,7 +407,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 				if c.Type == string(gatewayv1.ListenerConditionAccepted) && c.Status == metav1.ConditionTrue {
 					acceptedTime = c.LastTransitionTime
 				}
-				if c.Type == string(gatewayv1.ListenerConditionProgrammed) && c.Status == metav1.ConditionTrue {
+				if c.Type == string(gatewayv1.ListenerConditionProgrammed) {
 					programmedTime = c.LastTransitionTime
 				}
 			}
@@ -472,6 +472,22 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
 				Message:            "References resolved",
 			})
+		}
+
+		// If any ResolvedRefs condition is False, override Programmed to False.
+		// The Gateway API spec requires Programmed: False when refs are unresolved.
+		for _, c := range conditions {
+			if c.Type == string(gatewayv1.ListenerConditionResolvedRefs) && c.Status == metav1.ConditionFalse {
+				for i := range conditions {
+					if conditions[i].Type == string(gatewayv1.ListenerConditionProgrammed) {
+						conditions[i].Status = metav1.ConditionFalse
+						conditions[i].Reason = string(gatewayv1.ListenerReasonInvalid)
+						conditions[i].Message = "Listener has unresolved references"
+						break
+					}
+				}
+				break
+			}
 		}
 
 		// Compute AttachedRoutes for this listener

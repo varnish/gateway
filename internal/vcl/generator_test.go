@@ -254,6 +254,45 @@ func TestCalculateRoutePriority(t *testing.T) {
 			}
 		})
 	}
+
+	// Test method vs header precedence (Gateway API spec: method > headers > query params)
+	t.Run("method-only beats header-only", func(t *testing.T) {
+		methodOnly := CalculateRoutePriority(nil, ptr("GET"), nil, nil)
+		headerOnly := CalculateRoutePriority(nil, nil, []ghost.HeaderMatch{{Name: "version", Value: "four", Type: ghost.MatchTypeExact}}, nil)
+		if methodOnly <= headerOnly {
+			t.Errorf("method-only (%d) should beat header-only (%d)", methodOnly, headerOnly)
+		}
+	})
+
+	t.Run("method beats max headers", func(t *testing.T) {
+		methodOnly := CalculateRoutePriority(nil, ptr("PATCH"), nil, nil)
+		// 16 headers is the max
+		headers := make([]ghost.HeaderMatch, 16)
+		for i := range headers {
+			headers[i] = ghost.HeaderMatch{Name: "h", Value: "v", Type: ghost.MatchTypeExact}
+		}
+		maxHeaders := CalculateRoutePriority(nil, nil, headers, nil)
+		if methodOnly <= maxHeaders {
+			t.Errorf("method-only (%d) should beat 16 headers (%d)", methodOnly, maxHeaders)
+		}
+	})
+
+	t.Run("method+header beats header-only", func(t *testing.T) {
+		header := []ghost.HeaderMatch{{Name: "version", Value: "four", Type: ghost.MatchTypeExact}}
+		methodAndHeader := CalculateRoutePriority(nil, ptr("PATCH"), header, nil)
+		headerOnly := CalculateRoutePriority(nil, nil, header, nil)
+		if methodAndHeader <= headerOnly {
+			t.Errorf("method+header (%d) should beat header-only (%d)", methodAndHeader, headerOnly)
+		}
+	})
+
+	t.Run("conformance: method:PATCH beats header:version=four", func(t *testing.T) {
+		methodPriority := CalculateRoutePriority(nil, ptr("PATCH"), nil, nil)
+		headerPriority := CalculateRoutePriority(nil, nil, []ghost.HeaderMatch{{Name: "version", Value: "four", Type: ghost.MatchTypeExact}}, nil)
+		if methodPriority <= headerPriority {
+			t.Errorf("method:PATCH (%d) should beat header:version=four (%d) per Gateway API spec", methodPriority, headerPriority)
+		}
+	})
 }
 
 func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
