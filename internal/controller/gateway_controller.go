@@ -386,9 +386,15 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 		existingStatuses[ls.Name] = ls
 	}
 
-	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(original.Spec.Listeners))
+	// Build set of spec listener names for quick lookup
+	specListenerNames := make(map[gatewayv1.SectionName]bool, len(original.Spec.Listeners))
+	for _, l := range original.Spec.Listeners {
+		specListenerNames[l.Name] = true
+	}
 
-	for i, listener := range original.Spec.Listeners {
+	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, 0, len(original.Spec.Listeners))
+
+	for _, listener := range original.Spec.Listeners {
 		existing, hasExisting := existingStatuses[listener.Name]
 
 		// Preserve existing condition times if status unchanged
@@ -430,7 +436,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			conditions = append(conditions, resolvedRefs)
 		}
 
-		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
+		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
 			Name: listener.Name,
 			SupportedKinds: []gatewayv1.RouteGroupKind{
 				{
@@ -440,7 +446,47 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			},
 			// DO NOT set AttachedRoutes - that's owned by HTTPRoute controller
 			Conditions: conditions,
+		})
+	}
+
+	// Include listeners that exist in the current status but were removed from
+	// the spec. The HTTPRoute controller may still claim fields on these
+	// listeners via SSA. If we omit them, the merged result would lack the
+	// required "conditions" field, causing the API server to reject our patch.
+	// We set conditions here so the merged status remains valid until the
+	// HTTPRoute controller also drops these stale listeners.
+	now := metav1.Now()
+	for _, ls := range original.Status.Listeners {
+		if specListenerNames[ls.Name] {
+			continue // already included above
 		}
+		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
+			Name: ls.Name,
+			SupportedKinds: []gatewayv1.RouteGroupKind{
+				{
+					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
+					Kind:  "HTTPRoute",
+				},
+			},
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(gatewayv1.ListenerConditionAccepted),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: original.Generation,
+					LastTransitionTime: now,
+					Reason:             string(gatewayv1.ListenerReasonAccepted),
+					Message:            "Listener removed from spec",
+				},
+				{
+					Type:               string(gatewayv1.ListenerConditionProgrammed),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: original.Generation,
+					LastTransitionTime: now,
+					Reason:             string(gatewayv1.ListenerReasonInvalid),
+					Message:            "Listener removed from spec",
+				},
+			},
+		})
 	}
 }
 

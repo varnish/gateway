@@ -382,11 +382,12 @@ func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, g
 		},
 	}
 
-	// Build listener statuses with only AttachedRoutes field
-	// We must include SupportedKinds even though Gateway controller owns it,
-	// because it's a required field for validation
-	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Status.Listeners))
-	for i, listener := range gateway.Status.Listeners {
+	// Build listener statuses with only AttachedRoutes field.
+	// Use Spec.Listeners (not Status.Listeners) so that when a listener is
+	// removed from the spec, we stop claiming its fields via SSA. This allows
+	// the removed listener to be cleaned up from the merged status.
+	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
+	for i, listener := range gateway.Spec.Listeners {
 		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
 			Name:           listener.Name,
 			AttachedRoutes: attachedCount,
