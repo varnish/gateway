@@ -136,6 +136,28 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 		return nil
 	}
 
+	// Validate sectionName references an actual listener
+	if parentRef.SectionName != nil {
+		found := false
+		for _, listener := range gateway.Spec.Listeners {
+			if string(listener.Name) == string(*parentRef.SectionName) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.Info("parentRef sectionName does not match any listener",
+				"sectionName", *parentRef.SectionName)
+			status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
+				string(gatewayv1.RouteReasonNoMatchingParent),
+				fmt.Sprintf("No listener named %q on Gateway %s", *parentRef.SectionName, gateway.Name))
+			status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
+				string(gatewayv1.RouteReasonResolvedRefs),
+				"References resolved")
+			return nil
+		}
+	}
+
 	// Check if the route's namespace is allowed by the Gateway's listeners
 	allowed, reason := r.isRouteAllowedByGateway(ctx, route, gateway)
 	if !allowed {
