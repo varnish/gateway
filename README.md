@@ -98,12 +98,20 @@ Two separate reload paths:
 **routing.json** (operator → ConfigMap):
 ```json
 {
-  "version": 1,
+  "version": 2,
   "vhosts": {
     "api.example.com": {
-      "service": "api-service",
-      "namespace": "default",
-      "port": 8080
+      "routes": [
+        {
+          "path_match": {"type": "PathPrefix", "value": "/v2"},
+          "service": "api-v2",
+          "namespace": "default",
+          "port": 8080,
+          "weight": 100,
+          "priority": 10300,
+          "rule_index": 0
+        }
+      ]
     }
   }
 }
@@ -112,12 +120,19 @@ Two separate reload paths:
 **ghost.json** (chaperone → ghost VMOD):
 ```json
 {
-  "version": 1,
+  "version": 2,
   "vhosts": {
     "api.example.com": {
-      "backends": [
-        {"address": "10.0.0.1", "port": 8080, "weight": 100},
-        {"address": "10.0.0.2", "port": 8080, "weight": 100}
+      "routes": [
+        {
+          "path_match": {"type": "PathPrefix", "value": "/v2"},
+          "backends": [
+            {"address": "10.0.0.1", "port": 8080, "weight": 100},
+            {"address": "10.0.0.2", "port": 8080, "weight": 100}
+          ],
+          "priority": 10300,
+          "rule_index": 0
+        }
       ]
     }
   }

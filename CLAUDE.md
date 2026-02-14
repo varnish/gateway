@@ -15,77 +15,39 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 
 - [Configuration Reference](docs/configuration-reference.md) - GatewayClassParameters, varnishd args, defaults
 
-## Progress
+## Current Status
 
-### Phase 6 Complete
+The project passes the Gateway API conformance test suite (`make test-conformance`). See TODO.md for remaining work.
 
-Client-side TLS termination is fully implemented. The operator extracts TLS certificates from Gateway listener `certificateRefs`, builds a combined PEM bundle Secret, and configures the Deployment with HTTPS listen address, volume mount, and container port. The chaperone loads certs via `tls.cert.load`/`tls.cert.commit` on startup and watches the cert directory with fsnotify for hot-reload on cert rotation. Works with cert-manager and Let's Encrypt. See TODO.md for known limitations.
+### Component Overview
 
-### Phase 3 Complete
-
-Advanced request matching (method, header, query parameter) is now fully implemented across all components.
-
-### Phase 1 Complete
-
-All three components (operator, chaperone, ghost) are now at Phase 1 completion.
-
-**Operator** (`cmd/operator/main.go`) - Phase 1 Complete:
+**Operator** (`cmd/operator/main.go`):
 - Gateway controller - creates Deployment, Service, ConfigMap, Secret, ServiceAccount
 - HTTPRoute controller - watches routes, regenerates routing.json on changes
 - Status conditions (Accepted/Programmed) on Gateway and HTTPRoute
 - GatewayClassParameters CRD for user VCL injection and varnishd extra args
-- Single-container deployment model (combined varnish+ghost+chaperone image)
-- VCL generator produces ghost preamble (no complex routing VCL)
-- ConfigMap contains `main.vcl` and `routing.json`
+- Client-side TLS termination with cert-manager support and hot-reload
 
-**Chaperone** (`cmd/chaperone/main.go`) - Phase 1 Complete:
-- Environment variable configuration with defaults
-- Kubernetes client (in-cluster + kubeconfig fallback for local dev)
-- Graceful shutdown on SIGTERM/SIGINT
-- Health endpoint for k8s probes
-- Uses vrun package to start and manage varnishd process
-- Integrates ghost watcher for dynamic backend/routing updates
-- VCL reloader for user VCL hot-reload via varnishadm
-- Combined Docker image (`docker/chaperone.Dockerfile`) includes chaperone + varnish + ghost
+**Chaperone** (`cmd/chaperone/main.go`):
+- Starts and manages varnishd via vrun package
+- Watches routing.json + EndpointSlices, merges into ghost.json
+- Triggers ghost reload via HTTP, VCL reload via varnishadm
+- TLS cert loading and hot-reload via fsnotify
 
-**Ghost package** (`internal/ghost/`) - Phase 1 Complete:
-- `config.go` - Types for ghost.json and routing.json configuration
-- `generator.go` - Merges routing rules (from operator) with EndpointSlices to produce ghost.json
-- `watcher.go` - Watches routing config + EndpointSlices via Kubernetes informers, content-based deduplication for routing.json, regenerates ghost.json, triggers HTTP reload
-
-**Reload package** (`internal/reload/`):
-- `client.go` - HTTP client to trigger ghost VMOD reload via `/.varnish-ghost/reload` endpoint
-
-**VCL package** (`internal/vcl/`):
-- `generator.go` - Generates ghost preamble VCL (imports ghost, initializes router)
-- `merge.go` - Merges generated VCL with user VCL
-- `reloader.go` - Watches main.vcl via Kubernetes informers, content-based deduplication, hot-reloads via varnishadm with garbage collection
-- `types.go` - Backend info types for routing config generation
-
-**Varnishadm package** (`internal/varnishadm/`):
-- Full varnishadm protocol implementation (reverse mode, -M flag)
-- Authentication, VCL commands, parameter commands, TLS cert commands
-
-**Vrun package** (`internal/vrun/`):
-- `process.go` - Manager for varnishd process lifecycle (start, workspace prep, secret generation)
-- `config.go` - Config struct and BuildArgs for constructing varnishd command-line arguments
-- `logwriter.go` - Routes varnishd stdout/stderr through slog
-- Start() is non-blocking; returns ready channel, call Wait() to block until exit
-- VCL not loaded at startup (`-f ""`); load via admin socket after start
-
-**Ghost VMOD** (`ghost/`) - Phase 3 Complete:
-- Rust-based VMOD handling virtual host routing with native backends
-- Hot-reload via `/.varnish-ghost/reload` endpoint
-- Path-based routing with exact, prefix, and regex matching
-- HTTP method matching
-- Header matching (exact and regex)
-- Query parameter matching (exact and regex)
+**Ghost VMOD** (`ghost/`):
+- Rust-based VMOD handling all routing inside Varnish
+- Path matching (exact, prefix, regex), method, header, query parameter matching
 - Priority-based route selection with additive specificity bonuses
+- Hot-reload via `/.varnish-ghost/reload`
 - See `ghost/CLAUDE.md` and `ghost/README.md` for details
 
-### Not Yet Implemented
+### Key Packages
 
-See TODO.md for details.
+- `internal/ghost/` - Config types, ghost.json generator, EndpointSlice watcher
+- `internal/vcl/` - VCL generator, merge, hot-reload via varnishadm
+- `internal/varnishadm/` - Full varnishadm protocol (reverse mode, -M flag)
+- `internal/vrun/` - varnishd process lifecycle management
+- `internal/reload/` - HTTP client for ghost reload endpoint
 
 ## Development Setup
 
@@ -304,17 +266,25 @@ impl VclBackend<NotFoundBody> for NotFoundBackend {
 
 ### routing.json (operator output, stored in ConfigMap)
 
-Generated by operator from HTTPRoutes. Maps hostnames to service names/ports:
+Generated by operator from HTTPRoutes. Maps hostnames to routes with match criteria:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "vhosts": {
     "api.example.com": {
-      "service": "api-service",
-      "namespace": "default",
-      "port": 8080,
-      "weight": 100
+      "routes": [
+        {
+          "hostname": "api.example.com",
+          "path_match": {"type": "PathPrefix", "value": "/v2"},
+          "service": "api-v2",
+          "namespace": "default",
+          "port": 8080,
+          "weight": 100,
+          "priority": 10300,
+          "rule_index": 0
+        }
+      ]
     }
   }
 }
@@ -326,24 +296,21 @@ Generated by chaperone by merging routing.json with EndpointSlice discoveries:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "vhosts": {
     "api.example.com": {
-      "backends": [
-        {"address": "10.0.0.1", "port": 8080, "weight": 100},
-        {"address": "10.0.0.2", "port": 8080, "weight": 100}
-      ]
-    },
-    "*.staging.example.com": {
-      "backends": [
-        {"address": "10.0.2.1", "port": 8080, "weight": 100}
+      "routes": [
+        {
+          "path_match": {"type": "PathPrefix", "value": "/v2"},
+          "backends": [
+            {"address": "10.0.0.1", "port": 8080, "weight": 100},
+            {"address": "10.0.0.2", "port": 8080, "weight": 100}
+          ],
+          "priority": 10300,
+          "rule_index": 0
+        }
       ]
     }
-  },
-  "default": {
-    "backends": [
-      {"address": "10.0.99.1", "port": 80, "weight": 100}
-    ]
   }
 }
 ```
@@ -413,7 +380,7 @@ The project uses **envtest** for controller integration tests. Envtest provides 
 ### Running Tests
 
 ```bash
-# Run all tests (Go + Rust)
+# Run all unit/integration tests (Go + Rust)
 make test
 
 # Run only Go tests (includes envtest setup)
@@ -421,11 +388,21 @@ make test-go
 
 # Run only envtest integration tests
 make test-envtest
+```
 
-# Run tests manually with envtest
-make envtest  # Downloads kubebuilder binaries (etcd, kube-apiserver)
-KUBEBUILDER_ASSETS="$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
-  go test ./...
+### Conformance Tests
+
+The Gateway API conformance suite is the primary end-to-end test harness. It requires a live cluster with the operator deployed.
+
+```bash
+# Run full conformance suite (~3.5 minutes)
+make test-conformance
+
+# Run a single conformance test (~1 minute)
+make test-conformance-single TEST=HTTPRouteMethodMatching
+
+# Run with report output
+make test-conformance-report
 ```
 
 **Note:** Envtest downloads ~50MB of binaries (kube-apiserver, etcd) to `testbin/` on first run. These are cached for subsequent test runs.

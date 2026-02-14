@@ -1,18 +1,12 @@
 # TODO
 
-## Phase:  Client-Side TLS (Complete)
+## Client-Side TLS
 
 ### Known Limitations
 
-- **Service update on listener change**: Adding an HTTPS listener doesn't update an existing Service (operator skips
-  Service updates). Workaround: delete the Service and let the operator recreate it. Should add Service update logic to
-  `reconcileResource`.
-- **~~New cert discovery requires pod restart~~**: Resolved. The file watcher now uses a full discard/load/commit
-  cycle, so adding or removing `certificateRef` entries is handled without pod restart. The infra hash only includes
-  a `HasTLS` flag (not individual cert refs), so only adding/removing an HTTPS listener itself triggers a restart.
-- **~~No cross-namespace Secret support~~**: Resolved. Cross-namespace certificateRefs are now supported
-  via ReferenceGrant validation. A ReferenceGrant in the Secret's namespace must explicitly allow the
-  Gateway's namespace to reference it.
+- **Service not updated on listener change**: Adding an HTTPS listener to an existing HTTP-only Gateway
+  doesn't add port 443 to the Service (`reconcileResource` skips Service updates). Workaround: delete the
+  Service and let the operator recreate it. Only affects day-2 listener changes; fresh Gateways work correctly.
 
 ### Not Yet Implemented
 
@@ -238,23 +232,9 @@ Implement spec-defined conflict resolution for overlapping routes (e.g., two HTT
 
 **Critical**: Follow the spec exactly to ensure conformance.
 
-### ReferenceGrant Validation (Complete)
-
-Cross-namespace Secret references for TLS certificates are validated via ReferenceGrant:
-
-- Gateway in Namespace A referencing Secret in Namespace B requires ReferenceGrant in Namespace B
-- Operator watches ReferenceGrant changes and re-reconciles affected Gateways
-- Listener status reports `ResolvedRefs=False` with reason `RefNotPermitted` when no grant exists
-- Future: extend ReferenceGrant validation to cross-namespace HTTPRoute backends
-
 ### Conformance Testing
 
-Use the Gateway API Conformance Suite to validate implementation:
-
-- Package: `sigs.k8s.io/gateway-api/conformance`
-- Runs battery of tests for hostname handling, path matching, status updates
-- Gold standard for idiomatic implementation
-- Should be integrated into CI pipeline
+The Gateway API conformance suite passes. Run with `make test-conformance` or target a single test with `make test-conformance-single TEST=<TestName>`.
 
 ### Policy Attachment Pattern
 
@@ -272,9 +252,6 @@ Use Policy Attachment instead of GatewayClass-specific fields for Varnish config
 
 ## Observability
 
-- Varnish logging via sidecar container (varnishlog/varnishncsa) - Complete
-- Add logging configuration to GatewayClassParameters (format, mode, extraArgs) - Complete
-- Ensure chaperone uses JSON logging (slog.NewJSONHandler) for consistency - Complete
 - Future: Add varnishlog-json support when available
 - Future: Create VarnishLoggingPolicy CRD using Gateway API policy attachment pattern
     - Policy targets Gateway via `targetRef`, overrides class defaults when present
