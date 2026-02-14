@@ -14,9 +14,12 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest tests that HTTPRoute
-// controller can update Gateway listener status using SSA with a real API server
-func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
+// TestHTTPRouteReconcile_GatewayControllerUpdatesAttachedRoutes_Envtest tests that the
+// Gateway controller correctly computes AttachedRoutes when triggered by HTTPRoute changes.
+// This validates the consolidated status management: the Gateway controller owns all
+// listener status fields (conditions, SupportedKinds, AttachedRoutes), eliminating
+// SSA conflicts between controllers.
+func TestHTTPRouteReconcile_GatewayControllerUpdatesAttachedRoutes_Envtest(t *testing.T) {
 	ctx := context.Background()
 
 	// Create GatewayClass
@@ -55,7 +58,7 @@ func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
 		_ = testEnv.Client.Delete(ctx, gateway)
 	}()
 
-	// Create Gateway reconciler to setup the Gateway first
+	// Create Gateway reconciler
 	gwReconciler := NewEnvtestGatewayReconciler(testEnv)
 
 	// Reconcile Gateway to add finalizer
@@ -78,7 +81,7 @@ func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify Gateway has listener status with conditions
+	// Verify Gateway has listener status with conditions and AttachedRoutes=0
 	var updatedGateway gatewayv1.Gateway
 	if err := testEnv.Client.Get(ctx,
 		types.NamespacedName{Name: "test-gateway-httproute", Namespace: "default"},
@@ -90,8 +93,15 @@ func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
 		t.Fatal("gateway should have listener status")
 	}
 
-	initialAttachedRoutes := updatedGateway.Status.Listeners[0].AttachedRoutes
-	t.Logf("Initial AttachedRoutes: %d", initialAttachedRoutes)
+	if updatedGateway.Status.Listeners[0].AttachedRoutes != 0 {
+		t.Errorf("expected initial AttachedRoutes=0, got %d", updatedGateway.Status.Listeners[0].AttachedRoutes)
+	}
+	if len(updatedGateway.Status.Listeners[0].Conditions) == 0 {
+		t.Fatal("expected initial listener conditions")
+	}
+	t.Logf("Initial state: AttachedRoutes=%d, Conditions=%d",
+		updatedGateway.Status.Listeners[0].AttachedRoutes,
+		len(updatedGateway.Status.Listeners[0].Conditions))
 
 	// Create a Service for the HTTPRoute to reference
 	service := &corev1.Service{
@@ -150,10 +160,8 @@ func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
 		_ = testEnv.Client.Delete(ctx, route)
 	}()
 
-	// Create HTTPRoute reconciler
+	// Create HTTPRoute reconciler and reconcile (sets route status only, no Gateway status)
 	httpRouteReconciler := NewEnvtestHTTPRouteReconciler(testEnv)
-
-	// Reconcile HTTPRoute - this should update Gateway listener's AttachedRoutes
 	_, err = httpRouteReconciler.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-route", Namespace: "default"},
 	})
@@ -163,7 +171,18 @@ func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	// Verify Gateway listener status was updated
+	// Re-reconcile with Gateway controller (simulates HTTPRoute watch trigger)
+	// This is where AttachedRoutes gets computed.
+	_, err = gwReconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-gateway-httproute", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("gateway re-reconcile failed: %v", err)
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify Gateway listener status
 	if err := testEnv.Client.Get(ctx,
 		types.NamespacedName{Name: "test-gateway-httproute", Namespace: "default"},
 		&updatedGateway); err != nil {
@@ -174,27 +193,34 @@ func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
 		t.Fatal("gateway should still have listener status")
 	}
 
-	// Verify AttachedRoutes was updated
+	// Verify AttachedRoutes was updated by Gateway controller
 	if updatedGateway.Status.Listeners[0].AttachedRoutes != 1 {
 		t.Errorf("expected AttachedRoutes=1, got %d", updatedGateway.Status.Listeners[0].AttachedRoutes)
 	} else {
-		t.Log("✓ AttachedRoutes updated correctly")
+		t.Log("AttachedRoutes updated correctly by Gateway controller")
 	}
 
-	// Verify SupportedKinds is still present (not null)
-	if updatedGateway.Status.Listeners[0].SupportedKinds == nil {
-		t.Error("SupportedKinds should not be nil")
-	} else if len(updatedGateway.Status.Listeners[0].SupportedKinds) == 0 {
-		t.Error("SupportedKinds should not be empty")
+	// Verify SupportedKinds is present
+	if updatedGateway.Status.Listeners[0].SupportedKinds == nil ||
+		len(updatedGateway.Status.Listeners[0].SupportedKinds) == 0 {
+		t.Error("SupportedKinds should not be nil or empty")
 	} else {
-		t.Log("✓ SupportedKinds preserved")
+		t.Log("SupportedKinds preserved")
 	}
 
-	// Verify Conditions are still present (not overwritten)
+	// Verify Conditions are present (no SSA conflict wiping them)
 	if len(updatedGateway.Status.Listeners[0].Conditions) == 0 {
 		t.Error("listener conditions should be preserved")
 	} else {
-		t.Logf("✓ Listener has %d conditions", len(updatedGateway.Status.Listeners[0].Conditions))
+		t.Logf("Listener has %d conditions (no SSA conflict)",
+			len(updatedGateway.Status.Listeners[0].Conditions))
+		// Verify conditions have correct observedGeneration
+		for _, c := range updatedGateway.Status.Listeners[0].Conditions {
+			if c.ObservedGeneration != updatedGateway.Generation {
+				t.Errorf("condition %s has stale observedGeneration %d, expected %d",
+					c.Type, c.ObservedGeneration, updatedGateway.Generation)
+			}
+		}
 	}
 
 	// Verify HTTPRoute status was updated
@@ -208,7 +234,7 @@ func TestHTTPRouteReconcile_UpdatesGatewayListenerStatus_Envtest(t *testing.T) {
 	if len(updatedRoute.Status.Parents) == 0 {
 		t.Error("route should have parent status")
 	} else {
-		t.Logf("✓ HTTPRoute has parent status with %d conditions",
+		t.Logf("HTTPRoute has parent status with %d conditions",
 			len(updatedRoute.Status.Parents[0].Conditions))
 	}
 }

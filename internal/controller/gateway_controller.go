@@ -377,36 +377,21 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *ga
 	return nil
 }
 
-// setConditions updates Gateway status conditions.
-func (r *GatewayReconciler) setConditions(gateway *gatewayv1.Gateway, success bool, errMsg string) {
-	if success {
-		status.SetGatewayAccepted(gateway, true,
-			string(gatewayv1.GatewayReasonAccepted),
-			"Gateway accepted by controller")
-		status.SetGatewayProgrammed(gateway, true,
-			string(gatewayv1.GatewayReasonProgrammed),
-			"Gateway configuration programmed")
-	} else {
-		status.SetGatewayAccepted(gateway, false,
-			string(gatewayv1.GatewayReasonInvalid),
-			errMsg)
-		status.SetGatewayProgrammed(gateway, false,
-			string(gatewayv1.GatewayReasonInvalid),
-			errMsg)
-	}
-
-	// Set listener statuses
-	r.setListenerStatuses(gateway)
-}
-
 // setListenerStatusesForPatch sets listener statuses for SSA patch.
-// Only sets fields owned by Gateway controller (conditions, SupportedKinds).
-// Does NOT set AttachedRoutes (owned by HTTPRoute controller).
+// Computes all listener status fields: conditions, SupportedKinds, and AttachedRoutes.
+// AttachedRoutes is computed by listing HTTPRoutes attached to this Gateway.
 func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, patch *gatewayv1.Gateway, original *gatewayv1.Gateway) {
 	// Build map of existing listener statuses to preserve condition times
 	existingStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
 	for _, ls := range original.Status.Listeners {
 		existingStatuses[ls.Name] = ls
+	}
+
+	// List all accepted routes for this gateway to compute AttachedRoutes
+	routes, err := listAcceptedRoutesForGateway(ctx, r.Client, original)
+	if err != nil {
+		r.Logger.Error("failed to list routes for AttachedRoutes computation", "error", err)
+		// Continue with empty routes - AttachedRoutes will be 0
 	}
 
 	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, 0, len(original.Spec.Listeners))
@@ -489,13 +474,8 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			})
 		}
 
-		// Preserve AttachedRoutes from existing status (owned by HTTPRoute controller).
-		// Since SSA uses listener name as merge key, we must include the current
-		// AttachedRoutes value to avoid resetting it to 0.
-		var attachedRoutes int32
-		if hasExisting {
-			attachedRoutes = existing.AttachedRoutes
-		}
+		// Compute AttachedRoutes for this listener
+		attachedRoutes := countRoutesForListener(routes, listener, original)
 
 		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
 			Name:           listener.Name,
@@ -710,93 +690,6 @@ func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway
 		LastTransitionTime: now,
 		Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
 		Message:            "All TLS certificate references resolved",
-	}
-}
-
-// setListenerStatuses updates status for each Gateway listener.
-func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
-	// Build map of existing listener statuses to preserve AttachedRoutes and condition times
-	existingStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
-	for _, ls := range gateway.Status.Listeners {
-		existingStatuses[ls.Name] = ls
-	}
-
-	gateway.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
-
-	for i, listener := range gateway.Spec.Listeners {
-		existing, hasExisting := existingStatuses[listener.Name]
-
-		// Preserve existing AttachedRoutes count (set by HTTPRoute controller)
-		attachedRoutes := int32(0)
-		if hasExisting {
-			attachedRoutes = existing.AttachedRoutes
-		}
-
-		// Preserve existing condition times if status unchanged
-		acceptedTime := metav1.Now()
-		programmedTime := metav1.Now()
-		if hasExisting {
-			for _, c := range existing.Conditions {
-				if c.Type == string(gatewayv1.ListenerConditionAccepted) && c.Status == metav1.ConditionTrue {
-					acceptedTime = c.LastTransitionTime
-				}
-				if c.Type == string(gatewayv1.ListenerConditionProgrammed) && c.Status == metav1.ConditionTrue {
-					programmedTime = c.LastTransitionTime
-				}
-			}
-		}
-
-		// Determine supported kinds and validate allowed route kinds
-		supportedKinds, hasInvalidKinds := validateListenerRouteKinds(&listener)
-
-		conditions := []metav1.Condition{
-			{
-				Type:               string(gatewayv1.ListenerConditionAccepted),
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: acceptedTime,
-				Reason:             string(gatewayv1.ListenerReasonAccepted),
-				Message:            "Listener accepted",
-			},
-			{
-				Type:               string(gatewayv1.ListenerConditionProgrammed),
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: programmedTime,
-				Reason:             string(gatewayv1.ListenerReasonProgrammed),
-				Message:            "Listener programmed",
-			},
-		}
-
-		if hasInvalidKinds {
-			conditions = append(conditions, metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: metav1.Now(),
-				Reason:             string(gatewayv1.ListenerReasonInvalidRouteKinds),
-				Message:            "One or more route kinds are not supported",
-			})
-		}
-
-		// Add ResolvedRefs: True for listeners that don't already have it
-		if !hasInvalidKinds {
-			conditions = append(conditions, metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: metav1.Now(),
-				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
-				Message:            "References resolved",
-			})
-		}
-
-		gateway.Status.Listeners[i] = gatewayv1.ListenerStatus{
-			Name:           listener.Name,
-			SupportedKinds: supportedKinds,
-			AttachedRoutes: attachedRoutes,
-			Conditions:     conditions,
-		}
 	}
 }
 
@@ -1352,6 +1245,59 @@ func gatewayHasCrossNSCertRefTo(gateway *gatewayv1.Gateway, targetNamespace stri
 	return false
 }
 
+// enqueueGatewaysForHTTPRoute returns an EventHandler that enqueues Gateways
+// referenced by a changed HTTPRoute. This allows the Gateway controller to
+// update AttachedRoutes counts when routes are created, updated, or deleted.
+func (r *GatewayReconciler) enqueueGatewaysForHTTPRoute() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+		route, ok := obj.(*gatewayv1.HTTPRoute)
+		if !ok {
+			return nil
+		}
+
+		var requests []ctrl.Request
+		seen := make(map[types.NamespacedName]bool)
+
+		for _, parentRef := range route.Spec.ParentRefs {
+			// Skip non-Gateway refs
+			if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+				continue
+			}
+			if parentRef.Group != nil && *parentRef.Group != gatewayv1.Group(gatewayv1.GroupName) {
+				continue
+			}
+
+			// Determine namespace
+			namespace := route.Namespace
+			if parentRef.Namespace != nil {
+				namespace = string(*parentRef.Namespace)
+			}
+
+			nn := types.NamespacedName{
+				Name:      string(parentRef.Name),
+				Namespace: namespace,
+			}
+			if seen[nn] {
+				continue
+			}
+			seen[nn] = true
+
+			// Verify the Gateway uses our GatewayClass before enqueuing
+			var gw gatewayv1.Gateway
+			if err := r.Get(ctx, nn, &gw); err != nil {
+				continue
+			}
+			if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+				continue
+			}
+
+			requests = append(requests, ctrl.Request{NamespacedName: nn})
+		}
+
+		return requests
+	})
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -1363,6 +1309,12 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		// Note: ClusterRoleBinding is cluster-scoped, so it cannot be owned by namespace-scoped Gateway
 		// We manage its lifecycle manually in reconcileResources without owner references
+		Watches(
+			&gatewayv1.HTTPRoute{},
+			r.enqueueGatewaysForHTTPRoute(),
+			// No GenerationChangedPredicate — we need to reconcile on any HTTPRoute
+			// change (create/delete/update) to update AttachedRoutes counts.
+		).
 		Watches(
 			&gatewayparamsv1alpha1.GatewayClassParameters{},
 			r.enqueueGatewaysForParams(),

@@ -53,8 +53,9 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	var route gatewayv1.HTTPRoute
 	if err := r.Get(ctx, req.NamespacedName, &route); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Route deleted - update AttachedRoutes on all Gateways with our GatewayClass
-			r.updateAttachedRoutesOnDeletion(ctx, log)
+			// Route deleted - nothing to do here. The Gateway controller's
+			// HTTPRoute watch will trigger re-reconciliation of affected Gateways
+			// to update AttachedRoutes counts.
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
@@ -163,7 +164,6 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 			status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
 				string(gatewayv1.RouteReasonResolvedRefs),
 				"References resolved")
-			r.updateAttachedRoutesForGateway(ctx, gateway)
 			return nil
 		}
 	}
@@ -176,7 +176,6 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 			reasonCode, reason)
 		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
 			string(gatewayv1.RouteReasonResolvedRefs), "All references resolved")
-		r.updateAttachedRoutesForGateway(ctx, gateway)
 		return nil
 	}
 
@@ -190,12 +189,6 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 			string(gatewayv1.RouteReasonResolvedRefs),
 			"References resolved")
 		return fmt.Errorf("r.listRoutesForGateway: %w", err)
-	}
-
-	// Update Gateway's listener AttachedRoutes count (control plane, independent of data plane)
-	if err := r.updateGatewayListenerStatus(ctx, gateway, routes); err != nil {
-		log.Error("failed to update Gateway listener status", "error", err)
-		// Don't return error - the route is still accepted
 	}
 
 	// Update Gateway's ConfigMap with generated VCL
@@ -251,17 +244,22 @@ func (r *HTTPRouteReconciler) getParentGateway(ctx context.Context, route *gatew
 
 // listRoutesForGateway returns all HTTPRoutes attached to a Gateway.
 func (r *HTTPRouteReconciler) listRoutesForGateway(ctx context.Context, gateway *gatewayv1.Gateway) ([]gatewayv1.HTTPRoute, error) {
+	return listAcceptedRoutesForGateway(ctx, r.Client, gateway)
+}
+
+// listAcceptedRoutesForGateway returns all HTTPRoutes that are attached to and accepted by a Gateway (package-level).
+func listAcceptedRoutesForGateway(ctx context.Context, c client.Client, gateway *gatewayv1.Gateway) ([]gatewayv1.HTTPRoute, error) {
 	var routeList gatewayv1.HTTPRouteList
-	if err := r.List(ctx, &routeList); err != nil {
-		return nil, fmt.Errorf("r.List(HTTPRouteList): %w", err)
+	if err := c.List(ctx, &routeList); err != nil {
+		return nil, fmt.Errorf("List(HTTPRouteList): %w", err)
 	}
 
 	var attached []gatewayv1.HTTPRoute
 	for _, route := range routeList.Items {
-		if !r.routeAttachedToGateway(&route, gateway) {
+		if !routeAttachedToGateway(&route, gateway) {
 			continue
 		}
-		allowed, _, _ := r.isRouteAllowedByGateway(ctx, &route, gateway)
+		allowed, _, _ := isRouteAllowedByGateway(ctx, c, &route, gateway)
 		if !allowed {
 			continue
 		}
@@ -273,6 +271,11 @@ func (r *HTTPRouteReconciler) listRoutesForGateway(ctx context.Context, gateway 
 
 // routeAttachedToGateway checks if a route references the given Gateway.
 func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) bool {
+	return routeAttachedToGateway(route, gateway)
+}
+
+// routeAttachedToGateway checks if a route references the given Gateway (package-level).
+func routeAttachedToGateway(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) bool {
 	for _, parentRef := range route.Spec.ParentRefs {
 		// Skip non-Gateway refs
 		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
@@ -304,12 +307,18 @@ func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute,
 }
 
 // isRouteAllowedByGateway checks if the route is allowed by any of the Gateway's listeners.
+// Thin wrapper around the package-level function.
+func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string, string) {
+	return isRouteAllowedByGateway(ctx, r.Client, route, gateway)
+}
+
+// isRouteAllowedByGateway checks if the route is allowed by any of the Gateway's listeners (package-level).
 // A route is allowed if at least one listener:
 // 1. Allows the route's namespace (per AllowedRoutes policy)
 // 2. Has hostname intersection with the route (or either has no hostname)
 // Returns (true, "", "") if any listener allows the route, or (false, reasonCode, message) if none do.
 // The reasonCode distinguishes between NotAllowedByListeners and NoMatchingListenerHostname.
-func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string, string) {
+func isRouteAllowedByGateway(ctx context.Context, c client.Reader, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string, string) {
 	if len(gateway.Spec.Listeners) == 0 {
 		return false, string(gatewayv1.RouteReasonNotAllowedByListeners), "Gateway has no listeners"
 	}
@@ -317,10 +326,8 @@ func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route
 	namespaceAllowed := false
 	for _, listener := range gateway.Spec.Listeners {
 		// Check namespace policy
-		allowed, err := r.listenerAllowsRouteNamespace(ctx, route, gateway, listener)
+		allowed, err := listenerAllowsRouteNamespace(ctx, c, route, gateway, listener)
 		if err != nil {
-			r.Logger.Error("failed to check listener namespace policy",
-				"listener", listener.Name, "error", err)
 			continue
 		}
 		if !allowed {
@@ -346,8 +353,8 @@ func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route
 		fmt.Sprintf("Route not allowed by any listener on Gateway %s/%s", gateway.Namespace, gateway.Name)
 }
 
-// listenerAllowsRouteNamespace checks if a specific listener allows routes from the route's namespace.
-func (r *HTTPRouteReconciler) listenerAllowsRouteNamespace(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, listener gatewayv1.Listener) (bool, error) {
+// listenerAllowsRouteNamespace checks if a specific listener allows routes from the route's namespace (package-level).
+func listenerAllowsRouteNamespace(ctx context.Context, c client.Reader, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, listener gatewayv1.Listener) (bool, error) {
 	// Determine the "from" policy. Default is Same when AllowedRoutes or Namespaces or From is nil.
 	from := gatewayv1.NamespacesFromSame
 	if listener.AllowedRoutes != nil && listener.AllowedRoutes.Namespaces != nil && listener.AllowedRoutes.Namespaces.From != nil {
@@ -371,8 +378,8 @@ func (r *HTTPRouteReconciler) listenerAllowsRouteNamespace(ctx context.Context, 
 		}
 		// Fetch the route's namespace to check labels
 		var ns corev1.Namespace
-		if err := r.Get(ctx, types.NamespacedName{Name: route.Namespace}, &ns); err != nil {
-			return false, fmt.Errorf("r.Get(Namespace %s): %w", route.Namespace, err)
+		if err := c.Get(ctx, types.NamespacedName{Name: route.Namespace}, &ns); err != nil {
+			return false, fmt.Errorf("Get(Namespace %s): %w", route.Namespace, err)
 		}
 		return selector.Matches(labels.Set(ns.Labels)), nil
 
@@ -653,86 +660,6 @@ func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, route *ga
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All references resolved"
 }
 
-// updateAttachedRoutesOnDeletion updates AttachedRoutes for all Gateways with our
-// GatewayClass when a route is deleted. Since we don't have the deleted route's
-// parentRefs, we update all managed Gateways.
-func (r *HTTPRouteReconciler) updateAttachedRoutesOnDeletion(ctx context.Context, log *slog.Logger) {
-	var gatewayList gatewayv1.GatewayList
-	if err := r.List(ctx, &gatewayList); err != nil {
-		log.Error("failed to list Gateways for deletion cleanup", "error", err)
-		return
-	}
-	for i := range gatewayList.Items {
-		gw := &gatewayList.Items[i]
-		if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
-			continue
-		}
-		r.updateAttachedRoutesForGateway(ctx, gw)
-	}
-}
-
-// updateAttachedRoutesForGateway lists routes and updates AttachedRoutes for a Gateway.
-// This is a convenience wrapper used in early-return paths where we have a valid Gateway
-// but the current route is rejected (invalid sectionName, not allowed, etc.).
-func (r *HTTPRouteReconciler) updateAttachedRoutesForGateway(ctx context.Context, gateway *gatewayv1.Gateway) {
-	routes, err := r.listRoutesForGateway(ctx, gateway)
-	if err != nil {
-		r.Logger.Error("failed to list routes for AttachedRoutes update", "error", err)
-		return
-	}
-	if err := r.updateGatewayListenerStatus(ctx, gateway, routes); err != nil {
-		r.Logger.Error("failed to update Gateway listener status", "error", err)
-	}
-}
-
-// updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.
-// Creates a minimal patch object to avoid conflicts with Gateway controller.
-func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
-	// Create minimal Gateway object for SSA patch - only include fields we own
-	patch := &gatewayv1.Gateway{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: gatewayv1.GroupVersion.String(),
-			Kind:       "Gateway",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      gateway.Name,
-			Namespace: gateway.Namespace,
-		},
-	}
-
-	// Build listener statuses with per-listener AttachedRoutes count.
-	// Use Spec.Listeners (not Status.Listeners) so that when a listener is
-	// removed from the spec, we stop claiming its fields via SSA. This allows
-	// the removed listener to be cleaned up from the merged status.
-	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
-	for i, listener := range gateway.Spec.Listeners {
-		count := countRoutesForListener(routes, listener, gateway)
-		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
-			Name:           listener.Name,
-			AttachedRoutes: count,
-			// Include SupportedKinds to satisfy API validation (required field)
-			// Gateway controller is the field owner, but we need to set it to avoid null
-			SupportedKinds: []gatewayv1.RouteGroupKind{
-				{
-					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
-					Kind:  "HTTPRoute",
-				},
-			},
-			// DO NOT set Conditions - those are owned by Gateway controller
-		}
-	}
-
-	// Use Server-Side Apply - HTTPRoute controller owns AttachedRoutes field
-	// Gateway controller owns conditions - no conflicts!
-	if err := r.Status().Patch(ctx, patch, client.Apply,
-		client.FieldOwner("varnish-httproute-controller"),
-		client.ForceOwnership); err != nil {
-		return fmt.Errorf("r.Status().Patch: %w", err)
-	}
-
-	return nil
-}
-
 // countRoutesForListener counts how many routes attach to a specific listener.
 // A route attaches to a listener if:
 // 1. The route has no sectionName (attaches to all listeners), OR the route's sectionName matches the listener name
@@ -865,7 +792,7 @@ func (r *HTTPRouteReconciler) findHTTPRoutesForGateway(ctx context.Context, obj 
 	// Find routes attached to this Gateway
 	var requests []reconcile.Request
 	for _, route := range routeList.Items {
-		if r.routeAttachedToGateway(&route, gateway) {
+		if routeAttachedToGateway(&route, gateway) {
 			requests = append(requests, reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Name:      route.Name,
