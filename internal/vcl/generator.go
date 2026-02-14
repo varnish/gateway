@@ -262,9 +262,18 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 								pathValue = *match.Path.Value
 							}
 
-							pathMatch = &ghost.PathMatch{
-								Type:  pathType,
-								Value: pathValue,
+							// PathPrefix "/" is the K8s API server default when no path is specified.
+							// It matches all paths, so it has no specificity — treat as no path match.
+							// Without this, API-defaulted routes get inflated priorities that break
+							// Gateway API precedence (e.g., method PATCH with implicit PathPrefix /
+							// would outrank an explicit PathPrefix /path5).
+							if pathType == ghost.PathMatchPathPrefix && pathValue == "/" {
+								pathMatch = nil
+							} else {
+								pathMatch = &ghost.PathMatch{
+									Type:  pathType,
+									Value: pathValue,
+								}
 							}
 						}
 

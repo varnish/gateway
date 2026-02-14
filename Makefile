@@ -8,7 +8,7 @@ VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 .PHONY: help test build build-linux docker clean vendor act
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
 .PHONY: helm-lint helm-template helm-package helm-push helm-install helm-upgrade helm-uninstall
-.PHONY: test-conformance test-conformance-report
+.PHONY: test-conformance test-conformance-report test-conformance-single
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -38,8 +38,9 @@ help:
 	@echo "  make act              Run CI workflow locally with act (requires act tool)"
 	@echo ""
 	@echo "Conformance:"
-	@echo "  make test-conformance         Run Gateway API conformance tests (requires live cluster)"
-	@echo "  make test-conformance-report  Run conformance tests and generate report"
+	@echo "  make test-conformance                             Run all conformance tests (requires live cluster)"
+	@echo "  make test-conformance-report                      Run conformance tests and generate report"
+	@echo "  make test-conformance-single TEST=TestShortName   Run a single conformance test"
 	@echo ""
 	@echo "Deploy:"
 	@echo "  make deploy-update    Update deploy/ manifests with current version"
@@ -186,6 +187,13 @@ test-conformance-report:
 	GATEWAY_VERSION=$(VERSION) \
 	go test -tags=conformance -v -timeout 30m -count=1 ./conformance/ \
 		-args --gateway-class=varnish
+
+test-conformance-single:
+ifndef TEST
+	$(error TEST is required. Usage: make test-conformance-single TEST=HTTPRouteMethodMatching)
+endif
+	go test -tags=conformance -v -timeout 10m -count=1 ./conformance/ \
+		-args --gateway-class=varnish --run-test=$(TEST)
 
 # ============================================================================
 # Deploy
