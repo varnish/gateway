@@ -430,6 +430,21 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			},
 		}
 
+		// Determine supported kinds and validate allowed route kinds
+		supportedKinds, hasInvalidKinds := validateListenerRouteKinds(&listener)
+
+		// Add ResolvedRefs condition for route kind validation
+		if hasInvalidKinds {
+			conditions = append(conditions, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: original.Generation,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(gatewayv1.ListenerReasonInvalidRouteKinds),
+				Message:            "One or more route kinds are not supported",
+			})
+		}
+
 		// Add ResolvedRefs condition for HTTPS listeners
 		if listener.Protocol == gatewayv1.HTTPSProtocolType {
 			resolvedRefs := r.validateListenerTLSRefs(ctx, original, &listener)
@@ -437,13 +452,8 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 		}
 
 		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
-			Name: listener.Name,
-			SupportedKinds: []gatewayv1.RouteGroupKind{
-				{
-					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
-					Kind:  "HTTPRoute",
-				},
-			},
+			Name:           listener.Name,
+			SupportedKinds: supportedKinds,
 			// DO NOT set AttachedRoutes - that's owned by HTTPRoute controller
 			Conditions: conditions,
 		})
@@ -488,6 +498,47 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			},
 		})
 	}
+}
+
+// validateListenerRouteKinds checks if the listener's AllowedRoutes.Kinds contains
+// unsupported route kinds. Returns the filtered list of supported kinds and whether
+// any invalid kinds were specified.
+func validateListenerRouteKinds(listener *gatewayv1.Listener) ([]gatewayv1.RouteGroupKind, bool) {
+	defaultKinds := []gatewayv1.RouteGroupKind{
+		{
+			Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
+			Kind:  "HTTPRoute",
+		},
+	}
+
+	// If no kinds are explicitly specified, use the default based on protocol
+	if listener.AllowedRoutes == nil || len(listener.AllowedRoutes.Kinds) == 0 {
+		return defaultKinds, false
+	}
+
+	// Filter to only supported kinds
+	var supported []gatewayv1.RouteGroupKind
+	hasInvalid := false
+
+	for _, kind := range listener.AllowedRoutes.Kinds {
+		group := gatewayv1.Group("gateway.networking.k8s.io")
+		if kind.Group != nil {
+			group = *kind.Group
+		}
+		if group == "gateway.networking.k8s.io" && kind.Kind == "HTTPRoute" {
+			supported = append(supported, gatewayv1.RouteGroupKind{
+				Group: ptr(group),
+				Kind:  kind.Kind,
+			})
+		} else {
+			hasInvalid = true
+		}
+	}
+
+	if supported == nil {
+		supported = []gatewayv1.RouteGroupKind{}
+	}
+	return supported, hasInvalid
 }
 
 // validateListenerTLSRefs validates TLS certificate references for an HTTPS listener.
@@ -621,33 +672,44 @@ func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
 			}
 		}
 
+		// Determine supported kinds and validate allowed route kinds
+		supportedKinds, hasInvalidKinds := validateListenerRouteKinds(&listener)
+
+		conditions := []metav1.Condition{
+			{
+				Type:               string(gatewayv1.ListenerConditionAccepted),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: acceptedTime,
+				Reason:             string(gatewayv1.ListenerReasonAccepted),
+				Message:            "Listener accepted",
+			},
+			{
+				Type:               string(gatewayv1.ListenerConditionProgrammed),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: programmedTime,
+				Reason:             string(gatewayv1.ListenerReasonProgrammed),
+				Message:            "Listener programmed",
+			},
+		}
+
+		if hasInvalidKinds {
+			conditions = append(conditions, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(gatewayv1.ListenerReasonInvalidRouteKinds),
+				Message:            "One or more route kinds are not supported",
+			})
+		}
+
 		gateway.Status.Listeners[i] = gatewayv1.ListenerStatus{
-			Name: listener.Name,
-			SupportedKinds: []gatewayv1.RouteGroupKind{
-				{
-					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
-					Kind:  "HTTPRoute",
-				},
-			},
+			Name:           listener.Name,
+			SupportedKinds: supportedKinds,
 			AttachedRoutes: attachedRoutes,
-			Conditions: []metav1.Condition{
-				{
-					Type:               string(gatewayv1.ListenerConditionAccepted),
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: gateway.Generation,
-					LastTransitionTime: acceptedTime,
-					Reason:             string(gatewayv1.ListenerReasonAccepted),
-					Message:            "Listener accepted",
-				},
-				{
-					Type:               string(gatewayv1.ListenerConditionProgrammed),
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: gateway.Generation,
-					LastTransitionTime: programmedTime,
-					Reason:             string(gatewayv1.ListenerReasonProgrammed),
-					Message:            "Listener programmed",
-				},
-			},
+			Conditions:     conditions,
 		}
 	}
 }
