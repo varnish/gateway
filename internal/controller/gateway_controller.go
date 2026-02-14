@@ -91,9 +91,10 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// 4. Add finalizer if not present
 	if !controllerutil.ContainsFinalizer(&gateway, FinalizerName) {
+		patch := client.MergeFrom(gateway.DeepCopy())
 		controllerutil.AddFinalizer(&gateway, FinalizerName)
-		if err := r.Update(ctx, &gateway); err != nil {
-			return ctrl.Result{}, fmt.Errorf("r.Update (add finalizer): %w", err)
+		if err := r.Patch(ctx, &gateway, patch); err != nil {
+			return ctrl.Result{}, fmt.Errorf("r.Patch (add finalizer): %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
 	}
@@ -137,15 +138,16 @@ func (r *GatewayReconciler) reconcileDelete(ctx context.Context, gateway *gatewa
 
 	// Remove finalizer to allow deletion
 	if controllerutil.ContainsFinalizer(gateway, FinalizerName) {
+		patch := client.MergeFrom(gateway.DeepCopy())
 		controllerutil.RemoveFinalizer(gateway, FinalizerName)
-		if err := r.Update(ctx, gateway); err != nil {
+		if err := r.Patch(ctx, gateway, patch); err != nil {
 			// If the namespace is being deleted, we can't update the Gateway.
 			// That's fine - the resource will be garbage collected with the namespace.
 			if apierrors.IsNotFound(err) {
 				log.Info("namespace being deleted, skipping finalizer removal")
 				return ctrl.Result{}, nil
 			}
-			return ctrl.Result{}, fmt.Errorf("r.Update (remove finalizer): %w", err)
+			return ctrl.Result{}, fmt.Errorf("r.Patch (remove finalizer): %w", err)
 		}
 	}
 
