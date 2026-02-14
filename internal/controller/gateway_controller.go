@@ -345,6 +345,28 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *ga
 	// Set listener statuses (conditions and SupportedKinds only, not AttachedRoutes)
 	r.setListenerStatusesForPatch(ctx, patch, gateway)
 
+	// Populate addresses from the Service's LoadBalancer status
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{
+		Name:      gateway.Name,
+		Namespace: gateway.Namespace,
+	}, svc); err == nil {
+		for _, ingress := range svc.Status.LoadBalancer.Ingress {
+			if ingress.IP != "" {
+				patch.Status.Addresses = append(patch.Status.Addresses, gatewayv1.GatewayStatusAddress{
+					Type:  ptr(gatewayv1.IPAddressType),
+					Value: ingress.IP,
+				})
+			}
+			if ingress.Hostname != "" {
+				patch.Status.Addresses = append(patch.Status.Addresses, gatewayv1.GatewayStatusAddress{
+					Type:  ptr(gatewayv1.HostnameAddressType),
+					Value: ingress.Hostname,
+				})
+			}
+		}
+	}
+
 	// Apply the patch
 	if err := r.Status().Patch(ctx, patch, client.Apply,
 		client.FieldOwner("varnish-gateway-controller"),
@@ -385,12 +407,6 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 	existingStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
 	for _, ls := range original.Status.Listeners {
 		existingStatuses[ls.Name] = ls
-	}
-
-	// Build set of spec listener names for quick lookup
-	specListenerNames := make(map[gatewayv1.SectionName]bool, len(original.Spec.Listeners))
-	for _, l := range original.Spec.Listeners {
-		specListenerNames[l.Name] = true
 	}
 
 	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, 0, len(original.Spec.Listeners))
@@ -464,46 +480,6 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			SupportedKinds: supportedKinds,
 			AttachedRoutes: attachedRoutes,
 			Conditions:     conditions,
-		})
-	}
-
-	// Include listeners that exist in the current status but were removed from
-	// the spec. The HTTPRoute controller may still claim fields on these
-	// listeners via SSA. If we omit them, the merged result would lack the
-	// required "conditions" field, causing the API server to reject our patch.
-	// We set conditions here so the merged status remains valid until the
-	// HTTPRoute controller also drops these stale listeners.
-	now := metav1.Now()
-	for _, ls := range original.Status.Listeners {
-		if specListenerNames[ls.Name] {
-			continue // already included above
-		}
-		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
-			Name: ls.Name,
-			SupportedKinds: []gatewayv1.RouteGroupKind{
-				{
-					Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
-					Kind:  "HTTPRoute",
-				},
-			},
-			Conditions: []metav1.Condition{
-				{
-					Type:               string(gatewayv1.ListenerConditionAccepted),
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: original.Generation,
-					LastTransitionTime: now,
-					Reason:             string(gatewayv1.ListenerReasonAccepted),
-					Message:            "Listener removed from spec",
-				},
-				{
-					Type:               string(gatewayv1.ListenerConditionProgrammed),
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: original.Generation,
-					LastTransitionTime: now,
-					Reason:             string(gatewayv1.ListenerReasonInvalid),
-					Message:            "Listener removed from spec",
-				},
-			},
 		})
 	}
 }
