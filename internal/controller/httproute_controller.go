@@ -284,7 +284,10 @@ func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute,
 	return false
 }
 
-// isRouteAllowedByGateway checks if the route's namespace is allowed by any of the Gateway's listeners.
+// isRouteAllowedByGateway checks if the route is allowed by any of the Gateway's listeners.
+// A route is allowed if at least one listener:
+// 1. Allows the route's namespace (per AllowedRoutes policy)
+// 2. Has hostname intersection with the route (or either has no hostname)
 // Returns (true, "") if any listener allows the route, or (false, reason) if none do.
 func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string) {
 	if len(gateway.Spec.Listeners) == 0 {
@@ -292,19 +295,27 @@ func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route
 	}
 
 	for _, listener := range gateway.Spec.Listeners {
+		// Check namespace policy
 		allowed, err := r.listenerAllowsRouteNamespace(ctx, route, gateway, listener)
 		if err != nil {
 			r.Logger.Error("failed to check listener namespace policy",
 				"listener", listener.Name, "error", err)
 			continue
 		}
-		if allowed {
-			return true, ""
+		if !allowed {
+			continue
 		}
+
+		// Check hostname intersection
+		if !hostnamesIntersect(route.Spec.Hostnames, listener.Hostname) {
+			continue
+		}
+
+		return true, ""
 	}
 
-	return false, fmt.Sprintf("Route namespace %q is not allowed by any listener on Gateway %s/%s",
-		route.Namespace, gateway.Namespace, gateway.Name)
+	return false, fmt.Sprintf("Route not allowed by any listener on Gateway %s/%s",
+		gateway.Namespace, gateway.Name)
 }
 
 // listenerAllowsRouteNamespace checks if a specific listener allows routes from the route's namespace.
