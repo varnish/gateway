@@ -309,27 +309,42 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 							filters = extractFilters(rule.Filters)
 						}
 
-						// If there are no backends but there are filters (e.g., RequestRedirect),
-						// create a single route with the filters
-						if len(rule.BackendRefs) == 0 && filters != nil {
-							collectedRoutes = append(collectedRoutes, ghost.Route{
-								Hostname:    hostname,
-								PathMatch:   pathMatch,
-								Method:      method,
-								Headers:     headers,
-								QueryParams: queryParams,
-								Filters:     filters,
-								Service:     "", // No backend for filter-only routes
-								Namespace:   routeNS,
-								Port:        0,
-								Weight:      0,
-								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
-								RuleIndex:   ruleIndex,
-							})
+						// Filter to only valid backendRefs (Kind must be Service or unset, Group must be core/"" or unset)
+						var validBackendRefs []gatewayv1.HTTPBackendRef
+						for _, backend := range rule.BackendRefs {
+							if backend.Kind != nil && *backend.Kind != "Service" {
+								continue
+							}
+							if backend.Group != nil && *backend.Group != "" {
+								continue
+							}
+							validBackendRefs = append(validBackendRefs, backend)
 						}
 
-						// Create a route entry for each backend
-						for _, backend := range rule.BackendRefs {
+						// If there are no valid backends (filter-only routes, or all backends invalid),
+						// create a single route entry so the path still matches.
+						// Ghost will return 500 for routes with no backends.
+						if len(validBackendRefs) == 0 {
+							if filters != nil || len(rule.BackendRefs) > 0 {
+								collectedRoutes = append(collectedRoutes, ghost.Route{
+									Hostname:    hostname,
+									PathMatch:   pathMatch,
+									Method:      method,
+									Headers:     headers,
+									QueryParams: queryParams,
+									Filters:     filters,
+									Service:     "",
+									Namespace:   routeNS,
+									Port:        0,
+									Weight:      0,
+									Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
+									RuleIndex:   ruleIndex,
+								})
+							}
+						}
+
+						// Create a route entry for each valid backend
+						for _, backend := range validBackendRefs {
 							if backend.Name == "" {
 								continue
 							}
