@@ -74,14 +74,20 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 	}
 
-	// 4. Update HTTPRoute status using Server-Side Apply - no conflicts with other controllers
-	// Prepare for SSA: set GVK and ensure managedFields is cleared
-	route.SetGroupVersionKind(gatewayv1.SchemeGroupVersion.WithKind("HTTPRoute"))
-	route.SetManagedFields(nil)
-	if err := r.Status().Patch(ctx, &route, client.Apply,
-		client.FieldOwner("varnish-httproute-controller"),
-		client.ForceOwnership); err != nil {
-		return ctrl.Result{}, fmt.Errorf("r.Status().Patch: %w", err)
+	// 4. Update HTTPRoute status
+	// Re-fetch the route to get the latest resourceVersion before updating status.
+	// processParentRef may have triggered other writes (e.g., ConfigMap, Gateway status)
+	// and the original object may be stale.
+	routeStatus := route.Status
+	if err := r.Get(ctx, req.NamespacedName, &route); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("r.Get (re-fetch for status): %w", err)
+	}
+	route.Status = routeStatus
+	if err := r.Status().Update(ctx, &route); err != nil {
+		return ctrl.Result{}, fmt.Errorf("r.Status().Update: %w", err)
 	}
 
 	log.Debug("HTTPRoute reconciliation complete")
@@ -112,6 +118,12 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 				"References resolved")
 			return nil
 		}
+		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
+			string(gatewayv1.RouteReasonPending),
+			fmt.Sprintf("Failed to get Gateway %s: %v", parentRef.Name, err))
+		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
+			string(gatewayv1.RouteReasonResolvedRefs),
+			"References resolved")
 		return fmt.Errorf("r.getParentGateway: %w", err)
 	}
 
@@ -138,6 +150,12 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 	// List all HTTPRoutes attached to this Gateway
 	routes, err := r.listRoutesForGateway(ctx, gateway)
 	if err != nil {
+		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
+			string(gatewayv1.RouteReasonPending),
+			fmt.Sprintf("Failed to list routes for Gateway: %v", err))
+		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
+			string(gatewayv1.RouteReasonResolvedRefs),
+			"References resolved")
 		return fmt.Errorf("r.listRoutesForGateway: %w", err)
 	}
 
@@ -146,6 +164,9 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
 			string(gatewayv1.RouteReasonPending),
 			fmt.Sprintf("Failed to update ConfigMap: %v", err))
+		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
+			string(gatewayv1.RouteReasonResolvedRefs),
+			"References resolved")
 		return fmt.Errorf("r.updateConfigMap: %w", err)
 	}
 

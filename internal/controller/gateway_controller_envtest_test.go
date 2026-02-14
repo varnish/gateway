@@ -176,6 +176,25 @@ func TestReconcile_CreatesResources_Envtest(t *testing.T) {
 		if len(updatedGateway.Status.Conditions) > 0 {
 			t.Logf("✓ Gateway status updated with %d conditions", len(updatedGateway.Status.Conditions))
 		}
+
+		// Verify HTTP listener has ResolvedRefs condition
+		if len(updatedGateway.Status.Listeners) > 0 {
+			listener := updatedGateway.Status.Listeners[0]
+			foundResolvedRefs := false
+			for _, c := range listener.Conditions {
+				if c.Type == string(gatewayv1.ListenerConditionResolvedRefs) {
+					foundResolvedRefs = true
+					if c.Status != metav1.ConditionTrue {
+						t.Errorf("expected ResolvedRefs=True on HTTP listener, got %s", c.Status)
+					}
+				}
+			}
+			if !foundResolvedRefs {
+				t.Error("expected ResolvedRefs condition on HTTP listener")
+			} else {
+				t.Log("✓ HTTP listener has ResolvedRefs condition")
+			}
+		}
 	}
 
 	// Cleanup resources

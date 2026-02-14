@@ -468,6 +468,27 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			conditions = append(conditions, resolvedRefs)
 		}
 
+		// Add ResolvedRefs: True for non-HTTPS listeners that don't already have it
+		// (e.g., HTTP listeners). The spec requires ResolvedRefs on all listeners.
+		if !hasInvalidKinds && listener.Protocol != gatewayv1.HTTPSProtocolType {
+			resolvedRefsTime := metav1.Now()
+			if hasExisting {
+				for _, c := range existing.Conditions {
+					if c.Type == string(gatewayv1.ListenerConditionResolvedRefs) && c.Status == metav1.ConditionTrue {
+						resolvedRefsTime = c.LastTransitionTime
+					}
+				}
+			}
+			conditions = append(conditions, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: original.Generation,
+				LastTransitionTime: resolvedRefsTime,
+				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+				Message:            "References resolved",
+			})
+		}
+
 		// Preserve AttachedRoutes from current status (owned by HTTPRoute controller).
 		// AttachedRoutes is int32 (not pointer), so the zero value is serialized in SSA patches.
 		// We must copy the current value to avoid overwriting the HTTPRoute controller's value.
@@ -754,6 +775,18 @@ func (r *GatewayReconciler) setListenerStatuses(gateway *gatewayv1.Gateway) {
 				LastTransitionTime: metav1.Now(),
 				Reason:             string(gatewayv1.ListenerReasonInvalidRouteKinds),
 				Message:            "One or more route kinds are not supported",
+			})
+		}
+
+		// Add ResolvedRefs: True for listeners that don't already have it
+		if !hasInvalidKinds {
+			conditions = append(conditions, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionTrue,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: metav1.Now(),
+				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+				Message:            "References resolved",
 			})
 		}
 

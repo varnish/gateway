@@ -153,6 +153,20 @@ func TestReconcile_ValidRoute(t *testing.T) {
 	if !foundAccepted {
 		t.Error("expected Accepted condition to be set")
 	}
+
+	// Check ResolvedRefs condition
+	var foundResolvedRefs bool
+	for _, cond := range ps.Conditions {
+		if cond.Type == string(gatewayv1.RouteConditionResolvedRefs) {
+			foundResolvedRefs = true
+			if cond.Status != metav1.ConditionTrue {
+				t.Errorf("expected ResolvedRefs=True, got %s", cond.Status)
+			}
+		}
+	}
+	if !foundResolvedRefs {
+		t.Error("expected ResolvedRefs condition to be set")
+	}
 }
 
 func TestReconcile_InvalidParentRef(t *testing.T) {
@@ -214,6 +228,20 @@ func TestReconcile_InvalidParentRef(t *testing.T) {
 	}
 	if !foundAccepted {
 		t.Error("expected Accepted condition to be set")
+	}
+
+	// Check ResolvedRefs condition is set even when Gateway not found
+	var foundResolvedRefs bool
+	for _, cond := range ps.Conditions {
+		if cond.Type == string(gatewayv1.RouteConditionResolvedRefs) {
+			foundResolvedRefs = true
+			if cond.Status != metav1.ConditionTrue {
+				t.Errorf("expected ResolvedRefs=True, got %s", cond.Status)
+			}
+		}
+	}
+	if !foundResolvedRefs {
+		t.Error("expected ResolvedRefs condition to be set")
 	}
 }
 
