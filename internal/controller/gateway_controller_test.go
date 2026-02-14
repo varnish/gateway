@@ -47,6 +47,41 @@ func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayR
 	}
 }
 
+// newTestTLSSecret creates a valid kubernetes.io/tls Secret for testing.
+func newTestTLSSecret(name, namespace string) *corev1.Secret {
+	// Minimal self-signed PEM cert and key for testing
+	testCert := []byte(`-----BEGIN CERTIFICATE-----
+MIIBhTCCASugAwIBAgIQIRi6zePL6mKjOipn+dNuaTAKBggqhkjOPQQDAjASMRAw
+DgYDVQQKEwdBY21lIENvMB4XDTE3MTAyMDE5NDMwNloXDTE4MTAyMDE5NDMwNlow
+EjEQMA4GA1UEChMHQWNtZSBDbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABLU3
+jRJN1NWgh1MJxnSK+tWjfRwSTaOGkI4bHmSreA6SE0IbKPl2WPfJjDzpNqkSsOCd
+ShNzgBRMMA71IwaciUyjYzBhMA4GA1UdDwEB/wQEAwICpDATBgNVHSUEDDAKBggr
+BgEFBQcDATAPBgNVHRMBAf8EBTADAQH/MCkGA1UdEQQiMCCCDmxvY2FsaG9zdDo1
+NDUzgg4xMjcuMC4wLjE6NTQ1MzAKBggqhkjOPQQDAgNIADBFAiEA2wpSek9nBDE0
+HKRXRfbUE6v5gLP8HBgFGKMo0mIRn8oCIHyjk+aIKEjVJGSGFDt2MqXVpvGjj+xB
+3HT5LiaoOKsm
+-----END CERTIFICATE-----
+`)
+	testKey := []byte(`-----BEGIN EC PRIVATE KEY-----
+MHQCAQEEIIrYSSNQFaA2Hwf583QmKbyavkgoftpCYFPJ1tx81lHLoAcGBSuBBAAi
+oWQDYgAEjBFm5VUB+BIhqGeYYZBpWAn4fYIab1JIB+Vmz4HqPBquLsBanBp8X1AX
+4PE/rSmh0VZ5a0N8es7PVxsxxBB4pyJEZ2FHjyVd5VACsXKfYGOxVwEqO6sXH4FG
+k8H3ULWF
+-----END EC PRIVATE KEY-----
+`)
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{
+			"tls.crt": testCert,
+			"tls.key": testKey,
+		},
+	}
+}
+
 func TestBuildLabels(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{GatewayClassName: "varnish"},
@@ -400,7 +435,9 @@ func TestValidateListenerTLSRefs_CrossNamespace_WithReferenceGrant(t *testing.T)
 		},
 	}
 
-	r := newTestReconciler(scheme, grant)
+	secret := newTestTLSSecret("my-cert", "cert-ns")
+
+	r := newTestReconciler(scheme, grant, secret)
 
 	tlsMode := gatewayv1.TLSModeTerminate
 	certNS := gatewayv1.Namespace("cert-ns")
@@ -440,7 +477,8 @@ func TestValidateListenerTLSRefs_CrossNamespace_WithReferenceGrant(t *testing.T)
 
 func TestValidateListenerTLSRefs_SameNamespace(t *testing.T) {
 	scheme := newTestScheme()
-	r := newTestReconciler(scheme)
+	secret := newTestTLSSecret("my-cert", "default")
+	r := newTestReconciler(scheme, secret)
 
 	tlsMode := gatewayv1.TLSModeTerminate
 

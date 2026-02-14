@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -451,11 +452,18 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			conditions = append(conditions, resolvedRefs)
 		}
 
+		// Preserve AttachedRoutes from current status (owned by HTTPRoute controller).
+		// AttachedRoutes is int32 (not pointer), so the zero value is serialized in SSA patches.
+		// We must copy the current value to avoid overwriting the HTTPRoute controller's value.
+		attachedRoutes := int32(0)
+		if existing, ok := existingStatuses[listener.Name]; ok {
+			attachedRoutes = existing.AttachedRoutes
+		}
 		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
 			Name:           listener.Name,
 			SupportedKinds: supportedKinds,
-			// DO NOT set AttachedRoutes - that's owned by HTTPRoute controller
-			Conditions: conditions,
+			AttachedRoutes: attachedRoutes,
+			Conditions:     conditions,
 		})
 	}
 
@@ -625,6 +633,74 @@ func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway
 				LastTransitionTime: now,
 				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
 				Message:            fmt.Sprintf("Unsupported certificateRef kind: %s", string(*certRef.Kind)),
+			}
+		}
+
+		// Resolve Secret namespace (default to gateway namespace)
+		secretNamespace := gateway.Namespace
+		if certRef.Namespace != nil && string(*certRef.Namespace) != "" {
+			secretNamespace = string(*certRef.Namespace)
+		}
+
+		// Fetch the Secret to check it exists
+		var secret corev1.Secret
+		if err := r.Get(ctx, types.NamespacedName{
+			Name:      string(certRef.Name),
+			Namespace: secretNamespace,
+		}, &secret); err != nil {
+			if apierrors.IsNotFound(err) {
+				return metav1.Condition{
+					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: gateway.Generation,
+					LastTransitionTime: now,
+					Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
+					Message:            fmt.Sprintf("Secret %s/%s not found", secretNamespace, string(certRef.Name)),
+				}
+			}
+			return metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: now,
+				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
+				Message:            fmt.Sprintf("Failed to get Secret %s/%s: %v", secretNamespace, string(certRef.Name), err),
+			}
+		}
+
+		// Validate Secret type
+		if secret.Type != corev1.SecretTypeTLS {
+			return metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: now,
+				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
+				Message:            fmt.Sprintf("Secret %s/%s has type %s, expected kubernetes.io/tls", secretNamespace, string(certRef.Name), secret.Type),
+			}
+		}
+
+		// Validate tls.crt and tls.key fields exist and are non-empty
+		if len(secret.Data["tls.crt"]) == 0 || len(secret.Data["tls.key"]) == 0 {
+			return metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: now,
+				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
+				Message:            fmt.Sprintf("Secret %s/%s missing tls.crt or tls.key data", secretNamespace, string(certRef.Name)),
+			}
+		}
+
+		// Validate tls.crt contains valid PEM data
+		if block, _ := pem.Decode(secret.Data["tls.crt"]); block == nil {
+			return metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: gateway.Generation,
+				LastTransitionTime: now,
+				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
+				Message:            fmt.Sprintf("Secret %s/%s tls.crt does not contain valid PEM data", secretNamespace, string(certRef.Name)),
 			}
 		}
 	}
