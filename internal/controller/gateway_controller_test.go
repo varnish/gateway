@@ -175,6 +175,15 @@ func TestBuildService(t *testing.T) {
 			expectedPorts: 1,
 			expectedPort:  8000,
 		},
+		{
+			name: "duplicate port listeners are deduplicated",
+			listeners: []gatewayv1.Listener{
+				{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+				{Name: "https-with-hostname", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+			},
+			expectedPorts: 1,
+			expectedPort:  443,
+		},
 	}
 
 	for _, tc := range tests {

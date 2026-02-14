@@ -37,6 +37,52 @@ type config struct {
 	forced  bool
 }
 
+type ignoreRule struct {
+	pattern  string
+	anchored bool // true if starts with /
+}
+
+func loadIgnoreRules(path string) ([]ignoreRule, error) {
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil // No ignore file is fine
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var rules []ignoreRule
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "/") {
+			rules = append(rules, ignoreRule{pattern: line[1:], anchored: true})
+		} else {
+			rules = append(rules, ignoreRule{pattern: line, anchored: false})
+		}
+	}
+	return rules, nil
+}
+
+func shouldIgnore(path string, dirName string, rules []ignoreRule) bool {
+	for _, rule := range rules {
+		if rule.anchored {
+			// Anchored: path must be exactly the pattern (from repo root)
+			if path == rule.pattern {
+				return true
+			}
+		} else {
+			// Unanchored: match directory name at any level
+			if dirName == rule.pattern {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -353,19 +399,35 @@ func getConfig(args []string) (config, bool, error) {
 }
 
 func updateVersionFiles(repo *git.Repository, cfg config, output io.Writer, newVersion string) error {
+	// Load ignore rules
+	rules, err := loadIgnoreRules(".bumpignore")
+	if err != nil {
+		return fmt.Errorf("failed to load .bumpignore: %w", err)
+	}
+
 	// Track if any files were updated
 	filesUpdated := 0
 
 	// find all the files name ".version"
-	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("failed to walk directory: %w", err)
 		}
 		if d.IsDir() {
+			// Always skip .git
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			// Check user-defined ignore rules
+			// path needs to be cleaned (remove leading ./)
+			cleanPath := strings.TrimPrefix(path, "./")
+			if cleanPath == "." {
+				return nil
+			}
+			if shouldIgnore(cleanPath, d.Name(), rules) {
+				return filepath.SkipDir
+			}
 			return nil
-		}
-		if d.Name() == "vendor" || d.Name() == "testdata" {
-			return filepath.SkipDir
 		}
 		if d.Name() != ".version" {
 			return nil

@@ -394,16 +394,24 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway) *corev1.Service {
 	labels := r.buildLabels(gateway)
 
-	// Map Gateway listeners to Service ports
+	// Map Gateway listeners to Service ports, deduplicating by port number.
+	// Multiple listeners can share the same port (differentiated by hostname),
+	// but a Service only needs one entry per unique port.
 	var ports []corev1.ServicePort
+	seenPorts := make(map[int32]bool)
 	for _, listener := range gateway.Spec.Listeners {
+		port := int32(listener.Port)
+		if seenPorts[port] {
+			continue
+		}
+		seenPorts[port] = true
 		targetPort := varnishHTTPPort
 		if listener.Protocol == gatewayv1.HTTPSProtocolType {
 			targetPort = varnishHTTPSPort
 		}
 		ports = append(ports, corev1.ServicePort{
 			Name:       string(listener.Name),
-			Port:       int32(listener.Port),
+			Port:       port,
 			TargetPort: intstr.FromInt(targetPort),
 			Protocol:   corev1.ProtocolTCP,
 		})
