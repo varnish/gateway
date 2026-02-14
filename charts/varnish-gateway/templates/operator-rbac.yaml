@@ -33,6 +33,10 @@ rules:
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["gatewayclassparameters"]
     verbs: ["get", "list", "watch"]
+  # Namespaces (needed for NamespacesFromSelector route checking)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
   # Core resources the operator creates for Gateways
   - apiGroups: ["apps"]
     resources: ["deployments"]

@@ -43,6 +43,10 @@ rules:
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["gatewayclassparameters"]
     verbs: ["get", "list", "watch"]
+  # Namespaces (needed for NamespacesFromSelector route checking)
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
   # Core resources the operator creates for Gateways
   - apiGroups: ["apps"]
     resources: ["deployments"]
@@ -116,14 +120,14 @@ spec:
       serviceAccountName: varnish-gateway-operator
       containers:
         - name: operator
-          image: ghcr.io/varnish/gateway-operator:v0.8.8
+          image: ghcr.io/varnish/gateway-operator:v0.8.13
           args:
             - --leader-elect=true
           env:
             - name: GATEWAY_CLASS_NAME
               value: "varnish"
             - name: GATEWAY_IMAGE
-              value: "ghcr.io/varnish/gateway-chaperone:v0.8.8"
+              value: "ghcr.io/varnish/gateway-chaperone:v0.8.13"
           ports:
             - name: metrics
               containerPort: 8080
