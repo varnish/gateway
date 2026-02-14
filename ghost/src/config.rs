@@ -141,6 +141,8 @@ pub struct Route {
     pub filters: Option<RouteFilters>,
     pub backends: Vec<Backend>,
     pub priority: i32,
+    #[serde(default)]
+    pub rule_index: i32,
 }
 
 /// All routing rules for a single hostname (e.g., "api.example.com").
@@ -283,12 +285,7 @@ fn validate_backends(context: &str, backends: &[Backend]) -> Result<(), String> 
         if backend.port == 0 {
             return Err(format!("backend {} in '{}': port cannot be 0", i, context));
         }
-        if backend.weight == 0 {
-            return Err(format!(
-                "backend {} in '{}': weight cannot be 0",
-                i, context
-            ));
-        }
+        // weight=0 is valid per Gateway API spec (means "no traffic")
     }
     Ok(())
 }
@@ -522,13 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_backend_zero_weight() {
+    fn test_valid_backend_zero_weight() {
+        // weight=0 is valid per Gateway API spec (means "no traffic")
         let file = write_config(
             r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backends": [{"address": "1.2.3.4", "port": 80, "weight": 0}], "priority": 100}]}}}"#,
         );
         let result = load(file.path());
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("weight cannot be 0"));
+        assert!(result.is_ok());
     }
 
     #[test]

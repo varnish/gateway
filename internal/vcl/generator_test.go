@@ -218,7 +218,7 @@ func TestCalculateRoutePriority(t *testing.T) {
 				Type:  ghost.PathMatchExact,
 				Value: "/api/v2/users",
 			},
-			expected: 10000,
+			expected: 100000,
 		},
 		{
 			name: "path prefix short",
@@ -226,7 +226,7 @@ func TestCalculateRoutePriority(t *testing.T) {
 				Type:  ghost.PathMatchPathPrefix,
 				Value: "/api",
 			},
-			expected: 1000 + 40, // 1000 + len("/api")*10
+			expected: 10000 + 400, // 10000 + len("/api")*100
 		},
 		{
 			name: "path prefix long",
@@ -234,7 +234,7 @@ func TestCalculateRoutePriority(t *testing.T) {
 				Type:  ghost.PathMatchPathPrefix,
 				Value: "/api/v2/users",
 			},
-			expected: 1000 + 130, // 1000 + len("/api/v2/users")*10 (13 chars)
+			expected: 10000 + 1300, // 10000 + len("/api/v2/users")*100 (13 chars)
 		},
 		{
 			name: "regex match",
@@ -242,7 +242,7 @@ func TestCalculateRoutePriority(t *testing.T) {
 				Type:  ghost.PathMatchRegularExpression,
 				Value: "/files/.*",
 			},
-			expected: 100,
+			expected: 5000,
 		},
 	}
 
@@ -318,15 +318,15 @@ func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
 	}
 
 	// Routes should be sorted by priority (descending - higher priority first)
-	// Exact match (10000) should come before prefix match (1040)
+	// Exact match (100000) should come before prefix match (10400)
 	if collectedRoutes[0].Hostname != "api.example.com" {
 		t.Errorf("expected first route hostname api.example.com, got %s", collectedRoutes[0].Hostname)
 	}
 	if collectedRoutes[0].Service != "users-v2" {
 		t.Errorf("expected first route to be users-v2 (exact match), got %s", collectedRoutes[0].Service)
 	}
-	if collectedRoutes[0].Priority != 10000 {
-		t.Errorf("expected first route priority 10000, got %d", collectedRoutes[0].Priority)
+	if collectedRoutes[0].Priority != 100000 {
+		t.Errorf("expected first route priority 100000, got %d", collectedRoutes[0].Priority)
 	}
 
 	if collectedRoutes[1].Hostname != "api.example.com" {
@@ -335,8 +335,8 @@ func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
 	if collectedRoutes[1].Service != "api-v1" {
 		t.Errorf("expected second route to be api-v1 (prefix match), got %s", collectedRoutes[1].Service)
 	}
-	if collectedRoutes[1].Priority != 1040 {
-		t.Errorf("expected second route priority 1040, got %d", collectedRoutes[1].Priority)
+	if collectedRoutes[1].Priority != 10400 {
+		t.Errorf("expected second route priority 10400, got %d", collectedRoutes[1].Priority)
 	}
 }
 

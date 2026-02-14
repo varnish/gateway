@@ -88,7 +88,17 @@ func TestReconcile_ValidRoute(t *testing.T) {
 		},
 	}
 
-	r := newHTTPRouteTestReconciler(scheme, gateway, configMap, route)
+	backendSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-svc",
+			Namespace: "default",
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gateway, configMap, route, backendSvc)
 
 	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-route", Namespace: "default"},

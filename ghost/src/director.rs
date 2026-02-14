@@ -16,6 +16,7 @@ use varnish::vcl::{Backend, BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeR
 
 use crate::backend_pool::BackendPool;
 use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
+use crate::internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
 use crate::vhost_director::VhostDirector;
@@ -189,6 +190,7 @@ pub struct RouteEntry {
     pub filters: Option<Arc<crate::config::RouteFilters>>,
     pub backends: Vec<WeightedBackendRef>,
     pub priority: i32,
+    pub rule_index: i32,
 }
 
 /// Map of vhost directors for two-tier routing
@@ -209,6 +211,7 @@ pub fn build_vhost_directors(
     backend_pool: &mut BackendPool,
     ctx: &mut Ctx,
     redirect_backend: BackendRef,
+    internal_error_backend: BackendRef,
 ) -> Result<VhostDirectorMap, VclError> {
     let mut exact = HashMap::new();
     let mut wildcards = Vec::new();
@@ -267,11 +270,15 @@ pub fn build_vhost_directors(
                 filters,
                 backends: backend_refs,
                 priority: route.priority,
+                rule_index: route.rule_index,
             });
         }
 
-        // Sort routes by priority (descending - higher priority first)
-        route_entries.sort_by(|a, b| b.priority.cmp(&a.priority));
+        // Sort routes by priority (descending), then by rule_index (ascending) for tiebreaking
+        route_entries.sort_by(|a, b| {
+            b.priority.cmp(&a.priority)
+                .then_with(|| a.rule_index.cmp(&b.rule_index))
+        });
 
         // Add default_backends as lowest priority route if present
         if !vhost.default_backends.is_empty() {
@@ -291,6 +298,7 @@ pub fn build_vhost_directors(
                 filters: None,
                 backends: default_refs,
                 priority: 0,
+                rule_index: i32::MAX,
             });
         }
 
@@ -309,6 +317,7 @@ pub fn build_vhost_directors(
             route_entries,
             Arc::clone(&backend_pool_arc),
             Some(redirect_backend.clone()),
+            Some(internal_error_backend.clone()),
         ));
 
         // Categorize into exact or wildcard
@@ -355,6 +364,8 @@ pub struct GhostDirector {
     not_found_backend: SendSyncBackendRef,
     /// Synthetic redirect backend for RequestRedirect filters (stored backend must outlive this director)
     redirect_backend: SendSyncBackendRef,
+    /// Synthetic 500 backend for matched routes with no backends
+    internal_error_backend: SendSyncBackendRef,
     /// Last reload error message (for debugging)
     last_error: RwLock<Option<String>>,
 }
@@ -364,6 +375,7 @@ pub type GhostDirectorCreationResult = (
     GhostDirector,
     Backend<NotFoundBackend, NotFoundBody>,
     Backend<RedirectBackend, RedirectBody>,
+    Backend<InternalErrorBackend, InternalErrorBody>,
 );
 
 impl GhostDirector {
@@ -385,16 +397,21 @@ impl GhostDirector {
         let redirect_backend = Backend::new(ctx, "ghost", "ghost_redirect", RedirectBackend, false)?;
         let redirect_ref = SendSyncBackendRef(redirect_backend.as_ref().clone());
 
+        // Create synthetic 500 backend for matched routes with no backends
+        let internal_error_backend = Backend::new(ctx, "ghost", "ghost_500", InternalErrorBackend, false)?;
+        let internal_error_ref = SendSyncBackendRef(internal_error_backend.as_ref().clone());
+
         let director = Self {
             vhost_directors: ArcSwap::new(Arc::clone(&vhost_directors)),
             backends: ArcSwap::new(Arc::new(backends)),
             config_path,
             not_found_backend: not_found_ref,
             redirect_backend: redirect_ref,
+            internal_error_backend: internal_error_ref,
             last_error: RwLock::new(None),
         };
 
-        Ok((director, not_found_backend, redirect_backend))
+        Ok((director, not_found_backend, redirect_backend, internal_error_backend))
     }
 
     /// Reload configuration from disk
@@ -414,7 +431,7 @@ impl GhostDirector {
         })?;
 
         // Build new vhost directors
-        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx, self.redirect_backend.0.clone()).map_err(|e| {
+        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx, self.redirect_backend.0.clone(), self.internal_error_backend.0.clone()).map_err(|e| {
             let error_msg = format!("Ghost reload failed: {}", e);
             // Log to VSL for visibility in varnishlog
             ctx.log(LogTag::Error, &error_msg);
@@ -679,12 +696,12 @@ fn matches_wildcard(pattern: &str, host: &str) -> bool {
         return false;
     }
 
-    // Check the matched part has no dots (single label only)
+    // Check that the matched prefix is non-empty (at least one label before the suffix)
     let prefix_len = host.len() - suffix.len();
     let prefix = &host[..prefix_len];
 
-    // Prefix must be non-empty and contain no dots
-    !prefix.is_empty() && !prefix.contains('.')
+    // Prefix must be non-empty (multi-level subdomains are allowed per Gateway API spec)
+    !prefix.is_empty()
 }
 
 /// Convert StrOrBytes to Cow<str> if possible
@@ -760,7 +777,7 @@ mod tests {
     fn test_matches_wildcard() {
         assert!(matches_wildcard("*.example.com", "foo.example.com"));
         assert!(matches_wildcard("*.example.com", "bar.example.com"));
-        assert!(!matches_wildcard("*.example.com", "foo.bar.example.com"));
+        assert!(matches_wildcard("*.example.com", "foo.bar.example.com"));
         assert!(!matches_wildcard("*.example.com", ".example.com"));
         assert!(!matches_wildcard("*.example.com", "example.com"));
     }

@@ -123,6 +123,7 @@ type Route struct {
 	Port        int               `json:"port"`
 	Weight      int               `json:"weight"`
 	Priority    int               `json:"priority"`
+	RuleIndex   int               `json:"rule_index"` // Original rule ordering for tiebreaking
 }
 
 // VHostRouting represents routing configuration for a vhost with path-based rules.
@@ -147,6 +148,7 @@ type RouteBackends struct {
 	Filters     *RouteFilters     `json:"filters,omitempty"`
 	Backends    []Backend         `json:"backends"`
 	Priority    int               `json:"priority"`
+	RuleIndex   int               `json:"rule_index"`
 }
 
 // VHostConfig represents a virtual host with path-based routing in ghost.json.

@@ -209,9 +209,9 @@ func TestGenerateDefaultWeight(t *testing.T) {
 	if len(apiVhost.Routes[0].Backends) != 1 {
 		t.Fatalf("expected 1 backend, got %d", len(apiVhost.Routes[0].Backends))
 	}
-	// Should default to 100
-	if apiVhost.Routes[0].Backends[0].Weight != 100 {
-		t.Errorf("expected default weight 100, got %d", apiVhost.Routes[0].Backends[0].Weight)
+	// weight=0 should pass through as-is (no conversion)
+	if apiVhost.Routes[0].Backends[0].Weight != 0 {
+		t.Errorf("expected weight 0 (pass-through), got %d", apiVhost.Routes[0].Backends[0].Weight)
 	}
 }
 

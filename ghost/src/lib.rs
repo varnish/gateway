@@ -37,6 +37,7 @@ mod backend_pool;
 mod config;
 mod director;
 pub mod format;
+mod internal_error_backend;
 mod not_found_backend;
 mod redirect_backend;
 mod stats;
@@ -45,6 +46,7 @@ mod vhost_director;
 use backend_pool::BackendPool;
 use config::ResponseHeaderFilter;
 use director::{GhostDirector, SharedGhostDirector};
+use internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use not_found_backend::{NotFoundBackend, NotFoundBody};
 use redirect_backend::{RedirectBackend, RedirectBody};
 
@@ -71,6 +73,8 @@ pub struct ghost_backend {
     _not_found_backend: varnish::vcl::Backend<NotFoundBackend, NotFoundBody>,
     // Keep redirect_backend alive for the lifetime of this ghost_backend
     _redirect_backend: varnish::vcl::Backend<RedirectBackend, RedirectBody>,
+    // Keep internal_error_backend alive for the lifetime of this ghost_backend
+    _internal_error_backend: varnish::vcl::Backend<InternalErrorBackend, InternalErrorBody>,
 }
 
 /// Ghost VMOD - Gateway API routing for Varnish
@@ -285,9 +289,21 @@ mod ghost {
             let _ = resp.set_header(&action.name, &action.value);
         }
 
-        // Add headers
+        // Add headers (appends to existing value per Gateway API spec)
         for action in &filter.add {
-            let _ = resp.set_header(&action.name, &action.value);
+            match resp.header(&action.name) {
+                Some(existing) => {
+                    let existing_str = match existing {
+                        StrOrBytes::Utf8(s) => s.to_string(),
+                        StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+                    };
+                    let combined = format!("{}, {}", existing_str, action.value);
+                    let _ = resp.set_header(&action.name, &combined);
+                }
+                None => {
+                    let _ = resp.set_header(&action.name, &action.value);
+                }
+            }
         }
     }
 
@@ -347,7 +363,7 @@ mod ghost {
             let backend_pool = BackendPool::new();
 
             // Create director (Arc-wrapped so we can clone for reload access)
-            let (ghost_director_impl, not_found_backend, redirect_backend) =
+            let (ghost_director_impl, not_found_backend, redirect_backend, internal_error_backend) =
                 GhostDirector::new(ctx, Arc::new(vhost_directors), backend_pool, config_path)?;
             let ghost_director = Arc::new(ghost_director_impl);
             let shared_director = SharedGhostDirector(Arc::clone(&ghost_director));
@@ -358,6 +374,7 @@ mod ghost {
                 ghost_director,
                 _not_found_backend: not_found_backend,
                 _redirect_backend: redirect_backend,
+                _internal_error_backend: internal_error_backend,
             })
         }
 

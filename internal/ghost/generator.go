@@ -40,9 +40,6 @@ func endpointsToBackends(rule RoutingRule, endpoints ServiceEndpoints) []Backend
 			port = rule.Port
 		}
 		weight := rule.Weight
-		if weight == 0 {
-			weight = 100 // default weight
-		}
 		backends = append(backends, Backend{
 			Address: ep.IP,
 			Port:    port,
@@ -96,6 +93,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 		queryParams string // JSON serialization of QueryParams
 		filters     string // JSON serialization of Filters
 		priority    int
+		ruleIndex   int
 	}
 
 	grouped := make(map[routeKey][]Route)
@@ -107,6 +105,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			queryParams: serializeQueryParams(route.QueryParams),
 			filters:     serializeFilters(route.Filters),
 			priority:    route.Priority,
+			ruleIndex:   route.RuleIndex,
 		}
 		grouped[key] = append(grouped[key], route)
 	}
@@ -134,6 +133,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 				Filters:     firstRoute.Filters,
 				Backends:    allBackends,
 				Priority:    key.priority,
+				RuleIndex:   key.ruleIndex,
 			})
 		}
 	}
@@ -242,9 +242,6 @@ func routeToBackends(route Route, endpoints ServiceEndpoints) []Backend {
 			port = route.Port
 		}
 		weight := route.Weight
-		if weight == 0 {
-			weight = 100
-		}
 		backends = append(backends, Backend{
 			Address: ep.IP,
 			Port:    port,

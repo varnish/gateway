@@ -54,6 +54,8 @@ pub struct VhostDirector {
     backend_pool: Arc<BackendPool>,
     /// Synthetic redirect backend for RequestRedirect filters
     redirect_backend: Option<SendSyncBackendRef>,
+    /// Synthetic 500 backend for matched routes with no backends
+    internal_error_backend: Option<SendSyncBackendRef>,
     /// Statistics for this vhost
     stats: Arc<VhostStats>,
 }
@@ -65,12 +67,14 @@ impl VhostDirector {
         routes: Vec<RouteEntry>,
         backend_pool: Arc<BackendPool>,
         redirect_backend: Option<BackendRef>,
+        internal_error_backend: Option<BackendRef>,
     ) -> Self {
         Self {
             hostname,
             routes,
             backend_pool,
             redirect_backend: redirect_backend.map(SendSyncBackendRef),
+            internal_error_backend: internal_error_backend.map(SendSyncBackendRef),
             stats: Arc::new(VhostStats::new()),
         }
     }
@@ -340,7 +344,13 @@ impl VclDirector for VhostDirector {
         }
 
         // Select backend using weighted random
-        let backend_ref = select_backend_weighted(backend_refs)?;
+        let backend_ref = match select_backend_weighted(backend_refs) {
+            Some(br) => br,
+            None => {
+                // Route matched but no backends available — return 500
+                return self.internal_error_backend.as_ref().map(|r| r.0.clone());
+            }
+        };
 
         // Record stats
         self.stats.record_request(&backend_ref.key);
@@ -416,15 +426,13 @@ fn match_routes<'a>(
             continue;
         }
 
-        // All conditions matched
-        // Allow routes with no backends if they have filters (e.g., RequestRedirect)
-        if !route.backends.is_empty() || route.filters.is_some() {
-            return Some(RouteMatchResult {
-                backends: &route.backends,
-                filters: route.filters.clone(),
-                matched_path: route.path_match.as_ref(),
-            });
-        }
+        // All conditions matched - return the route even with empty backends.
+        // The caller will return 500 for matched routes with no backends.
+        return Some(RouteMatchResult {
+            backends: &route.backends,
+            filters: route.filters.clone(),
+            matched_path: route.path_match.as_ref(),
+        });
     }
 
     None
@@ -583,6 +591,7 @@ mod tests {
                 weight: 100,
             }],
             priority: 100,
+            rule_index: 0,
         }];
 
         // This test doesn't use HttpHeaders, so we can't fully test it here
@@ -605,6 +614,7 @@ mod tests {
                 weight: 100,
             }],
             priority: 100,
+            rule_index: 0,
         }];
 
         // Verify route structure
@@ -630,8 +640,10 @@ mod tests {
                     weight: 100,
                 }],
                 priority: 100,
+                rule_index: 0,
             }],
             backend_pool.clone(),
+            None,
             None,
         );
 
@@ -642,6 +654,7 @@ mod tests {
             "empty.example.com".to_string(),
             vec![],
             backend_pool,
+            None,
             None,
         );
 
@@ -655,6 +668,7 @@ mod tests {
             "api.example.com".to_string(),
             vec![],
             backend_pool,
+            None,
             None,
         );
 
@@ -745,9 +759,18 @@ fn apply_request_header_filter(
         bereq.set_header(&action.name, &action.value)?;
     }
 
-    // Add headers (appends)
+    // Add headers (appends to existing value per Gateway API spec)
     for action in &filter.add {
-        bereq.set_header(&action.name, &action.value)?;
+        if let Some(existing) = bereq.header(&action.name) {
+            let existing_str = match existing {
+                StrOrBytes::Utf8(s) => s.to_string(),
+                StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+            };
+            let combined = format!("{}, {}", existing_str, action.value);
+            bereq.set_header(&action.name, &combined)?;
+        } else {
+            bereq.set_header(&action.name, &action.value)?;
+        }
     }
 
     Ok(())
@@ -842,7 +865,8 @@ fn apply_replace_prefix_match(
                 let trimmed_new = new_prefix.trim_end_matches('/');
 
                 let result = if remainder.is_empty() {
-                    trimmed_new.to_string()
+                    let r = trimmed_new.to_string();
+                    if r.is_empty() { "/".to_string() } else { r }
                 } else if remainder.starts_with('/') {
                     format!("{}{}", trimmed_new, remainder)
                 } else {

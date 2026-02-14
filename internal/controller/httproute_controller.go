@@ -52,9 +52,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	var route gatewayv1.HTTPRoute
 	if err := r.Get(ctx, req.NamespacedName, &route); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Route deleted - we need to regenerate VCL for affected Gateways
-			// but we can't know which Gateway was affected without the route
-			// The Gateway watch will handle this via the findHTTPRoutesForGateway mapper
+			// Route deleted - update AttachedRoutes on all Gateways with our GatewayClass
+			r.updateAttachedRoutesOnDeletion(ctx, log)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
@@ -155,6 +154,7 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 			status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
 				string(gatewayv1.RouteReasonResolvedRefs),
 				"References resolved")
+			r.updateAttachedRoutesForGateway(ctx, gateway)
 			return nil
 		}
 	}
@@ -167,6 +167,7 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 			reasonCode, reason)
 		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
 			string(gatewayv1.RouteReasonResolvedRefs), "All references resolved")
+		r.updateAttachedRoutesForGateway(ctx, gateway)
 		return nil
 	}
 
@@ -203,9 +204,11 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 	status.SetHTTPRouteAccepted(route, parentRef, ControllerName, true,
 		string(gatewayv1.RouteReasonAccepted),
 		"Route accepted")
-	status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
-		string(gatewayv1.RouteReasonResolvedRefs),
-		"All references resolved")
+
+	// Validate backend refs
+	resolved, reason, message := r.validateBackendRefs(ctx, route)
+	status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, resolved,
+		reason, message)
 
 	return nil
 }
@@ -363,14 +366,19 @@ func (r *HTTPRouteReconciler) listenerAllowsRouteNamespace(ctx context.Context, 
 }
 
 // effectiveHostnames computes the set of effective hostnames for a route against
-// all of a gateway's listeners. This is the intersection of route hostnames with
-// listener hostnames, producing the most specific hostname from each match pair.
-func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) []gatewayv1.Hostname {
+// the gateway's listeners filtered by sectionName. This is the intersection of
+// route hostnames with listener hostnames, producing the most specific hostname
+// from each match pair.
+// If sectionName is non-nil, only listeners matching that name are considered.
+func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, sectionName *gatewayv1.SectionName) []gatewayv1.Hostname {
 	routeHostnames := route.Spec.Hostnames
 
-	// Collect all listener hostnames
+	// Collect listener hostnames, filtered by sectionName if specified
 	var listenerHostnames []*gatewayv1.Hostname
 	for i := range gateway.Spec.Listeners {
+		if sectionName != nil && string(gateway.Spec.Listeners[i].Name) != string(*sectionName) {
+			continue
+		}
 		listenerHostnames = append(listenerHostnames, gateway.Spec.Listeners[i].Hostname)
 	}
 
@@ -433,17 +441,19 @@ func computeEffectiveHostname(routeHostname, listenerHostname string) string {
 	}
 
 	// Listener is wildcard: *.example.com + foo.example.com → foo.example.com (more specific)
+	// Also matches multi-level subdomains: *.example.com + foo.bar.example.com → foo.bar.example.com
 	if strings.HasPrefix(listenerHostname, "*.") {
 		suffix := listenerHostname[1:] // ".example.com"
-		if strings.HasSuffix(routeHostname, suffix) && !strings.Contains(routeHostname[:len(routeHostname)-len(suffix)], ".") {
+		if strings.HasSuffix(routeHostname, suffix) {
 			return routeHostname // route hostname is more specific
 		}
 	}
 
 	// Route is wildcard: *.example.com + foo.example.com → foo.example.com (listener is more specific)
+	// Also matches multi-level subdomains
 	if strings.HasPrefix(routeHostname, "*.") {
 		suffix := routeHostname[1:] // ".example.com"
-		if strings.HasSuffix(listenerHostname, suffix) && !strings.Contains(listenerHostname[:len(listenerHostname)-len(suffix)], ".") {
+		if strings.HasSuffix(listenerHostname, suffix) {
 			return listenerHostname // listener hostname is more specific
 		}
 		// *.example.com + example.com → example.com
@@ -456,23 +466,61 @@ func computeEffectiveHostname(routeHostname, listenerHostname string) string {
 }
 
 // filterRouteHostnames returns copies of routes with hostnames filtered to only
-// those that intersect with the gateway's listeners.
+// those that intersect with the gateway's listeners. Each route's parentRefs are
+// inspected to determine which listener(s) it targets via sectionName, so that
+// a route targeting listener-1 only gets hostnames from that listener.
 func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) []gatewayv1.HTTPRoute {
 	filtered := make([]gatewayv1.HTTPRoute, 0, len(routes))
 	for i := range routes {
-		effective := effectiveHostnames(&routes[i], gateway)
-		// nil means catch-all (route had no hostnames, listener had no hostname)
-		if effective == nil {
+		// Collect effective hostnames across all parentRefs targeting this gateway.
+		// A route may have multiple parentRefs with different sectionNames.
+		seen := make(map[string]bool)
+		var allEffective []gatewayv1.Hostname
+		isCatchAll := false
+
+		for _, parentRef := range routes[i].Spec.ParentRefs {
+			// Skip non-Gateway refs
+			if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+				continue
+			}
+			// Check this parentRef targets the given gateway
+			if string(parentRef.Name) != gateway.Name {
+				continue
+			}
+			refNS := routes[i].Namespace
+			if parentRef.Namespace != nil {
+				refNS = string(*parentRef.Namespace)
+			}
+			if refNS != gateway.Namespace {
+				continue
+			}
+
+			effective := effectiveHostnames(&routes[i], gateway, parentRef.SectionName)
+			if effective == nil {
+				// Catch-all from this parentRef
+				isCatchAll = true
+				break
+			}
+			for _, h := range effective {
+				hs := string(h)
+				if !seen[hs] {
+					seen[hs] = true
+					allEffective = append(allEffective, h)
+				}
+			}
+		}
+
+		if isCatchAll {
 			filtered = append(filtered, routes[i])
 			continue
 		}
-		if len(effective) == 0 {
+		if len(allEffective) == 0 {
 			// No intersection - skip this route entirely
 			continue
 		}
 		// Create a copy with only the intersecting hostnames
 		routeCopy := routes[i].DeepCopy()
-		routeCopy.Spec.Hostnames = effective
+		routeCopy.Spec.Hostnames = allEffective
 		filtered = append(filtered, *routeCopy)
 	}
 	return filtered
@@ -545,6 +593,76 @@ func (r *HTTPRouteReconciler) computeConfigMapHash(routingJSON string) string {
 	h := sha256.New()
 	h.Write([]byte(routingJSON))
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// validateBackendRefs checks that all backend references in the route are valid.
+// Returns (true, reason, message) if all refs are resolved, or (false, reason, message) if not.
+func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, route *gatewayv1.HTTPRoute) (bool, string, string) {
+	for _, rule := range route.Spec.Rules {
+		for _, backendRef := range rule.BackendRefs {
+			// Check Kind (nil defaults to Service)
+			if backendRef.Kind != nil && *backendRef.Kind != "Service" {
+				return false, string(gatewayv1.RouteReasonInvalidKind),
+					fmt.Sprintf("BackendRef kind %q is not supported", *backendRef.Kind)
+			}
+			// Check Group (nil defaults to core)
+			if backendRef.Group != nil && *backendRef.Group != "" {
+				return false, string(gatewayv1.RouteReasonInvalidKind),
+					fmt.Sprintf("BackendRef group %q is not supported", *backendRef.Group)
+			}
+			// Check Service exists
+			namespace := route.Namespace
+			if backendRef.Namespace != nil {
+				namespace = string(*backendRef.Namespace)
+			}
+			var svc corev1.Service
+			if err := r.Get(ctx, types.NamespacedName{
+				Name:      string(backendRef.Name),
+				Namespace: namespace,
+			}, &svc); err != nil {
+				if apierrors.IsNotFound(err) {
+					return false, string(gatewayv1.RouteReasonBackendNotFound),
+						fmt.Sprintf("Service %q not found in namespace %q", backendRef.Name, namespace)
+				}
+				// Transient error — report as not resolved
+				return false, string(gatewayv1.RouteReasonBackendNotFound),
+					fmt.Sprintf("Failed to get Service %q: %v", backendRef.Name, err)
+			}
+		}
+	}
+	return true, string(gatewayv1.RouteReasonResolvedRefs), "All references resolved"
+}
+
+// updateAttachedRoutesOnDeletion updates AttachedRoutes for all Gateways with our
+// GatewayClass when a route is deleted. Since we don't have the deleted route's
+// parentRefs, we update all managed Gateways.
+func (r *HTTPRouteReconciler) updateAttachedRoutesOnDeletion(ctx context.Context, log *slog.Logger) {
+	var gatewayList gatewayv1.GatewayList
+	if err := r.List(ctx, &gatewayList); err != nil {
+		log.Error("failed to list Gateways for deletion cleanup", "error", err)
+		return
+	}
+	for i := range gatewayList.Items {
+		gw := &gatewayList.Items[i]
+		if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+			continue
+		}
+		r.updateAttachedRoutesForGateway(ctx, gw)
+	}
+}
+
+// updateAttachedRoutesForGateway lists routes and updates AttachedRoutes for a Gateway.
+// This is a convenience wrapper used in early-return paths where we have a valid Gateway
+// but the current route is rejected (invalid sectionName, not allowed, etc.).
+func (r *HTTPRouteReconciler) updateAttachedRoutesForGateway(ctx context.Context, gateway *gatewayv1.Gateway) {
+	routes, err := r.listRoutesForGateway(ctx, gateway)
+	if err != nil {
+		r.Logger.Error("failed to list routes for AttachedRoutes update", "error", err)
+		return
+	}
+	if err := r.updateGatewayListenerStatus(ctx, gateway, routes); err != nil {
+		r.Logger.Error("failed to update Gateway listener status", "error", err)
+	}
 }
 
 // updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.
@@ -681,10 +799,10 @@ func hostnameMatches(routeHostname, listenerHostname string) bool {
 		return true
 	}
 
-	// Listener wildcard: *.example.com matches foo.example.com
+	// Listener wildcard: *.example.com matches foo.example.com and foo.bar.example.com
 	if strings.HasPrefix(listenerHostname, "*.") {
 		suffix := listenerHostname[1:] // ".example.com"
-		if strings.HasSuffix(routeHostname, suffix) && !strings.Contains(routeHostname[:len(routeHostname)-len(suffix)], ".") {
+		if strings.HasSuffix(routeHostname, suffix) {
 			return true
 		}
 	}
@@ -692,7 +810,7 @@ func hostnameMatches(routeHostname, listenerHostname string) bool {
 	// Route wildcard: *.example.com matches listener example.com or *.example.com
 	if strings.HasPrefix(routeHostname, "*.") {
 		suffix := routeHostname[1:] // ".example.com"
-		if strings.HasSuffix(listenerHostname, suffix) && !strings.Contains(listenerHostname[:len(listenerHostname)-len(suffix)], ".") {
+		if strings.HasSuffix(listenerHostname, suffix) {
 			return true
 		}
 		// Route *.example.com also intersects with listener example.com

@@ -93,16 +93,19 @@ func SanitizeServiceName(name string) string {
 }
 
 // CalculateRoutePriority calculates the priority for a route based on all match criteria.
-// Higher priority = more specific match:
+// Higher priority = more specific match. Path specificity dominates over other criteria
+// to ensure path-based routing works correctly per Gateway API spec.
+//
 // Path specificity:
-//   - Exact: 10000
-//   - PathPrefix: 1000 + length*10
-//   - RegularExpression: 100
-//   - No match (default route): 0
-// Additional bonuses:
-//   - Method specified: +5000
-//   - Header matches: +1000 per header (max 16)
-//   - Query param matches: +500 per param (max 16)
+//   - Exact: 100000
+//   - PathPrefix: 10000 + length*100
+//   - RegularExpression: 5000
+//   - No path match: 0
+//
+// Additional bonuses (never override path specificity):
+//   - Header matches: +200 per header (max 16)
+//   - Query param matches: +100 per param (max 16)
+//   - Method specified: +50
 func CalculateRoutePriority(
 	pathMatch *ghost.PathMatch,
 	method *string,
@@ -111,36 +114,36 @@ func CalculateRoutePriority(
 ) int {
 	priority := 0
 
-	// Path specificity (0-10000+)
+	// Path specificity (dominates all other criteria)
 	if pathMatch != nil {
 		switch pathMatch.Type {
 		case ghost.PathMatchExact:
-			priority += 10000
+			priority += 100000
 		case ghost.PathMatchPathPrefix:
-			priority += 1000 + len(pathMatch.Value)*10
+			priority += 10000 + len(pathMatch.Value)*100
 		case ghost.PathMatchRegularExpression:
-			priority += 100
+			priority += 5000
 		}
 	}
 
-	// Method specificity (+5000)
+	// Method specificity (+50)
 	if method != nil {
-		priority += 5000
+		priority += 50
 	}
 
-	// Header specificity (1000 per header, max 16000)
+	// Header specificity (200 per header, max 3200)
 	headerCount := len(headers)
 	if headerCount > 16 {
 		headerCount = 16
 	}
-	priority += headerCount * 1000
+	priority += headerCount * 200
 
-	// Query param specificity (500 per param, max 8000)
+	// Query param specificity (100 per param, max 1600)
 	queryCount := len(queryParams)
 	if queryCount > 16 {
 		queryCount = 16
 	}
-	priority += queryCount * 500
+	priority += queryCount * 100
 
 	return priority
 }
@@ -150,6 +153,7 @@ func CalculateRoutePriority(
 func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []ghost.Route {
 	var collectedRoutes []ghost.Route
 
+	ruleIndex := 0
 	for _, route := range routes {
 		routeNS := route.Namespace
 		if routeNS == "" {
@@ -171,6 +175,31 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 				// Process each match in the rule
 				if len(rule.Matches) == 0 {
 					// No matches specified - create default route with PathPrefix "/"
+					// Extract filters even for no-match rules
+					var filters *ghost.RouteFilters
+					if len(rule.Filters) > 0 {
+						filters = extractFilters(rule.Filters)
+					}
+
+					// Handle filter-only routes with no backends (e.g., redirects with no matches)
+					if len(rule.BackendRefs) == 0 && filters != nil {
+						pathMatch := &ghost.PathMatch{
+							Type:  ghost.PathMatchPathPrefix,
+							Value: "/",
+						}
+						collectedRoutes = append(collectedRoutes, ghost.Route{
+							Hostname:  hostname,
+							PathMatch: pathMatch,
+							Filters:   filters,
+							Service:   "",
+							Namespace: routeNS,
+							Port:      0,
+							Weight:    0,
+							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
+							RuleIndex: ruleIndex,
+						})
+					}
+
 					for _, backend := range rule.BackendRefs {
 						if backend.Name == "" {
 							continue
@@ -186,7 +215,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 							port = int(*backend.Port)
 						}
 
-						weight := 100
+						weight := 1 // Gateway API default when unspecified
 						if backend.Weight != nil {
 							weight = int(*backend.Weight)
 						}
@@ -200,11 +229,13 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 						collectedRoutes = append(collectedRoutes, ghost.Route{
 							Hostname:  hostname,
 							PathMatch: pathMatch,
+							Filters:   filters,
 							Service:   string(backend.Name),
 							Namespace: backendNS,
 							Port:      port,
 							Weight:    weight,
 							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
+							RuleIndex: ruleIndex,
 						})
 					}
 				} else {
@@ -293,6 +324,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 								Port:        0,
 								Weight:      0,
 								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
+								RuleIndex:   ruleIndex,
 							})
 						}
 
@@ -329,19 +361,26 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 								Port:        port,
 								Weight:      weight,
 								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
+								RuleIndex:   ruleIndex,
 							})
 						}
 					}
 				}
+				ruleIndex++
 			}
 		}
 	}
 
-	// Sort by priority (descending), then by hostname and service for deterministic output
+	// Sort by priority (descending), then by rule index (ascending) for tiebreaking,
+	// then by hostname and service for deterministic output
 	slices.SortFunc(collectedRoutes, func(a, b ghost.Route) int {
 		// Higher priority first
 		if a.Priority != b.Priority {
 			return b.Priority - a.Priority
+		}
+		// Lower rule index first (earlier rules win)
+		if a.RuleIndex != b.RuleIndex {
+			return a.RuleIndex - b.RuleIndex
 		}
 		if a.Hostname != b.Hostname {
 			return strings.Compare(a.Hostname, b.Hostname)

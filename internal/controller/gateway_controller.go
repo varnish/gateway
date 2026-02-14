@@ -489,17 +489,12 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			})
 		}
 
-		// Preserve AttachedRoutes from current status (owned by HTTPRoute controller).
-		// AttachedRoutes is int32 (not pointer), so the zero value is serialized in SSA patches.
-		// We must copy the current value to avoid overwriting the HTTPRoute controller's value.
-		attachedRoutes := int32(0)
-		if existing, ok := existingStatuses[listener.Name]; ok {
-			attachedRoutes = existing.AttachedRoutes
-		}
+		// AttachedRoutes is owned by HTTPRoute controller via SSA with ForceOwnership.
+		// We don't set it here - the int32 zero value will be in the patch but
+		// the HTTPRoute controller will take ownership with its correct value.
 		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
 			Name:           listener.Name,
 			SupportedKinds: supportedKinds,
-			AttachedRoutes: attachedRoutes,
 			Conditions:     conditions,
 		})
 	}
