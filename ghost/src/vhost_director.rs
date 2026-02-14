@@ -754,12 +754,14 @@ fn apply_request_header_filter(
         bereq.unset_header(name);
     }
 
-    // Set headers (replaces)
+    // Set headers (replaces) — must unset first since set_header() appends
     for action in &filter.set {
+        bereq.unset_header(&action.name);
         bereq.set_header(&action.name, &action.value)?;
     }
 
     // Add headers (appends to existing value per Gateway API spec)
+    // Must unset+set to avoid duplicate header slots
     for action in &filter.add {
         if let Some(existing) = bereq.header(&action.name) {
             let existing_str = match existing {
@@ -767,6 +769,7 @@ fn apply_request_header_filter(
                 StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             };
             let combined = format!("{}, {}", existing_str, action.value);
+            bereq.unset_header(&action.name);
             bereq.set_header(&action.name, &combined)?;
         } else {
             bereq.set_header(&action.name, &action.value)?;
@@ -784,8 +787,9 @@ fn apply_url_rewrite_filter(
     let bereq = ctx.http_bereq.as_mut()
         .ok_or_else(|| VclError::new("no bereq".to_string()))?;
 
-    // Rewrite hostname
+    // Rewrite hostname — must unset first since set_header() appends
     if let Some(hostname) = &filter.hostname {
+        bereq.unset_header("host");
         bereq.set_header("host", hostname)?;
     }
 

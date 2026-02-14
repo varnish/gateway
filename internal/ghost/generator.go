@@ -121,21 +121,19 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			allBackends = append(allBackends, backends...)
 		}
 
-		// Create RouteBackends if we have backends OR filters (e.g., RequestRedirect)
+		// Always include routes — routes with empty backends will get 500 from ghost VMOD.
 		// Use the first route's match criteria (all routes in group have identical criteria)
 		firstRoute := routeGroup[0]
-		if len(allBackends) > 0 || firstRoute.Filters != nil {
-			result = append(result, RouteBackends{
-				PathMatch:   firstRoute.PathMatch,
-				Method:      firstRoute.Method,
-				Headers:     firstRoute.Headers,
-				QueryParams: firstRoute.QueryParams,
-				Filters:     firstRoute.Filters,
-				Backends:    allBackends,
-				Priority:    key.priority,
-				RuleIndex:   key.ruleIndex,
-			})
-		}
+		result = append(result, RouteBackends{
+			PathMatch:   firstRoute.PathMatch,
+			Method:      firstRoute.Method,
+			Headers:     firstRoute.Headers,
+			QueryParams: firstRoute.QueryParams,
+			Filters:     firstRoute.Filters,
+			Backends:    allBackends,
+			Priority:    key.priority,
+			RuleIndex:   key.ruleIndex,
+		})
 	}
 
 	return result

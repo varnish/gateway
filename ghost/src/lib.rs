@@ -284,12 +284,14 @@ mod ghost {
             resp.unset_header(name);
         }
 
-        // Set headers
+        // Set headers — must unset first since set_header() appends
         for action in &filter.set {
+            resp.unset_header(&action.name);
             let _ = resp.set_header(&action.name, &action.value);
         }
 
         // Add headers (appends to existing value per Gateway API spec)
+        // Must unset+set to avoid duplicate header slots
         for action in &filter.add {
             match resp.header(&action.name) {
                 Some(existing) => {
@@ -298,6 +300,7 @@ mod ghost {
                         StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
                     };
                     let combined = format!("{}, {}", existing_str, action.value);
+                    resp.unset_header(&action.name);
                     let _ = resp.set_header(&action.name, &combined);
                 }
                 None => {

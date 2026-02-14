@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -65,12 +66,14 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// 3. Process each parentRef
+	var processErr error
 	for _, parentRef := range route.Spec.ParentRefs {
 		if err := r.processParentRef(ctx, &route, parentRef); err != nil {
 			// Log but continue processing other parentRefs
 			log.Error("failed to process parentRef",
 				"parentRef", parentRef.Name,
 				"error", err)
+			processErr = err
 		}
 	}
 
@@ -88,6 +91,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	route.Status = routeStatus
 	if err := r.Status().Update(ctx, &route); err != nil {
 		return ctrl.Result{}, fmt.Errorf("r.Status().Update: %w", err)
+	}
+
+	// If any parentRef failed (e.g., ConfigMap not yet created), requeue
+	if processErr != nil {
+		log.Info("requeuing HTTPRoute due to processing error", "error", processErr)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	log.Debug("HTTPRoute reconciliation complete")
@@ -191,6 +200,7 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 
 	// Update Gateway's ConfigMap with generated VCL
 	if err := r.updateConfigMap(ctx, gateway, routes); err != nil {
+		// If ConfigMap doesn't exist yet, set Pending and return wrapped error for requeue
 		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
 			string(gatewayv1.RouteReasonPending),
 			fmt.Sprintf("Failed to update ConfigMap: %v", err))
@@ -209,6 +219,12 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 	resolved, reason, message := r.validateBackendRefs(ctx, route)
 	status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, resolved,
 		reason, message)
+
+	// If backends not resolved due to BackendNotFound, requeue to retry
+	// (Service may not exist yet due to race condition)
+	if !resolved && reason == string(gatewayv1.RouteReasonBackendNotFound) {
+		return fmt.Errorf("backend not found (will requeue): %s", message)
+	}
 
 	return nil
 }
@@ -551,6 +567,10 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	cmName := fmt.Sprintf("%s-vcl", gateway.Name)
 	var cm corev1.ConfigMap
 	if err := r.Get(ctx, types.NamespacedName{Name: cmName, Namespace: gateway.Namespace}, &cm); err != nil {
+		if apierrors.IsNotFound(err) {
+			// ConfigMap not yet created by Gateway controller — will be requeued
+			return fmt.Errorf("r.Get(%s): %w", cmName, err)
+		}
 		return fmt.Errorf("r.Get(%s): %w", cmName, err)
 	}
 

@@ -59,8 +59,8 @@ client c1 {
     txreq -hdr "Host: alpha.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
-    expect resp.body == "{\"error\": \"vhost not found\"}"
+    expect resp.http.Content-Type == "text/plain"
+    expect resp.body == "vhost not found"
 } -run
 
 # Test 2: api.example.com has no routes, should also return 404
@@ -68,8 +68,8 @@ client c2 {
     txreq -hdr "Host: api.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
-    expect resp.body == "{\"error\": \"vhost not found\"}"
+    expect resp.http.Content-Type == "text/plain"
+    expect resp.body == "vhost not found"
 } -run
 
 # Test 3: Undefined vhost should also return 404
@@ -77,6 +77,6 @@ client c3 {
     txreq -hdr "Host: unknown.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
-    expect resp.body == "{\"error\": \"vhost not found\"}"
+    expect resp.http.Content-Type == "text/plain"
+    expect resp.body == "vhost not found"
 } -run

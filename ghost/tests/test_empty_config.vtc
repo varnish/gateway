@@ -52,8 +52,8 @@ client c1 {
     txreq -hdr "Host: api.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
-    expect resp.body == "{\"error\": \"vhost not found\"}"
+    expect resp.http.Content-Type == "text/plain"
+    expect resp.body == "vhost not found"
 } -run
 
 # Test 2: Another vhost should also return 404
@@ -61,8 +61,8 @@ client c2 {
     txreq -hdr "Host: www.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
-    expect resp.body == "{\"error\": \"vhost not found\"}"
+    expect resp.http.Content-Type == "text/plain"
+    expect resp.body == "vhost not found"
 } -run
 
 # Test 3: Wildcard-style hostname should also return 404
@@ -70,6 +70,6 @@ client c3 {
     txreq -hdr "Host: anything.staging.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
-    expect resp.body == "{\"error\": \"vhost not found\"}"
+    expect resp.http.Content-Type == "text/plain"
+    expect resp.body == "vhost not found"
 } -run

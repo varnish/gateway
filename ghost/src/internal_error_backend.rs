@@ -12,7 +12,7 @@ impl VclBackend<InternalErrorBody> for InternalErrorBackend {
     fn get_response(&self, ctx: &mut Ctx) -> Result<Option<InternalErrorBody>, VclError> {
         let beresp = ctx.http_beresp.as_mut().unwrap();
         beresp.set_status(500);
-        beresp.set_header("Content-Type", "application/json")?;
+        beresp.set_header("Content-Type", "text/plain")?;
 
         Ok(Some(InternalErrorBody::new()))
     }
@@ -28,7 +28,7 @@ impl InternalErrorBody {
     /// Create a new 500 response body
     pub fn new() -> Self {
         Self {
-            data: b"{\"error\": \"no backends available\"}",
+            data: b"no backends available",
             cursor: 0,
         }
     }
@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn test_internal_error_body_len() {
         let body = InternalErrorBody::new();
-        assert_eq!(body.len(), Some(34));
+        assert_eq!(body.len(), Some(21));
     }
 
     #[test]
@@ -72,8 +72,8 @@ mod tests {
         let mut buf = vec![0u8; 100];
 
         let n = body.read(&mut buf).unwrap();
-        assert_eq!(n, 34);
-        assert_eq!(&buf[..n], b"{\"error\": \"no backends available\"}");
+        assert_eq!(n, 21);
+        assert_eq!(&buf[..n], b"no backends available");
 
         // Second read should return 0 (EOF)
         let n = body.read(&mut buf).unwrap();

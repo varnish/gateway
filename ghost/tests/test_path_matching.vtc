@@ -164,7 +164,7 @@ client c6 {
     txreq -url "/files/abc" -hdr "Host: files.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
+    expect resp.http.Content-Type == "text/plain"
 } -run
 
 # Test 7: Query strings should be stripped before matching

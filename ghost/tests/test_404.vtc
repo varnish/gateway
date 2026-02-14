@@ -69,11 +69,11 @@ client c1 {
     expect resp.body == "backend-api"
 } -run
 
-# Test 2: Unknown vhost should return 404 with JSON
+# Test 2: Unknown vhost should return 404 with plain text
 client c2 {
     txreq -hdr "Host: unknown.example.com"
     rxresp
     expect resp.status == 404
-    expect resp.http.Content-Type == "application/json"
-    expect resp.body == "{\"error\": \"vhost not found\"}"
+    expect resp.http.Content-Type == "text/plain"
+    expect resp.body == "vhost not found"
 } -run

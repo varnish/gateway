@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	discoveryv1listers "k8s.io/client-go/listers/discovery/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
@@ -52,6 +54,9 @@ type Watcher struct {
 	lastConfigMapRV    string // last seen ResourceVersion for deduplication
 	lastRoutingJSON    string // last seen routing.json content for content-based deduplication
 	lastRoutingJSONMux sync.RWMutex // protect lastRoutingJSON
+
+	// EndpointSlice lister for backfilling endpoints on new service watches
+	endpointSliceLister discoveryv1listers.EndpointSliceLister
 }
 
 // NewWatcher creates a new ghost configuration watcher.
@@ -136,6 +141,7 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 	)
 
 	endpointSliceInformer := endpointSliceFactory.Discovery().V1().EndpointSlices().Informer()
+	w.endpointSliceLister = endpointSliceFactory.Discovery().V1().EndpointSlices().Lister()
 	_, err = endpointSliceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if slice, ok := obj.(*discoveryv1.EndpointSlice); ok {
@@ -549,8 +555,17 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 	}
 
 	w.mu.Lock()
+	oldServiceWatch := w.serviceWatch
 	w.routingConfig = config
 	w.updateServiceWatch(config)
+
+	// Backfill endpoints for newly-watched services from the informer cache.
+	// When the ConfigMap adds new services, the EndpointSlice informer may have
+	// already synced those slices but filtered them out because they weren't in
+	// serviceWatch at the time. Query the lister to pick them up immediately.
+	if w.endpointSliceLister != nil {
+		w.backfillEndpoints(oldServiceWatch)
+	}
 	w.mu.Unlock()
 
 	w.logger.Info("routing config loaded from ConfigMap")
@@ -566,6 +581,44 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 		select {
 		case w.fatalErrCh <- err:
 		default:
+		}
+	}
+}
+
+// backfillEndpoints queries the EndpointSlice lister for services that are newly watched
+// but whose EndpointSlice events were missed. Must be called with w.mu held.
+func (w *Watcher) backfillEndpoints(oldServiceWatch map[string]struct{}) {
+	for serviceKey := range w.serviceWatch {
+		if _, existed := oldServiceWatch[serviceKey]; existed {
+			continue // already watching, skip
+		}
+
+		// Parse namespace/name from service key
+		parts := strings.SplitN(serviceKey, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		namespace, serviceName := parts[0], parts[1]
+
+		// Query the EndpointSlice lister for this service
+		slices, err := w.endpointSliceLister.EndpointSlices(namespace).List(
+			labels.SelectorFromSet(labels.Set{serviceLabelKey: serviceName}))
+		if err != nil {
+			w.logger.Error("failed to list EndpointSlices from cache",
+				"service", serviceKey, "error", err)
+			continue
+		}
+
+		var allEndpoints []Endpoint
+		for _, slice := range slices {
+			allEndpoints = append(allEndpoints, extractEndpoints(slice)...)
+		}
+
+		if len(allEndpoints) > 0 {
+			w.endpoints[serviceKey] = allEndpoints
+			w.logger.Info("backfilled endpoints for newly-watched service",
+				"service", serviceKey,
+				"endpoints", len(allEndpoints))
 		}
 	}
 }

@@ -128,12 +128,15 @@ func TestGenerateNoEndpoints(t *testing.T) {
 		t.Fatal("api.example.com vhost not found")
 	}
 
-	// Routes should be empty array, not nil
+	// Routes should be preserved with empty backends (ghost returns 500 for these)
 	if vhost.Routes == nil {
 		t.Error("Routes should be empty array, not nil")
 	}
-	if len(vhost.Routes) != 0 {
-		t.Errorf("expected 0 routes (no endpoints), got %d", len(vhost.Routes))
+	if len(vhost.Routes) != 1 {
+		t.Errorf("expected 1 route (with empty backends), got %d", len(vhost.Routes))
+	}
+	if len(vhost.Routes) > 0 && len(vhost.Routes[0].Backends) != 0 {
+		t.Errorf("expected 0 backends for route, got %d", len(vhost.Routes[0].Backends))
 	}
 
 	// DefaultBackends should be empty array, not nil
