@@ -886,7 +886,7 @@ func TestIsRouteAllowedByGateway(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			objs := append([]runtime.Object{}, tc.objs...)
 			r := newHTTPRouteTestReconciler(scheme, objs...)
-			got, _ := r.isRouteAllowedByGateway(context.Background(), tc.route, tc.gateway)
+			got, _, _ := r.isRouteAllowedByGateway(context.Background(), tc.route, tc.gateway)
 			if got != tc.allowed {
 				t.Errorf("expected allowed=%v, got %v", tc.allowed, got)
 			}

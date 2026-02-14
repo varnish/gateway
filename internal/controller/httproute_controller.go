@@ -160,11 +160,11 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 	}
 
 	// Check if the route's namespace is allowed by the Gateway's listeners
-	allowed, reason := r.isRouteAllowedByGateway(ctx, route, gateway)
+	allowed, reasonCode, reason := r.isRouteAllowedByGateway(ctx, route, gateway)
 	if !allowed {
-		log.Info("route namespace not allowed by Gateway listeners", "reason", reason)
+		log.Info("route not allowed by Gateway listeners", "reasonCode", reasonCode, "reason", reason)
 		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
-			string(gatewayv1.RouteReasonNotAllowedByListeners), reason)
+			reasonCode, reason)
 		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
 			string(gatewayv1.RouteReasonResolvedRefs), "All references resolved")
 		return nil
@@ -182,6 +182,12 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 		return fmt.Errorf("r.listRoutesForGateway: %w", err)
 	}
 
+	// Update Gateway's listener AttachedRoutes count (control plane, independent of data plane)
+	if err := r.updateGatewayListenerStatus(ctx, gateway, routes); err != nil {
+		log.Error("failed to update Gateway listener status", "error", err)
+		// Don't return error - the route is still accepted
+	}
+
 	// Update Gateway's ConfigMap with generated VCL
 	if err := r.updateConfigMap(ctx, gateway, routes); err != nil {
 		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
@@ -191,12 +197,6 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 			string(gatewayv1.RouteReasonResolvedRefs),
 			"References resolved")
 		return fmt.Errorf("r.updateConfigMap: %w", err)
-	}
-
-	// Update Gateway's listener AttachedRoutes count
-	if err := r.updateGatewayListenerStatus(ctx, gateway, routes); err != nil {
-		log.Error("failed to update Gateway listener status", "error", err)
-		// Don't return error - the route is still accepted
 	}
 
 	// Set success status
@@ -242,7 +242,7 @@ func (r *HTTPRouteReconciler) listRoutesForGateway(ctx context.Context, gateway 
 		if !r.routeAttachedToGateway(&route, gateway) {
 			continue
 		}
-		allowed, _ := r.isRouteAllowedByGateway(ctx, &route, gateway)
+		allowed, _, _ := r.isRouteAllowedByGateway(ctx, &route, gateway)
 		if !allowed {
 			continue
 		}
@@ -288,12 +288,14 @@ func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute,
 // A route is allowed if at least one listener:
 // 1. Allows the route's namespace (per AllowedRoutes policy)
 // 2. Has hostname intersection with the route (or either has no hostname)
-// Returns (true, "") if any listener allows the route, or (false, reason) if none do.
-func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string) {
+// Returns (true, "", "") if any listener allows the route, or (false, reasonCode, message) if none do.
+// The reasonCode distinguishes between NotAllowedByListeners and NoMatchingListenerHostname.
+func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string, string) {
 	if len(gateway.Spec.Listeners) == 0 {
-		return false, "Gateway has no listeners"
+		return false, string(gatewayv1.RouteReasonNotAllowedByListeners), "Gateway has no listeners"
 	}
 
+	namespaceAllowed := false
 	for _, listener := range gateway.Spec.Listeners {
 		// Check namespace policy
 		allowed, err := r.listenerAllowsRouteNamespace(ctx, route, gateway, listener)
@@ -305,17 +307,24 @@ func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route
 		if !allowed {
 			continue
 		}
+		namespaceAllowed = true
 
 		// Check hostname intersection
 		if !hostnamesIntersect(route.Spec.Hostnames, listener.Hostname) {
 			continue
 		}
 
-		return true, ""
+		return true, "", ""
 	}
 
-	return false, fmt.Sprintf("Route not allowed by any listener on Gateway %s/%s",
-		gateway.Namespace, gateway.Name)
+	if namespaceAllowed {
+		// Namespace was allowed by at least one listener, but hostnames didn't intersect
+		return false, string(gatewayv1.RouteReasonNoMatchingListenerHostname),
+			fmt.Sprintf("No matching listener hostname on Gateway %s/%s", gateway.Namespace, gateway.Name)
+	}
+
+	return false, string(gatewayv1.RouteReasonNotAllowedByListeners),
+		fmt.Sprintf("Route not allowed by any listener on Gateway %s/%s", gateway.Namespace, gateway.Name)
 }
 
 // listenerAllowsRouteNamespace checks if a specific listener allows routes from the route's namespace.
@@ -353,10 +362,129 @@ func (r *HTTPRouteReconciler) listenerAllowsRouteNamespace(ctx context.Context, 
 	}
 }
 
+// effectiveHostnames computes the set of effective hostnames for a route against
+// all of a gateway's listeners. This is the intersection of route hostnames with
+// listener hostnames, producing the most specific hostname from each match pair.
+func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) []gatewayv1.Hostname {
+	routeHostnames := route.Spec.Hostnames
+
+	// Collect all listener hostnames
+	var listenerHostnames []*gatewayv1.Hostname
+	for i := range gateway.Spec.Listeners {
+		listenerHostnames = append(listenerHostnames, gateway.Spec.Listeners[i].Hostname)
+	}
+
+	// If route has no hostnames and any listener has no hostname, result is catch-all
+	// If route has no hostnames, effective hostnames are the listener hostnames
+	if len(routeHostnames) == 0 {
+		seen := make(map[string]bool)
+		var result []gatewayv1.Hostname
+		for _, lh := range listenerHostnames {
+			if lh == nil {
+				// Catch-all: route with no hostnames + listener with no hostname
+				if !seen["*"] {
+					seen["*"] = true
+					// Return empty to signal catch-all (CollectHTTPRouteBackends handles this)
+					return nil
+				}
+			} else {
+				h := string(*lh)
+				if !seen[h] {
+					seen[h] = true
+					result = append(result, gatewayv1.Hostname(h))
+				}
+			}
+		}
+		return result
+	}
+
+	// Route has hostnames - intersect each with each listener hostname
+	seen := make(map[string]bool)
+	var result []gatewayv1.Hostname
+	for _, rh := range routeHostnames {
+		for _, lh := range listenerHostnames {
+			if lh == nil {
+				// Listener with no hostname matches everything - keep route hostname as-is
+				h := string(rh)
+				if !seen[h] {
+					seen[h] = true
+					result = append(result, rh)
+				}
+				continue
+			}
+
+			effective := computeEffectiveHostname(string(rh), string(*lh))
+			if effective != "" && !seen[effective] {
+				seen[effective] = true
+				result = append(result, gatewayv1.Hostname(effective))
+			}
+		}
+	}
+
+	return result
+}
+
+// computeEffectiveHostname returns the most specific hostname from the intersection
+// of a route hostname and listener hostname. Returns "" if they don't intersect.
+func computeEffectiveHostname(routeHostname, listenerHostname string) string {
+	// Exact match
+	if routeHostname == listenerHostname {
+		return routeHostname
+	}
+
+	// Listener is wildcard: *.example.com + foo.example.com → foo.example.com (more specific)
+	if strings.HasPrefix(listenerHostname, "*.") {
+		suffix := listenerHostname[1:] // ".example.com"
+		if strings.HasSuffix(routeHostname, suffix) && !strings.Contains(routeHostname[:len(routeHostname)-len(suffix)], ".") {
+			return routeHostname // route hostname is more specific
+		}
+	}
+
+	// Route is wildcard: *.example.com + foo.example.com → foo.example.com (listener is more specific)
+	if strings.HasPrefix(routeHostname, "*.") {
+		suffix := routeHostname[1:] // ".example.com"
+		if strings.HasSuffix(listenerHostname, suffix) && !strings.Contains(listenerHostname[:len(listenerHostname)-len(suffix)], ".") {
+			return listenerHostname // listener hostname is more specific
+		}
+		// *.example.com + example.com → example.com
+		if listenerHostname == routeHostname[2:] {
+			return listenerHostname
+		}
+	}
+
+	return ""
+}
+
+// filterRouteHostnames returns copies of routes with hostnames filtered to only
+// those that intersect with the gateway's listeners.
+func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) []gatewayv1.HTTPRoute {
+	filtered := make([]gatewayv1.HTTPRoute, 0, len(routes))
+	for i := range routes {
+		effective := effectiveHostnames(&routes[i], gateway)
+		// nil means catch-all (route had no hostnames, listener had no hostname)
+		if effective == nil {
+			filtered = append(filtered, routes[i])
+			continue
+		}
+		if len(effective) == 0 {
+			// No intersection - skip this route entirely
+			continue
+		}
+		// Create a copy with only the intersecting hostnames
+		routeCopy := routes[i].DeepCopy()
+		routeCopy.Spec.Hostnames = effective
+		filtered = append(filtered, *routeCopy)
+	}
+	return filtered
+}
+
 // updateConfigMap updates the Gateway's ConfigMap with routing.json (preserves main.vcl).
 func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
+	// Filter route hostnames to only those intersecting with gateway listeners
+	filteredRoutes := filterRouteHostnames(routes, gateway)
+
 	// Generate routing.json for ghost with path-based routing
-	collectedRoutes := vcl.CollectHTTPRouteBackends(routes, gateway.Namespace)
+	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway.Namespace)
 
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)
