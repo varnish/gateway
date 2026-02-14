@@ -243,6 +243,11 @@ fn validate_hostname(hostname: &str) -> Result<(), String> {
         return Err("hostname cannot be empty".to_string());
     }
 
+    // "*" alone is the catch-all sentinel for routes with no explicit hostnames
+    if hostname == "*" {
+        return Ok(());
+    }
+
     // Check for valid wildcard pattern
     if hostname.contains('*') {
         // Only allow leading wildcard: *.example.com

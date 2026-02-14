@@ -156,7 +156,17 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 			routeNS = namespace
 		}
 
-		for _, hostname := range route.Spec.Hostnames {
+		// When no hostnames are specified, the route matches all hostnames.
+		// Use "*" as a sentinel that ghost VMOD treats as a catch-all.
+		hostnames := make([]string, len(route.Spec.Hostnames))
+		for i, h := range route.Spec.Hostnames {
+			hostnames[i] = string(h)
+		}
+		if len(hostnames) == 0 {
+			hostnames = []string{"*"}
+		}
+
+		for _, hostname := range hostnames {
 			for _, rule := range route.Spec.Rules {
 				// Process each match in the rule
 				if len(rule.Matches) == 0 {
@@ -188,7 +198,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 						}
 
 						collectedRoutes = append(collectedRoutes, ghost.Route{
-							Hostname:  string(hostname),
+							Hostname:  hostname,
 							PathMatch: pathMatch,
 							Service:   string(backend.Name),
 							Namespace: backendNS,
@@ -272,7 +282,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 						// create a single route with the filters
 						if len(rule.BackendRefs) == 0 && filters != nil {
 							collectedRoutes = append(collectedRoutes, ghost.Route{
-								Hostname:    string(hostname),
+								Hostname:    hostname,
 								PathMatch:   pathMatch,
 								Method:      method,
 								Headers:     headers,
@@ -308,7 +318,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 							}
 
 							collectedRoutes = append(collectedRoutes, ghost.Route{
-								Hostname:    string(hostname),
+								Hostname:    hostname,
 								PathMatch:   pathMatch,
 								Method:      method,
 								Headers:     headers,

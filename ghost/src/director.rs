@@ -612,7 +612,7 @@ impl VclDirector for GhostDirector {
 /// Match hostname to vhost director
 ///
 /// Returns the vhost director for the matched hostname.
-/// Matching priority: exact hostname > wildcard hostname
+/// Matching priority: exact hostname > wildcard hostname > catch-all ("*")
 fn match_hostname<'a>(
     directors: &'a VhostDirectorMap,
     host: &str,
@@ -629,6 +629,11 @@ fn match_hostname<'a>(
         if matches_wildcard(pattern, &host) {
             return Some(director);
         }
+    }
+
+    // 3. Try catch-all ("*") — routes with no explicit hostnames
+    if let Some(director) = directors.exact.get("*") {
+        return Some(director);
     }
 
     None
