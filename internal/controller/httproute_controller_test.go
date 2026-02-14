@@ -55,7 +55,7 @@ func TestReconcile_ValidRoute(t *testing.T) {
 		},
 		Data: map[string]string{
 			"main.vcl":      "vcl 4.1;",
-			"routing.json": `{"version": 1, "vhosts": {}}`,
+			"routing.json": `{"version": 2, "vhosts": {}}`,
 		},
 	}
 
@@ -303,7 +303,7 @@ func TestReconcile_MultipleRoutesToGateway(t *testing.T) {
 		},
 		Data: map[string]string{
 			"main.vcl":      "vcl 4.1;",
-			"routing.json": `{"version": 1, "vhosts": {}}`,
+			"routing.json": `{"version": 2, "vhosts": {}}`,
 		},
 	}
 

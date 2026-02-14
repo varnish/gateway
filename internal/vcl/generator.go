@@ -145,66 +145,9 @@ func CalculateRoutePriority(
 	return priority
 }
 
-// CollectHTTPRouteBackends extracts backend information from HTTPRoutes for ghost config generation.
-// Returns a list of HTTPRouteBackend structs that can be used to generate routing.json.
-func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []ghost.HTTPRouteBackend {
-	var backends []ghost.HTTPRouteBackend
-
-	for _, route := range routes {
-		routeNS := route.Namespace
-		if routeNS == "" {
-			routeNS = namespace
-		}
-
-		for _, hostname := range route.Spec.Hostnames {
-			for _, rule := range route.Spec.Rules {
-				for _, backend := range rule.BackendRefs {
-					if backend.Name == "" {
-						continue
-					}
-
-					// Determine backend namespace
-					backendNS := routeNS
-					if backend.Namespace != nil {
-						backendNS = string(*backend.Namespace)
-					}
-
-					port := 80
-					if backend.Port != nil {
-						port = int(*backend.Port)
-					}
-
-					weight := 100
-					if backend.Weight != nil {
-						weight = int(*backend.Weight)
-					}
-
-					backends = append(backends, ghost.HTTPRouteBackend{
-						Hostname:  string(hostname),
-						Service:   string(backend.Name),
-						Namespace: backendNS,
-						Port:      port,
-						Weight:    weight,
-					})
-				}
-			}
-		}
-	}
-
-	// Sort for deterministic output
-	slices.SortFunc(backends, func(a, b ghost.HTTPRouteBackend) int {
-		if a.Hostname != b.Hostname {
-			return strings.Compare(a.Hostname, b.Hostname)
-		}
-		return strings.Compare(a.Service, b.Service)
-	})
-
-	return backends
-}
-
-// CollectHTTPRouteBackendsV2 extracts backend and path match information from HTTPRoutes for v2 config.
+// CollectHTTPRouteBackends extracts backend and path match information from HTTPRoutes for config generation.
 // Returns a list of Route structs that include path matching rules.
-func CollectHTTPRouteBackendsV2(routes []gatewayv1.HTTPRoute, namespace string) []ghost.Route {
+func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []ghost.Route {
 	var collectedRoutes []ghost.Route
 
 	for _, route := range routes {

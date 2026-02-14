@@ -300,8 +300,8 @@ func (r *HTTPRouteReconciler) listenerAllowsRouteNamespace(ctx context.Context, 
 
 // updateConfigMap updates the Gateway's ConfigMap with routing.json (preserves main.vcl).
 func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
-	// Generate v2 routing.json for ghost with path-based routing
-	collectedRoutes := vcl.CollectHTTPRouteBackendsV2(routes, gateway.Namespace)
+	// Generate routing.json for ghost with path-based routing
+	collectedRoutes := vcl.CollectHTTPRouteBackends(routes, gateway.Namespace)
 
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)
@@ -309,8 +309,8 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		routesByHost[route.Hostname] = append(routesByHost[route.Hostname], route)
 	}
 
-	// Generate v2 routing config
-	routingConfig := ghost.GenerateRoutingConfigV2(routesByHost, nil)
+	// Generate routing config
+	routingConfig := ghost.GenerateRoutingConfig(routesByHost, nil)
 	routingJSON, err := json.MarshalIndent(routingConfig, "", "  ")
 	if err != nil {
 		return fmt.Errorf("json.MarshalIndent: %w", err)

@@ -349,13 +349,19 @@ func TestWatcherReloadFailureFatal(t *testing.T) {
 
 	// Prepare routing config data
 	routingConfig := &RoutingConfig{
-		Version: 1,
-		VHosts: map[string]RoutingRule{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
 			"test.example.com": {
-				Service:   "test-service",
-				Namespace: "default",
-				Port:      8080,
-				Weight:    100,
+				Routes: []Route{
+					{
+						PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/"},
+						Service:   "test-service",
+						Namespace: "default",
+						Port:      8080,
+						Weight:    100,
+						Priority:  100,
+					},
+				},
 			},
 		},
 	}
@@ -478,13 +484,19 @@ func TestWatcherReloadSuccessDoesNotExit(t *testing.T) {
 
 	// Prepare routing config data
 	routingConfig := &RoutingConfig{
-		Version: 1,
-		VHosts: map[string]RoutingRule{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
 			"test.example.com": {
-				Service:   "test-service",
-				Namespace: "default",
-				Port:      8080,
-				Weight:    100,
+				Routes: []Route{
+					{
+						PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/"},
+						Service:   "test-service",
+						Namespace: "default",
+						Port:      8080,
+						Weight:    100,
+						Priority:  100,
+					},
+				},
 			},
 		},
 	}

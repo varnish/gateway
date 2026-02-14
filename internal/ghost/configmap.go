@@ -24,7 +24,7 @@ func ValidateRoutingConfig(data []byte) error {
 	if err := json.Unmarshal(data, &check); err != nil {
 		return fmt.Errorf("json.Unmarshal: %w", err)
 	}
-	if check.Version != 1 && check.Version != 2 {
+	if check.Version != 2 {
 		return fmt.Errorf("unsupported version: %d", check.Version)
 	}
 	return nil

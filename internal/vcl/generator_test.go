@@ -201,184 +201,6 @@ func TestGenerate_DeterministicOutput(t *testing.T) {
 	}
 }
 
-func TestCollectHTTPRouteBackends(t *testing.T) {
-	routes := []gatewayv1.HTTPRoute{
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
-			Spec: gatewayv1.HTTPRouteSpec{
-				Hostnames: []gatewayv1.Hostname{"api.example.com"},
-				Rules: []gatewayv1.HTTPRouteRule{
-					{
-						BackendRefs: []gatewayv1.HTTPBackendRef{
-							{
-								BackendRef: gatewayv1.BackendRef{
-									BackendObjectReference: gatewayv1.BackendObjectReference{
-										Name: "api-service",
-										Port: ptr(gatewayv1.PortNumber(8080)),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "route-2", Namespace: "production"},
-			Spec: gatewayv1.HTTPRouteSpec{
-				Hostnames: []gatewayv1.Hostname{"web.example.com"},
-				Rules: []gatewayv1.HTTPRouteRule{
-					{
-						BackendRefs: []gatewayv1.HTTPBackendRef{
-							{
-								BackendRef: gatewayv1.BackendRef{
-									BackendObjectReference: gatewayv1.BackendObjectReference{
-										Name: "web-service",
-										Port: ptr(gatewayv1.PortNumber(80)),
-									},
-									Weight: ptr(int32(50)),
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	backends := CollectHTTPRouteBackends(routes, "default")
-
-	if len(backends) != 2 {
-		t.Fatalf("expected 2 backends, got %d", len(backends))
-	}
-
-	// Should be sorted by hostname
-	if backends[0].Hostname != "api.example.com" {
-		t.Errorf("expected first backend hostname api.example.com, got %s", backends[0].Hostname)
-	}
-	if backends[0].Service != "api-service" {
-		t.Errorf("expected first backend service api-service, got %s", backends[0].Service)
-	}
-	if backends[0].Namespace != "default" {
-		t.Errorf("expected first backend namespace default, got %s", backends[0].Namespace)
-	}
-	if backends[0].Port != 8080 {
-		t.Errorf("expected first backend port 8080, got %d", backends[0].Port)
-	}
-
-	if backends[1].Hostname != "web.example.com" {
-		t.Errorf("expected second backend hostname web.example.com, got %s", backends[1].Hostname)
-	}
-	if backends[1].Weight != 50 {
-		t.Errorf("expected second backend weight 50, got %d", backends[1].Weight)
-	}
-}
-
-func TestCollectHTTPRouteBackends_DefaultPort(t *testing.T) {
-	routes := []gatewayv1.HTTPRoute{
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
-			Spec: gatewayv1.HTTPRouteSpec{
-				Hostnames: []gatewayv1.Hostname{"api.example.com"},
-				Rules: []gatewayv1.HTTPRouteRule{
-					{
-						BackendRefs: []gatewayv1.HTTPBackendRef{
-							{
-								BackendRef: gatewayv1.BackendRef{
-									BackendObjectReference: gatewayv1.BackendObjectReference{
-										Name: "api-service",
-										// Port not specified
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	backends := CollectHTTPRouteBackends(routes, "default")
-
-	if len(backends) != 1 {
-		t.Fatalf("expected 1 backend, got %d", len(backends))
-	}
-	if backends[0].Port != 80 {
-		t.Errorf("expected default port 80, got %d", backends[0].Port)
-	}
-}
-
-func TestCollectHTTPRouteBackends_DefaultWeight(t *testing.T) {
-	routes := []gatewayv1.HTTPRoute{
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
-			Spec: gatewayv1.HTTPRouteSpec{
-				Hostnames: []gatewayv1.Hostname{"api.example.com"},
-				Rules: []gatewayv1.HTTPRouteRule{
-					{
-						BackendRefs: []gatewayv1.HTTPBackendRef{
-							{
-								BackendRef: gatewayv1.BackendRef{
-									BackendObjectReference: gatewayv1.BackendObjectReference{
-										Name: "api-service",
-										Port: ptr(gatewayv1.PortNumber(8080)),
-										// Weight not specified
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	backends := CollectHTTPRouteBackends(routes, "default")
-
-	if len(backends) != 1 {
-		t.Fatalf("expected 1 backend, got %d", len(backends))
-	}
-	if backends[0].Weight != 100 {
-		t.Errorf("expected default weight 100, got %d", backends[0].Weight)
-	}
-}
-
-func TestCollectHTTPRouteBackends_CrossNamespace(t *testing.T) {
-	otherNS := gatewayv1.Namespace("other-namespace")
-	routes := []gatewayv1.HTTPRoute{
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
-			Spec: gatewayv1.HTTPRouteSpec{
-				Hostnames: []gatewayv1.Hostname{"api.example.com"},
-				Rules: []gatewayv1.HTTPRouteRule{
-					{
-						BackendRefs: []gatewayv1.HTTPBackendRef{
-							{
-								BackendRef: gatewayv1.BackendRef{
-									BackendObjectReference: gatewayv1.BackendObjectReference{
-										Name:      "api-service",
-										Namespace: &otherNS,
-										Port:      ptr(gatewayv1.PortNumber(8080)),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	backends := CollectHTTPRouteBackends(routes, "default")
-
-	if len(backends) != 1 {
-		t.Fatalf("expected 1 backend, got %d", len(backends))
-	}
-	if backends[0].Namespace != "other-namespace" {
-		t.Errorf("expected namespace other-namespace, got %s", backends[0].Namespace)
-	}
-}
-
 func TestCalculateRoutePriority(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -434,7 +256,7 @@ func TestCalculateRoutePriority(t *testing.T) {
 	}
 }
 
-func TestCollectHTTPRouteBackendsV2_WithPathMatches(t *testing.T) {
+func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
 	exactType := gatewayv1.PathMatchExact
 	prefixType := gatewayv1.PathMatchPathPrefix
 
@@ -489,7 +311,7 @@ func TestCollectHTTPRouteBackendsV2_WithPathMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackendsV2(routes, "default")
+	collectedRoutes := CollectHTTPRouteBackends(routes, "default")
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -518,7 +340,7 @@ func TestCollectHTTPRouteBackendsV2_WithPathMatches(t *testing.T) {
 	}
 }
 
-func TestCollectHTTPRouteBackendsV2_NoMatches(t *testing.T) {
+func TestCollectHTTPRouteBackends_NoMatches(t *testing.T) {
 	routes := []gatewayv1.HTTPRoute{
 		{
 			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
@@ -543,7 +365,7 @@ func TestCollectHTTPRouteBackendsV2_NoMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackendsV2(routes, "default")
+	collectedRoutes := CollectHTTPRouteBackends(routes, "default")
 
 	if len(collectedRoutes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(collectedRoutes))

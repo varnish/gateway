@@ -47,7 +47,7 @@ func mustParseQuantity(s string) resource.Quantity {
 // The vclContent parameter contains the generated VCL (ghost preamble + user VCL)
 func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway, vclContent string) *corev1.ConfigMap {
 	// Empty routing config initially (HTTPRoute controller will populate this)
-	routingJSON := `{"version": 1, "vhosts": {}}`
+	routingJSON := `{"version": 2, "vhosts": {}}`
 
 	return &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
