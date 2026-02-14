@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -410,9 +411,6 @@ func (r *HTTPRouteReconciler) computeConfigMapHash(routingJSON string) string {
 // updateGatewayListenerStatus updates AttachedRoutes count on Gateway listeners.
 // Creates a minimal patch object to avoid conflicts with Gateway controller.
 func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
-	// Count routes per listener
-	attachedCount := int32(len(routes))
-
 	// Create minimal Gateway object for SSA patch - only include fields we own
 	patch := &gatewayv1.Gateway{
 		TypeMeta: metav1.TypeMeta{
@@ -425,15 +423,16 @@ func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, g
 		},
 	}
 
-	// Build listener statuses with only AttachedRoutes field.
+	// Build listener statuses with per-listener AttachedRoutes count.
 	// Use Spec.Listeners (not Status.Listeners) so that when a listener is
 	// removed from the spec, we stop claiming its fields via SSA. This allows
 	// the removed listener to be cleaned up from the merged status.
 	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, len(gateway.Spec.Listeners))
 	for i, listener := range gateway.Spec.Listeners {
+		count := countRoutesForListener(routes, listener, gateway)
 		patch.Status.Listeners[i] = gatewayv1.ListenerStatus{
 			Name:           listener.Name,
-			AttachedRoutes: attachedCount,
+			AttachedRoutes: count,
 			// Include SupportedKinds to satisfy API validation (required field)
 			// Gateway controller is the field owner, but we need to set it to avoid null
 			SupportedKinds: []gatewayv1.RouteGroupKind{
@@ -455,6 +454,115 @@ func (r *HTTPRouteReconciler) updateGatewayListenerStatus(ctx context.Context, g
 	}
 
 	return nil
+}
+
+// countRoutesForListener counts how many routes attach to a specific listener.
+// A route attaches to a listener if:
+// 1. The route has no sectionName (attaches to all listeners), OR the route's sectionName matches the listener name
+// 2. The route's hostnames intersect with the listener's hostname (or either is empty/unset)
+func countRoutesForListener(routes []gatewayv1.HTTPRoute, listener gatewayv1.Listener, gateway *gatewayv1.Gateway) int32 {
+	var count int32
+	for _, route := range routes {
+		if routeAttachesToListener(&route, listener, gateway) {
+			count++
+		}
+	}
+	return count
+}
+
+// routeAttachesToListener checks if a route attaches to a specific listener.
+func routeAttachesToListener(route *gatewayv1.HTTPRoute, listener gatewayv1.Listener, gateway *gatewayv1.Gateway) bool {
+	// Check if any parentRef targets this listener
+	for _, parentRef := range route.Spec.ParentRefs {
+		// Skip non-Gateway refs
+		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+			continue
+		}
+		if parentRef.Group != nil && *parentRef.Group != gatewayv1.Group(gatewayv1.GroupName) {
+			continue
+		}
+
+		// Check name and namespace match the gateway
+		if string(parentRef.Name) != gateway.Name {
+			continue
+		}
+		refNS := route.Namespace
+		if parentRef.Namespace != nil {
+			refNS = string(*parentRef.Namespace)
+		}
+		if refNS != gateway.Namespace {
+			continue
+		}
+
+		// Check sectionName: if specified, must match listener name
+		if parentRef.SectionName != nil {
+			if string(*parentRef.SectionName) != string(listener.Name) {
+				continue
+			}
+		}
+
+		// Check hostname intersection
+		if hostnamesIntersect(route.Spec.Hostnames, listener.Hostname) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostnamesIntersect checks if route hostnames intersect with a listener hostname.
+// Per Gateway API spec:
+// - If listener has no hostname → matches all route hostnames
+// - If route has no hostnames → matches all listener hostnames
+// - Otherwise → at least one route hostname must match the listener hostname
+func hostnamesIntersect(routeHostnames []gatewayv1.Hostname, listenerHostname *gatewayv1.Hostname) bool {
+	// Listener with no hostname matches everything
+	if listenerHostname == nil {
+		return true
+	}
+
+	// Route with no hostnames matches everything
+	if len(routeHostnames) == 0 {
+		return true
+	}
+
+	lh := string(*listenerHostname)
+	for _, rh := range routeHostnames {
+		if hostnameMatches(string(rh), lh) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostnameMatches checks if a route hostname matches a listener hostname.
+// Supports wildcard matching: *.example.com matches foo.example.com
+func hostnameMatches(routeHostname, listenerHostname string) bool {
+	// Exact match
+	if routeHostname == listenerHostname {
+		return true
+	}
+
+	// Listener wildcard: *.example.com matches foo.example.com
+	if strings.HasPrefix(listenerHostname, "*.") {
+		suffix := listenerHostname[1:] // ".example.com"
+		if strings.HasSuffix(routeHostname, suffix) && !strings.Contains(routeHostname[:len(routeHostname)-len(suffix)], ".") {
+			return true
+		}
+	}
+
+	// Route wildcard: *.example.com matches listener example.com or *.example.com
+	if strings.HasPrefix(routeHostname, "*.") {
+		suffix := routeHostname[1:] // ".example.com"
+		if strings.HasSuffix(listenerHostname, suffix) && !strings.Contains(listenerHostname[:len(listenerHostname)-len(suffix)], ".") {
+			return true
+		}
+		// Route *.example.com also intersects with listener example.com
+		if listenerHostname == routeHostname[2:] {
+			return true
+		}
+	}
+
+	return false
 }
 
 // findHTTPRoutesForGateway returns reconcile requests for all HTTPRoutes
