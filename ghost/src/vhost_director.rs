@@ -768,7 +768,7 @@ fn apply_request_header_filter(
                 StrOrBytes::Utf8(s) => s.to_string(),
                 StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             };
-            let combined = format!("{}, {}", existing_str, action.value);
+            let combined = format!("{},{}", existing_str, action.value);
             bereq.unset_header(&action.name);
             bereq.set_header(&action.name, &combined)?;
         } else {

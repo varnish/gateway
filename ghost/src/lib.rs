@@ -299,7 +299,7 @@ mod ghost {
                         StrOrBytes::Utf8(s) => s.to_string(),
                         StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
                     };
-                    let combined = format!("{}, {}", existing_str, action.value);
+                    let combined = format!("{},{}", existing_str, action.value);
                     resp.unset_header(&action.name);
                     let _ = resp.set_header(&action.name, &combined);
                 }
