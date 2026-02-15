@@ -487,14 +487,6 @@ func extractEndpoints(slice *discoveryv1.EndpointSlice) []Endpoint {
 	return endpoints
 }
 
-// ListEndpointSlices lists all EndpointSlices for a service (for testing/debugging).
-func (w *Watcher) ListEndpointSlices(ctx context.Context, namespace, serviceName string) (*discoveryv1.EndpointSliceList, error) {
-	selector := labels.Set{serviceLabelKey: serviceName}.AsSelector()
-	return w.client.DiscoveryV1().EndpointSlices(namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector.String(),
-	})
-}
-
 // handleConfigMapUpdate processes ConfigMap add/update events.
 func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMap) {
 	// Filter: only our ConfigMap

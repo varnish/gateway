@@ -966,6 +966,64 @@ func (r *GatewayReconciler) buildLabels(gateway *gatewayv1.Gateway) map[string]s
 	}
 }
 
+// gatewayClassNamesForParams returns GatewayClass names that reference any of the
+// provided GatewayClassParameters names.
+func (r *GatewayReconciler) gatewayClassNamesForParams(ctx context.Context, paramsNames map[string]struct{}) (map[string]struct{}, error) {
+	classNames := make(map[string]struct{})
+	if len(paramsNames) == 0 {
+		return classNames, nil
+	}
+
+	var gatewayClasses gatewayv1.GatewayClassList
+	if err := r.List(ctx, &gatewayClasses); err != nil {
+		return nil, fmt.Errorf("r.List(GatewayClassList): %w", err)
+	}
+
+	for _, gc := range gatewayClasses.Items {
+		if gc.Spec.ParametersRef == nil {
+			continue
+		}
+		ref := gc.Spec.ParametersRef
+		if string(ref.Group) != gatewayparamsv1alpha1.GroupName || string(ref.Kind) != "GatewayClassParameters" {
+			continue
+		}
+		if _, ok := paramsNames[ref.Name]; !ok {
+			continue
+		}
+		classNames[gc.Name] = struct{}{}
+	}
+
+	return classNames, nil
+}
+
+// gatewayRequestsForClassNames returns reconcile requests for all Gateways whose
+// GatewayClassName is one of classNames.
+func (r *GatewayReconciler) gatewayRequestsForClassNames(ctx context.Context, classNames map[string]struct{}) ([]ctrl.Request, error) {
+	if len(classNames) == 0 {
+		return nil, nil
+	}
+
+	var gateways gatewayv1.GatewayList
+	if err := r.List(ctx, &gateways); err != nil {
+		return nil, fmt.Errorf("r.List(GatewayList): %w", err)
+	}
+
+	requests := make([]ctrl.Request, 0, len(gateways.Items))
+	for _, gw := range gateways.Items {
+		if _, ok := classNames[string(gw.Spec.GatewayClassName)]; !ok {
+			continue
+		}
+		requests = append(requests, ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      gw.Name,
+				Namespace: gw.Namespace,
+			},
+		})
+	}
+
+	return requests, nil
+}
+
 // enqueueGatewaysForParams returns an EventHandler that enqueues all Gateways
 // that use a GatewayClass referencing the changed GatewayClassParameters.
 func (r *GatewayReconciler) enqueueGatewaysForParams() handler.EventHandler {
@@ -975,43 +1033,15 @@ func (r *GatewayReconciler) enqueueGatewaysForParams() handler.EventHandler {
 			return nil
 		}
 
-		// Find all GatewayClasses that reference this GatewayClassParameters
-		var gatewayClasses gatewayv1.GatewayClassList
-		if err := r.List(ctx, &gatewayClasses); err != nil {
-			r.Logger.Error("failed to list GatewayClasses", "error", err)
+		classNames, err := r.gatewayClassNamesForParams(ctx, map[string]struct{}{params.Name: {}})
+		if err != nil {
+			r.Logger.Error("failed to resolve GatewayClasses for GatewayClassParameters", "error", err)
 			return nil
 		}
-
-		var requests []ctrl.Request
-		for _, gc := range gatewayClasses.Items {
-			// Check if this GatewayClass references our params
-			if gc.Spec.ParametersRef == nil {
-				continue
-			}
-			ref := gc.Spec.ParametersRef
-			if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
-				string(ref.Kind) != "GatewayClassParameters" ||
-				ref.Name != params.Name {
-				continue
-			}
-
-			// Find all Gateways using this GatewayClass
-			var gateways gatewayv1.GatewayList
-			if err := r.List(ctx, &gateways); err != nil {
-				r.Logger.Error("failed to list Gateways", "error", err)
-				continue
-			}
-
-			for _, gw := range gateways.Items {
-				if string(gw.Spec.GatewayClassName) == gc.Name {
-					requests = append(requests, ctrl.Request{
-						NamespacedName: types.NamespacedName{
-							Name:      gw.Name,
-							Namespace: gw.Namespace,
-						},
-					})
-				}
-			}
+		requests, err := r.gatewayRequestsForClassNames(ctx, classNames)
+		if err != nil {
+			r.Logger.Error("failed to list Gateways for GatewayClassParameters change", "error", err)
+			return nil
 		}
 
 		if len(requests) > 0 {
@@ -1040,7 +1070,7 @@ func (r *GatewayReconciler) enqueueGatewaysForConfigMap() handler.EventHandler {
 			return nil
 		}
 
-		var requests []ctrl.Request
+		matchingParams := make(map[string]struct{})
 		for _, params := range paramsList.Items {
 			// Check if this params references our ConfigMap
 			if params.Spec.UserVCLConfigMapRef == nil {
@@ -1050,44 +1080,18 @@ func (r *GatewayReconciler) enqueueGatewaysForConfigMap() handler.EventHandler {
 			if cmRef.Name != cm.Name || cmRef.Namespace != cm.Namespace {
 				continue
 			}
+			matchingParams[params.Name] = struct{}{}
+		}
 
-			// Find all GatewayClasses that reference this GatewayClassParameters
-			var gatewayClasses gatewayv1.GatewayClassList
-			if err := r.List(ctx, &gatewayClasses); err != nil {
-				r.Logger.Error("failed to list GatewayClasses", "error", err)
-				continue
-			}
-
-			for _, gc := range gatewayClasses.Items {
-				// Check if this GatewayClass references our params
-				if gc.Spec.ParametersRef == nil {
-					continue
-				}
-				ref := gc.Spec.ParametersRef
-				if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
-					string(ref.Kind) != "GatewayClassParameters" ||
-					ref.Name != params.Name {
-					continue
-				}
-
-				// Find all Gateways using this GatewayClass
-				var gateways gatewayv1.GatewayList
-				if err := r.List(ctx, &gateways); err != nil {
-					r.Logger.Error("failed to list Gateways", "error", err)
-					continue
-				}
-
-				for _, gw := range gateways.Items {
-					if string(gw.Spec.GatewayClassName) == gc.Name {
-						requests = append(requests, ctrl.Request{
-							NamespacedName: types.NamespacedName{
-								Name:      gw.Name,
-								Namespace: gw.Namespace,
-							},
-						})
-					}
-				}
-			}
+		classNames, err := r.gatewayClassNamesForParams(ctx, matchingParams)
+		if err != nil {
+			r.Logger.Error("failed to resolve GatewayClasses for user VCL ConfigMap", "error", err)
+			return nil
+		}
+		requests, err := r.gatewayRequestsForClassNames(ctx, classNames)
+		if err != nil {
+			r.Logger.Error("failed to list Gateways for user VCL ConfigMap change", "error", err)
+			return nil
 		}
 
 		if len(requests) > 0 {

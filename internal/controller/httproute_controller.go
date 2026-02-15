@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -34,20 +33,12 @@ type HTTPRouteReconciler struct {
 	Scheme *runtime.Scheme
 	Config Config
 	Logger *slog.Logger
-
-	// ConfigMap content tracking for change detection
-	configMapHashes map[string]string // key: namespace/name -> hash of Data
 }
 
 // Reconcile handles HTTPRoute reconciliation.
 func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Logger.With("httproute", req.NamespacedName)
 	log.Debug("reconciling HTTPRoute")
-
-	// Initialize configMapHashes if nil
-	if r.configMapHashes == nil {
-		r.configMapHashes = make(map[string]string)
-	}
 
 	// 1. Fetch the HTTPRoute
 	var route gatewayv1.HTTPRoute
@@ -169,7 +160,7 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 	}
 
 	// Check if the route's namespace is allowed by the Gateway's listeners
-	allowed, reasonCode, reason := r.isRouteAllowedByGateway(ctx, route, gateway)
+	allowed, reasonCode, reason := isRouteAllowedByGateway(ctx, r.Client, route, gateway)
 	if !allowed {
 		log.Info("route not allowed by Gateway listeners", "reasonCode", reasonCode, "reason", reason)
 		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
@@ -269,11 +260,6 @@ func listAcceptedRoutesForGateway(ctx context.Context, c client.Client, gateway 
 	return attached, nil
 }
 
-// routeAttachedToGateway checks if a route references the given Gateway.
-func (r *HTTPRouteReconciler) routeAttachedToGateway(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) bool {
-	return routeAttachedToGateway(route, gateway)
-}
-
 // routeAttachedToGateway checks if a route references the given Gateway (package-level).
 func routeAttachedToGateway(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) bool {
 	for _, parentRef := range route.Spec.ParentRefs {
@@ -304,12 +290,6 @@ func routeAttachedToGateway(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gatew
 		return true
 	}
 	return false
-}
-
-// isRouteAllowedByGateway checks if the route is allowed by any of the Gateway's listeners.
-// Thin wrapper around the package-level function.
-func (r *HTTPRouteReconciler) isRouteAllowedByGateway(ctx context.Context, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string, string) {
-	return isRouteAllowedByGateway(ctx, r.Client, route, gateway)
 }
 
 // isRouteAllowedByGateway checks if the route is allowed by any of the Gateway's listeners (package-level).
@@ -581,45 +561,32 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", cmName, err)
 	}
 
-	// Compute hash of new routing.json
-	cmKey := fmt.Sprintf("%s/%s", gateway.Namespace, cmName)
-	oldHash := r.configMapHashes[cmKey]
-	newHash := r.computeConfigMapHash(string(routingJSON))
+	newRoutingJSON := string(routingJSON)
 
 	// Update ConfigMap data (only routing.json, preserve main.vcl owned by Gateway controller)
 	if cm.Data == nil {
 		cm.Data = make(map[string]string)
 	}
-	cm.Data["routing.json"] = string(routingJSON)
 
-	if err := r.Update(ctx, &cm); err != nil {
-		return fmt.Errorf("r.Update(%s): %w", cmName, err)
-	}
-
-	// Store new hash
-	r.configMapHashes[cmKey] = newHash
-
-	// Only log if content actually changed
-	if oldHash != newHash {
-		r.Logger.Info("updated ConfigMap",
-			"configmap", cmName,
-			"routes", len(routes),
-			"backends", len(collectedRoutes))
-	} else {
+	// Avoid unnecessary writes/reconciles when content is unchanged.
+	if cm.Data["routing.json"] == newRoutingJSON {
 		r.Logger.Debug("reconciled ConfigMap (no content change)",
 			"configmap", cmName,
 			"routes", len(routes),
 			"backends", len(collectedRoutes))
+		return nil
 	}
+	cm.Data["routing.json"] = newRoutingJSON
+
+	if err := r.Update(ctx, &cm); err != nil {
+		return fmt.Errorf("r.Update(%s): %w", cmName, err)
+	}
+	r.Logger.Info("updated ConfigMap",
+		"configmap", cmName,
+		"routes", len(routes),
+		"backends", len(collectedRoutes))
 
 	return nil
-}
-
-// computeConfigMapHash computes a hash of the routing.json content
-func (r *HTTPRouteReconciler) computeConfigMapHash(routingJSON string) string {
-	h := sha256.New()
-	h.Write([]byte(routingJSON))
-	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // validateBackendRefs checks that all backend references in the route are valid.
