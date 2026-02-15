@@ -175,55 +175,31 @@ func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigM
 // Reload performs a single VCL reload from the configured file path
 func (r *Reloader) Reload() error {
 	name := r.generateVCLName()
-
 	r.logger.Debug("loading VCL", "name", name, "path", r.vclPath)
-
-	// Load the new VCL
-	resp, err := r.varnishadm.VCLLoad(name, r.vclPath)
-	if err != nil {
-		return fmt.Errorf("varnishadm.VCLLoad(%s, %s): %w", name, r.vclPath, err)
-	}
-	if err := resp.CheckOK("VCL compilation failed"); err != nil {
-		return err
-	}
-
-	// Switch to the new VCL
-	r.logger.Debug("activating VCL", "name", name)
-	resp, err = r.varnishadm.VCLUse(name)
-	if err != nil {
-		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
-	}
-	if err := resp.CheckOK("VCL activation failed"); err != nil {
-		return err
-	}
-
-	r.logger.Debug("VCL reload complete", "name", name)
-
-	// Garbage collect old VCLs
-	if err := r.garbageCollect(); err != nil {
-		r.logger.Warn("VCL garbage collection failed", "error", err)
-		// Non-fatal, continue
-	}
-
-	return nil
+	return r.loadAndActivate(name, func(n string) (varnishadm.VarnishResponse, error) {
+		return r.varnishadm.VCLLoad(n, r.vclPath)
+	})
 }
 
 // ReloadInline performs a single VCL reload with inline VCL content
 func (r *Reloader) ReloadInline(vcl string) error {
 	name := r.generateVCLName()
-
 	r.logger.Debug("loading inline VCL", "name", name)
+	return r.loadAndActivate(name, func(n string) (varnishadm.VarnishResponse, error) {
+		return r.varnishadm.VCLInline(n, vcl)
+	})
+}
 
-	// Load the new VCL inline
-	resp, err := r.varnishadm.VCLInline(name, vcl)
+// loadAndActivate loads a VCL using the provided loadFn, activates it, and garbage collects old VCLs.
+func (r *Reloader) loadAndActivate(name string, loadFn func(string) (varnishadm.VarnishResponse, error)) error {
+	resp, err := loadFn(name)
 	if err != nil {
-		return fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
+		return fmt.Errorf("VCL load %s: %w", name, err)
 	}
 	if err := resp.CheckOK("VCL compilation failed"); err != nil {
 		return err
 	}
 
-	// Switch to the new VCL
 	r.logger.Debug("activating VCL", "name", name)
 	resp, err = r.varnishadm.VCLUse(name)
 	if err != nil {
@@ -235,10 +211,8 @@ func (r *Reloader) ReloadInline(vcl string) error {
 
 	r.logger.Debug("VCL reload complete", "name", name)
 
-	// Garbage collect old VCLs
 	if err := r.garbageCollect(); err != nil {
 		r.logger.Warn("VCL garbage collection failed", "error", err)
-		// Non-fatal, continue
 	}
 
 	return nil
