@@ -166,15 +166,11 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 	// Termination grace period for graceful shutdown
 	terminationGracePeriod := int64(30)
 
-	// Build image pull secrets from config
-	var imagePullSecrets []corev1.LocalObjectReference
-	if r.Config.ImagePullSecrets != "" {
-		for _, name := range strings.Split(r.Config.ImagePullSecrets, ",") {
-			name = strings.TrimSpace(name)
-			if name != "" {
-				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: name})
-			}
-		}
+	// Build image pull secrets from shared parsing logic used for infra hashing.
+	secretNames := r.parseImagePullSecrets()
+	imagePullSecrets := make([]corev1.LocalObjectReference, 0, len(secretNames))
+	for _, name := range secretNames {
+		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: name})
 	}
 
 	return &appsv1.Deployment{
