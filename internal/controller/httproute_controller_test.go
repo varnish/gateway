@@ -54,7 +54,7 @@ func TestReconcile_ValidRoute(t *testing.T) {
 			Namespace: "default",
 		},
 		Data: map[string]string{
-			"main.vcl":      "vcl 4.1;",
+			"main.vcl":     "vcl 4.1;",
 			"routing.json": `{"version": 2, "vhosts": {}}`,
 		},
 	}
@@ -340,7 +340,7 @@ func TestReconcile_MultipleRoutesToGateway(t *testing.T) {
 			Namespace: "default",
 		},
 		Data: map[string]string{
-			"main.vcl":      "vcl 4.1;",
+			"main.vcl":     "vcl 4.1;",
 			"routing.json": `{"version": 2, "vhosts": {}}`,
 		},
 	}
@@ -557,10 +557,9 @@ func TestRouteAttachedToGateway(t *testing.T) {
 		},
 	}
 
-	r := &HTTPRouteReconciler{}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := r.routeAttachedToGateway(tc.route, tc.gateway)
+			got := routeAttachedToGateway(tc.route, tc.gateway)
 			if got != tc.attached {
 				t.Errorf("expected attached=%v, got %v", tc.attached, got)
 			}
@@ -896,7 +895,7 @@ func TestIsRouteAllowedByGateway(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			objs := append([]runtime.Object{}, tc.objs...)
 			r := newHTTPRouteTestReconciler(scheme, objs...)
-			got, _, _ := r.isRouteAllowedByGateway(context.Background(), tc.route, tc.gateway)
+			got, _, _ := isRouteAllowedByGateway(context.Background(), r.Client, tc.route, tc.gateway)
 			if got != tc.allowed {
 				t.Errorf("expected allowed=%v, got %v", tc.allowed, got)
 			}
