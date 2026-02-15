@@ -183,13 +183,8 @@ func (r *Reloader) Reload() error {
 	if err != nil {
 		return fmt.Errorf("varnishadm.VCLLoad(%s, %s): %w", name, r.vclPath, err)
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		r.logger.Error("VCL compilation failed",
-			"name", name,
-			"status", resp.StatusCode(),
-			"output", resp.Payload(),
-		)
-		return fmt.Errorf("VCL compilation failed: %s", resp.Payload())
+	if err := resp.CheckOK("VCL compilation failed"); err != nil {
+		return err
 	}
 
 	// Switch to the new VCL
@@ -198,13 +193,8 @@ func (r *Reloader) Reload() error {
 	if err != nil {
 		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		r.logger.Error("VCL activation failed",
-			"name", name,
-			"status", resp.StatusCode(),
-			"output", resp.Payload(),
-		)
-		return fmt.Errorf("VCL activation failed: %s", resp.Payload())
+	if err := resp.CheckOK("VCL activation failed"); err != nil {
+		return err
 	}
 
 	r.logger.Debug("VCL reload complete", "name", name)
@@ -229,13 +219,8 @@ func (r *Reloader) ReloadInline(vcl string) error {
 	if err != nil {
 		return fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		r.logger.Error("VCL compilation failed",
-			"name", name,
-			"status", resp.StatusCode(),
-			"output", resp.Payload(),
-		)
-		return fmt.Errorf("VCL compilation failed: %s", resp.Payload())
+	if err := resp.CheckOK("VCL compilation failed"); err != nil {
+		return err
 	}
 
 	// Switch to the new VCL
@@ -244,13 +229,8 @@ func (r *Reloader) ReloadInline(vcl string) error {
 	if err != nil {
 		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		r.logger.Error("VCL activation failed",
-			"name", name,
-			"status", resp.StatusCode(),
-			"output", resp.Payload(),
-		)
-		return fmt.Errorf("VCL activation failed: %s", resp.Payload())
+	if err := resp.CheckOK("VCL activation failed"); err != nil {
+		return err
 	}
 
 	r.logger.Debug("VCL reload complete", "name", name)
@@ -306,12 +286,8 @@ func (r *Reloader) garbageCollect() error {
 			r.logger.Warn("VCL discard failed", "name", name, "error", err)
 			continue
 		}
-		if resp.StatusCode() != varnishadm.ClisOk {
-			r.logger.Warn("VCL discard failed",
-				"name", name,
-				"status", resp.StatusCode(),
-				"output", resp.Payload(),
-			)
+		if err := resp.CheckOK("VCL discard %s failed", name); err != nil {
+			r.logger.Warn("VCL discard failed", "name", name, "error", err)
 		}
 	}
 

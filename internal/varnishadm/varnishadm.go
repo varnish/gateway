@@ -58,6 +58,16 @@ func (vr VarnishResponse) Payload() string {
 	return vr.payload
 }
 
+// CheckOK returns an error if the response status is not ClisOk.
+// The format string and args are used to build the error prefix;
+// the response payload is appended automatically.
+func (vr VarnishResponse) CheckOK(format string, args ...any) error {
+	if vr.statusCode != ClisOk {
+		return fmt.Errorf(format+": %s", append(args, vr.payload)...)
+	}
+	return nil
+}
+
 type varnishRequest struct {
 	command      string
 	responseChan chan VarnishResponse

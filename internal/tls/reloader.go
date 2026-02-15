@@ -72,8 +72,8 @@ func (r *Reloader) LoadAll() error {
 		if err != nil {
 			return fmt.Errorf("varnishadm.TLSCertLoad(%s, %s): %w", name, path, err)
 		}
-		if resp.StatusCode() != varnishadm.ClisOk {
-			return fmt.Errorf("tls.cert.load %s failed (status %d): %s", name, resp.StatusCode(), resp.Payload())
+		if err := resp.CheckOK("tls.cert.load %s failed", name); err != nil {
+			return err
 		}
 		loaded++
 	}
@@ -88,8 +88,8 @@ func (r *Reloader) LoadAll() error {
 	if err != nil {
 		return fmt.Errorf("varnishadm.TLSCertCommit: %w", err)
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		return fmt.Errorf("tls.cert.commit failed (status %d): %s", resp.StatusCode(), resp.Payload())
+	if err := resp.CheckOK("tls.cert.commit failed"); err != nil {
+		return err
 	}
 
 	r.logger.Info("TLS certificates loaded and committed", "count", loaded)
@@ -121,9 +121,8 @@ func (r *Reloader) reloadAllCerts() error {
 		if err != nil {
 			return fmt.Errorf("varnishadm.TLSCertDiscard(%s): %w", entry.CertificateID, err)
 		}
-		if resp.StatusCode() != varnishadm.ClisOk {
-			return fmt.Errorf("tls.cert.discard %s failed (status %d): %s",
-				entry.CertificateID, resp.StatusCode(), resp.Payload())
+		if err := resp.CheckOK("tls.cert.discard %s failed", entry.CertificateID); err != nil {
+			return err
 		}
 	}
 
@@ -145,12 +144,11 @@ func (r *Reloader) reloadAllCerts() error {
 			}
 			return fmt.Errorf("varnishadm.TLSCertLoad(%s, %s): %w", name, path, err)
 		}
-		if resp.StatusCode() != varnishadm.ClisOk {
+		if err := resp.CheckOK("tls.cert.load %s failed", name); err != nil {
 			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
 				r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
 			}
-			return fmt.Errorf("tls.cert.load %s failed (status %d): %s",
-				name, resp.StatusCode(), resp.Payload())
+			return err
 		}
 		loaded++
 	}
@@ -169,11 +167,11 @@ func (r *Reloader) reloadAllCerts() error {
 		}
 		return fmt.Errorf("varnishadm.TLSCertCommit: %w", err)
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
+	if err := resp.CheckOK("tls.cert.commit failed"); err != nil {
 		if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
 			r.logger.Error("TLS cert rollback failed after commit error", "error", rbErr)
 		}
-		return fmt.Errorf("tls.cert.commit failed (status %d): %s", resp.StatusCode(), resp.Payload())
+		return err
 	}
 
 	r.logger.Info("TLS certificates reloaded via load/commit cycle", "count", loaded)
