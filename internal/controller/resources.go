@@ -70,7 +70,9 @@ func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway, vclCon
 func (r *GatewayReconciler) buildAdminSecret(gateway *gatewayv1.Gateway) *corev1.Secret {
 	// Generate random secret for varnishadm authentication
 	secretBytes := make([]byte, 32)
-	_, _ = rand.Read(secretBytes)
+	if _, err := rand.Read(secretBytes); err != nil {
+		panic(fmt.Sprintf("crypto/rand.Read: %v", err))
+	}
 	secretHex := hex.EncodeToString(secretBytes)
 
 	return &corev1.Secret{
@@ -206,8 +208,8 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
-					Containers: r.buildContainers(gateway, varnishdExtraArgs, logging, hasTLS),
-					Volumes:    r.buildVolumes(gateway, hasTLS),
+					Containers:                    r.buildContainers(gateway, varnishdExtraArgs, logging, hasTLS),
+					Volumes:                       r.buildVolumes(gateway, hasTLS),
 				},
 			},
 		},
@@ -283,7 +285,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		{Name: "CONFIGMAP_NAME", Value: fmt.Sprintf("%s-vcl", gateway.Name)},
 		{Name: "GHOST_CONFIG_PATH", Value: "/var/run/varnish/ghost.json"},
 		{Name: "WORK_DIR", Value: "/var/run/varnish"},
-		{Name: "VARNISH_DIR", Value: "/var/run/varnish/vsm"},  // VSM subdirectory on shared volume
+		{Name: "VARNISH_DIR", Value: "/var/run/varnish/vsm"}, // VSM subdirectory on shared volume
 		{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
 	}
 

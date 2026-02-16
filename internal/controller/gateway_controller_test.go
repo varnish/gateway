@@ -21,11 +21,17 @@ import (
 
 func newTestScheme() *runtime.Scheme {
 	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = gatewayv1.Install(scheme)
-	_ = gatewayv1beta1.Install(scheme)
-	_ = gatewayparamsv1alpha1.AddToScheme(scheme)
+	must(clientgoscheme.AddToScheme(scheme))
+	must(gatewayv1.Install(scheme))
+	must(gatewayv1beta1.Install(scheme))
+	must(gatewayparamsv1alpha1.AddToScheme(scheme))
 	return scheme
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
 }
 
 func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayReconciler {
@@ -379,8 +385,8 @@ func TestValidateListenerTLSRefs_CrossNamespace_NoReferenceGrant(t *testing.T) {
 
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gw",
-			Namespace: "default",
+			Name:       "test-gw",
+			Namespace:  "default",
 			Generation: 1,
 		},
 	}
@@ -444,8 +450,8 @@ func TestValidateListenerTLSRefs_CrossNamespace_WithReferenceGrant(t *testing.T)
 
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gw",
-			Namespace: "default",
+			Name:       "test-gw",
+			Namespace:  "default",
 			Generation: 1,
 		},
 	}
@@ -484,8 +490,8 @@ func TestValidateListenerTLSRefs_SameNamespace(t *testing.T) {
 
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gw",
-			Namespace: "default",
+			Name:       "test-gw",
+			Namespace:  "default",
 			Generation: 1,
 		},
 	}

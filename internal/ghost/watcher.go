@@ -50,9 +50,9 @@ type Watcher struct {
 	serviceWatch    map[string]struct{}   // services we care about (namespace/name)
 
 	// ConfigMap watching
-	configMapName      string // name of ConfigMap to watch
-	lastConfigMapRV    string // last seen ResourceVersion for deduplication
-	lastRoutingJSON    string // last seen routing.json content for content-based deduplication
+	configMapName      string       // name of ConfigMap to watch
+	lastConfigMapRV    string       // last seen ResourceVersion for deduplication
+	lastRoutingJSON    string       // last seen routing.json content for content-based deduplication
 	lastRoutingJSONMux sync.RWMutex // protect lastRoutingJSON
 
 	// EndpointSlice lister for backfilling endpoints on new service watches
@@ -83,6 +83,14 @@ func NewWatcher(
 		fatalErrCh:      make(chan error, 1), // buffered to avoid blocking
 		endpoints:       make(map[string][]Endpoint),
 		serviceWatch:    make(map[string]struct{}),
+	}
+}
+
+// notifyFatal sends err on the fatal error channel without blocking.
+func (w *Watcher) notifyFatal(err error) {
+	select {
+	case w.fatalErrCh <- err:
+	default:
 	}
 }
 
@@ -321,10 +329,7 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 	// Regenerate ghost.json
 	if err := w.regenerateConfig(ctx); err != nil {
 		w.logger.Error("failed to regenerate ghost config", "error", err)
-		select {
-		case w.fatalErrCh <- err:
-		default:
-		}
+		w.notifyFatal(err)
 	}
 }
 
@@ -381,10 +386,7 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 	// Regenerate ghost.json
 	if err := w.regenerateConfig(ctx); err != nil {
 		w.logger.Error("failed to regenerate ghost config", "error", err)
-		select {
-		case w.fatalErrCh <- err:
-		default:
-		}
+		w.notifyFatal(err)
 	}
 }
 
@@ -570,10 +572,7 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 	// Regenerate ghost.json and trigger reload
 	if err := w.regenerateConfig(ctx); err != nil {
 		w.logger.Error("failed to regenerate ghost config", "error", err)
-		select {
-		case w.fatalErrCh <- err:
-		default:
-		}
+		w.notifyFatal(err)
 	}
 }
 

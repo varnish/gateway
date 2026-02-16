@@ -204,9 +204,9 @@ func TestGenerate_DeterministicOutput(t *testing.T) {
 
 func TestCalculateRoutePriority(t *testing.T) {
 	tests := []struct {
-		name     string
+		name      string
 		pathMatch *ghost.PathMatch
-		expected int
+		expected  int
 	}{
 		{
 			name:      "nil path match (default route)",

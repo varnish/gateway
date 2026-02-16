@@ -104,9 +104,9 @@ type RequestRedirectFilter struct {
 
 // RouteFilters holds all filters that can be applied to a route
 type RouteFilters struct {
-	RequestHeaderModifier  *RequestHeaderFilter  `json:"request_header_modifier,omitempty"`
-	ResponseHeaderModifier *ResponseHeaderFilter `json:"response_header_modifier,omitempty"`
-	URLRewrite             *URLRewriteFilter     `json:"url_rewrite,omitempty"`
+	RequestHeaderModifier  *RequestHeaderFilter   `json:"request_header_modifier,omitempty"`
+	ResponseHeaderModifier *ResponseHeaderFilter  `json:"response_header_modifier,omitempty"`
+	URLRewrite             *URLRewriteFilter      `json:"url_rewrite,omitempty"`
 	RequestRedirect        *RequestRedirectFilter `json:"request_redirect,omitempty"`
 }
 
@@ -128,8 +128,8 @@ type Route struct {
 
 // VHostRouting represents routing configuration for a vhost with path-based rules.
 type VHostRouting struct {
-	Routes       []Route       `json:"routes"`
-	DefaultRoute *RoutingRule  `json:"default_route,omitempty"`
+	Routes       []Route      `json:"routes"`
+	DefaultRoute *RoutingRule `json:"default_route,omitempty"`
 }
 
 // RoutingConfig represents the routing configuration from the operator.
@@ -159,9 +159,9 @@ type VHostConfig struct {
 
 // Config represents the ghost.json configuration file.
 type Config struct {
-	Version int                   `json:"version"`
+	Version int                    `json:"version"`
 	VHosts  map[string]VHostConfig `json:"vhosts"`
-	Default *VHost                `json:"default,omitempty"`
+	Default *VHost                 `json:"default,omitempty"`
 }
 
 // NewConfig creates a new Config with version 2.

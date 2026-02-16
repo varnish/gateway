@@ -114,8 +114,8 @@ func loadConfig() (*Config, error) {
 		VCLPath:           getEnvOrDefault("VCL_PATH", "/var/run/varnish/main.vcl"),
 		Namespace:         getEnvOrDefault("NAMESPACE", "default"),
 		ConfigMapName:     getEnvOrDefault("CONFIGMAP_NAME", "gateway-vcl"),
-		TLSCertDir:        os.Getenv("TLS_CERT_DIR"),                           // empty by default
-		TLSListen:         parseList(os.Getenv("VARNISH_TLS_LISTEN")),           // empty by default
+		TLSCertDir:        os.Getenv("TLS_CERT_DIR"),                  // empty by default
+		TLSListen:         parseList(os.Getenv("VARNISH_TLS_LISTEN")), // empty by default
 		HealthAddr:        getEnvOrDefault("HEALTH_ADDR", ":8080"),
 	}
 
@@ -129,16 +129,12 @@ func getEnvOrDefault(key, defaultVal string) string {
 	return defaultVal
 }
 
-// parseList parses a comma-separated list, trimming whitespace
+// parseList parses a semicolon-separated list, trimming whitespace.
 func parseList(s string) []string {
 	if s == "" {
 		return nil
 	}
-	parts := strings.Split(s, ",")
-	// For varnish args like ":80,http" we need to handle this specially
-	// Actually, the format is space-separated for multiple -a args
-	// Let's use semicolon as separator for multiple args
-	parts = strings.Split(s, ";")
+	parts := strings.Split(s, ";")
 	result := make([]string, 0, len(parts))
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
