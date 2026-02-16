@@ -17,7 +17,7 @@ It handles virtual host routing, backend selection, and configuration hot-reload
 
 - **Virtual host routing**: Route requests based on the Host header
 - **Exact hostname matching**: `api.example.com`
-- **Wildcard hostname matching**: `*.staging.example.com` (single label only, per Gateway API spec)
+- **Wildcard hostname matching**: `*.staging.example.com` (matches any subdomain depth, per Gateway API spec)
 - **Weighted backend selection**: Distribute traffic across backends by weight
 - **Hot configuration reload**: Update routing without restarting Varnish
 - **Default backend fallback**: Catch-all for unmatched requests

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use varnish::vcl::{Ctx, LogTag, StrOrBytes, VclBackend, VclError, VclResponse};
 
 use crate::config::RequestRedirectFilter;
+use crate::vhost_director::replace_first_segment_heuristic;
 
 /// Stateless redirect backend - actual redirect config passed via request header
 pub struct RedirectBackend;
@@ -39,27 +40,22 @@ impl VclBackend<RedirectBody> for RedirectBackend {
         };
 
         let config: RedirectConfig = serde_json::from_str(&config_json).map_err(|e| {
-            ctx.log(
-                LogTag::Error,
-                format!("Invalid redirect config: {}", e),
-            );
+            ctx.log(LogTag::Error, format!("Invalid redirect config: {}", e));
             VclError::new(format!("Invalid redirect config: {}", e))
         })?;
 
         // Build Location header
         let location = build_location(&config).map_err(|e| {
-            ctx.log(
-                LogTag::Error,
-                format!("Failed to build location: {}", e),
-            );
+            ctx.log(LogTag::Error, format!("Failed to build location: {}", e));
             e
         })?;
 
         // Set response status and Location header
         {
-            let beresp = ctx.http_beresp.as_mut().ok_or_else(|| {
-                VclError::new("Missing beresp in redirect backend".to_string())
-            })?;
+            let beresp = ctx
+                .http_beresp
+                .as_mut()
+                .ok_or_else(|| VclError::new("Missing beresp in redirect backend".to_string()))?;
 
             beresp.set_status(config.filter.status_code as u16);
             beresp.set_header("Location", &location)?;
@@ -100,9 +96,15 @@ pub fn build_location(config: &RedirectConfig) -> Result<String, VclError> {
     // Port handling: if scheme changes without explicit port, use default port for new scheme
     let port = if let Some(explicit_port) = config.filter.port {
         explicit_port
-    } else if config.filter.scheme.is_some() && config.filter.scheme.as_deref() != Some(&config.original_scheme) {
+    } else if config.filter.scheme.is_some()
+        && config.filter.scheme.as_deref() != Some(&config.original_scheme)
+    {
         // Scheme changed without explicit port - use default for new scheme
-        if scheme == "https" { 443 } else { 80 }
+        if scheme == "https" {
+            443
+        } else {
+            80
+        }
     } else {
         // No scheme change or scheme not specified - keep original port
         config.original_port
@@ -170,26 +172,6 @@ fn rewrite_path(
     }
 
     Ok(original_path.to_string())
-}
-
-/// Simplified version of vhost_director.rs:replace_first_segment_heuristic
-fn replace_first_segment_heuristic(path: &str, new_prefix: &str) -> String {
-    if path.starts_with('/') {
-        let segments: Vec<&str> = path.splitn(3, '/').collect();
-        if segments.len() >= 2 {
-            let remainder = if segments.len() > 2 { segments[2] } else { "" };
-            let trimmed_new = new_prefix.trim_end_matches('/');
-            if remainder.is_empty() {
-                trimmed_new.to_string()
-            } else {
-                format!("{}/{}", trimmed_new, remainder)
-            }
-        } else {
-            new_prefix.to_string()
-        }
-    } else {
-        new_prefix.to_string()
-    }
 }
 
 pub struct RedirectBody {

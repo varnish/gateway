@@ -7,7 +7,9 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use varnish::vcl::{BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector, VclError};
+use varnish::vcl::{
+    BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector, VclError,
+};
 
 use crate::backend_pool::BackendPool;
 use crate::config::RouteFilters;
@@ -94,7 +96,9 @@ impl VhostDirector {
     /// Check if this director has any routes with backends or filters
     /// Routes with redirect filters but no backends are considered "healthy"
     fn has_backends(&self) -> bool {
-        self.routes.iter().any(|r| !r.backends.is_empty() || r.filters.is_some())
+        self.routes
+            .iter()
+            .any(|r| !r.backends.is_empty() || r.filters.is_some())
     }
 
     /// Collect all backend keys used by this director
@@ -149,10 +153,7 @@ impl VhostDirector {
         let _ = vsb.write(&msg);
 
         if let Some(last) = self.stats.last_request() {
-            let msg = format!(
-                "  Last request: {}\n",
-                format_timestamp(Some(last))
-            );
+            let msg = format!("  Last request: {}\n", format_timestamp(Some(last)));
             let _ = vsb.write(&msg);
         }
 
@@ -240,8 +241,13 @@ impl VclDirector for VhostDirector {
         let bereq = ctx.http_bereq.as_ref()?;
 
         // Match routes (already sorted by priority)
-        let match_result =
-            match_routes(&self.routes, &path_owned, &method_owned, bereq, query_string_owned.as_deref())?;
+        let match_result = match_routes(
+            &self.routes,
+            &path_owned,
+            &method_owned,
+            bereq,
+            query_string_owned.as_deref(),
+        )?;
         let backend_refs = match_result.backends;
         let matched_filters = match_result.filters.as_ref();
 
@@ -331,7 +337,8 @@ impl VclDirector for VhostDirector {
             // URLRewrite
             if let Some(url_rewrite) = &filters.url_rewrite {
                 ctx.log(LogTag::Debug, "Applying URL rewrite filter");
-                if let Err(e) = apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path)
+                if let Err(e) =
+                    apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path)
                 {
                     ctx.log(LogTag::Error, format!("URL rewrite failed: {}", e));
                 }
@@ -695,16 +702,10 @@ mod tests {
         );
 
         // Root path
-        assert_eq!(
-            replace_first_segment_heuristic("/", "/v2"),
-            "/v2"
-        );
+        assert_eq!(replace_first_segment_heuristic("/", "/v2"), "/v2");
 
         // Single segment (no remainder) - should not add trailing slash
-        assert_eq!(
-            replace_first_segment_heuristic("/v1", "/v2"),
-            "/v2"
-        );
+        assert_eq!(replace_first_segment_heuristic("/v1", "/v2"), "/v2");
 
         // Trailing slash in new prefix is trimmed
         assert_eq!(
@@ -746,7 +747,9 @@ fn apply_request_header_filter(
     ctx: &mut Ctx,
     filter: &crate::config::RequestHeaderFilter,
 ) -> Result<(), VclError> {
-    let bereq = ctx.http_bereq.as_mut()
+    let bereq = ctx
+        .http_bereq
+        .as_mut()
         .ok_or_else(|| VclError::new("no bereq".to_string()))?;
 
     // Remove headers
@@ -784,7 +787,9 @@ fn apply_url_rewrite_filter(
     filter: &crate::config::URLRewriteFilter,
     matched_path: Option<&PathMatchCompiled>,
 ) -> Result<(), VclError> {
-    let bereq = ctx.http_bereq.as_mut()
+    let bereq = ctx
+        .http_bereq
+        .as_mut()
         .ok_or_else(|| VclError::new("no bereq".to_string()))?;
 
     // Rewrite hostname — must unset first since set_header() appends
@@ -798,12 +803,26 @@ fn apply_url_rewrite_filter(
         match path_type.as_str() {
             "ReplaceFullPath" => {
                 if let Some(path) = &filter.replace_full_path {
-                    bereq.set_url(path)?;
+                    let current_url = bereq
+                        .url()
+                        .and_then(|u| match u {
+                            StrOrBytes::Utf8(s) => Some(s),
+                            StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
+                        })
+                        .unwrap_or("/");
+                    let (_, query) = extract_path_and_query(current_url);
+                    let final_url = if let Some(q) = query {
+                        format!("{}?{}", path, q)
+                    } else {
+                        path.to_string()
+                    };
+                    bereq.set_url(&final_url)?;
                 }
             }
             "ReplacePrefixMatch" => {
                 if let Some(new_prefix) = &filter.replace_prefix_match {
-                    let current_url = bereq.url()
+                    let current_url = bereq
+                        .url()
                         .and_then(|u| match u {
                             StrOrBytes::Utf8(s) => Some(s),
                             StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
@@ -813,7 +832,8 @@ fn apply_url_rewrite_filter(
                     let (path, query) = extract_path_and_query(current_url);
 
                     // Compute new path and any log messages without borrowing ctx
-                    let (new_path, log_msg) = apply_replace_prefix_match(path, new_prefix, matched_path);
+                    let (new_path, log_msg) =
+                        apply_replace_prefix_match(path, new_prefix, matched_path);
 
                     let final_url = if let Some(q) = query {
                         format!("{}?{}", new_path, q)
@@ -832,7 +852,7 @@ fn apply_url_rewrite_filter(
             _ => {
                 ctx.log(
                     varnish::vcl::LogTag::Error,
-                    format!("Unknown path rewrite type: {}", path_type)
+                    format!("Unknown path rewrite type: {}", path_type),
                 );
             }
         }
@@ -870,34 +890,51 @@ fn apply_replace_prefix_match(
 
                 let result = if remainder.is_empty() {
                     let r = trimmed_new.to_string();
-                    if r.is_empty() { "/".to_string() } else { r }
+                    if r.is_empty() {
+                        "/".to_string()
+                    } else {
+                        r
+                    }
                 } else if remainder.starts_with('/') {
                     format!("{}{}", trimmed_new, remainder)
                 } else {
                     format!("{}/{}", trimmed_new, remainder)
                 };
-                let log = format!("ReplacePrefixMatch: {} + {} -> {}", matched_prefix, remainder, result);
+                let log = format!(
+                    "ReplacePrefixMatch: {} + {} -> {}",
+                    matched_prefix, remainder, result
+                );
                 (result, Some((LogTag::Debug, log)))
             } else {
-                let msg = format!("ReplacePrefixMatch: path {} doesn't start with matched prefix {}",
-                        path, matched_prefix);
+                let msg = format!(
+                    "ReplacePrefixMatch: path {} doesn't start with matched prefix {}",
+                    path, matched_prefix
+                );
                 (path.to_string(), Some((LogTag::Error, msg)))
             }
         }
         Some(PathMatchCompiled::Exact(_)) => {
             // Exact match: treat as ReplaceFullPath
-            let msg = "ReplacePrefixMatch with Exact match - treating as full replacement".to_string();
+            let msg =
+                "ReplacePrefixMatch with Exact match - treating as full replacement".to_string();
             (new_prefix.to_string(), Some((LogTag::Debug, msg)))
         }
         Some(PathMatchCompiled::Regex(_)) => {
             // Regex: cannot extract matched portion, use heuristic
-            let msg = "ReplacePrefixMatch with RegularExpression not supported - using heuristic".to_string();
-            (replace_first_segment_heuristic(path, new_prefix), Some((LogTag::Error, msg)))
+            let msg = "ReplacePrefixMatch with RegularExpression not supported - using heuristic"
+                .to_string();
+            (
+                replace_first_segment_heuristic(path, new_prefix),
+                Some((LogTag::Error, msg)),
+            )
         }
         None => {
             // No path match: use heuristic
             let msg = "ReplacePrefixMatch without path match - using heuristic".to_string();
-            (replace_first_segment_heuristic(path, new_prefix), Some((LogTag::Debug, msg)))
+            (
+                replace_first_segment_heuristic(path, new_prefix),
+                Some((LogTag::Debug, msg)),
+            )
         }
     }
 }
@@ -935,7 +972,7 @@ fn apply_replace_prefix_match(
 /// 1. Split path on `/` into at most 3 parts: `["", "v1", "users/123"]`
 /// 2. Replace the second part (first segment) with `new_prefix` (trimmed of trailing `/`)
 /// 3. Append the remainder (third part, if any)
-fn replace_first_segment_heuristic(path: &str, new_prefix: &str) -> String {
+pub(crate) fn replace_first_segment_heuristic(path: &str, new_prefix: &str) -> String {
     if path.starts_with('/') {
         let segments: Vec<&str> = path.splitn(3, '/').collect();
         if segments.len() >= 2 {
@@ -984,10 +1021,7 @@ fn parse_host_and_port(host_header: &str) -> (&str, Option<u16>) {
     (host_header, None)
 }
 
-fn store_filter_context(
-    ctx: &mut Ctx,
-    filters: &Arc<RouteFilters>,
-) -> Result<(), VclError> {
+fn store_filter_context(ctx: &mut Ctx, filters: &Arc<RouteFilters>) -> Result<(), VclError> {
     let bereq = ctx
         .http_bereq
         .as_mut()

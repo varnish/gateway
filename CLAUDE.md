@@ -7,10 +7,6 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 - **chaperone**: handles endpoint discovery and triggers ghost reload
 - **ghost**: Rust VMOD that handles all routing logic internally
 
-## Supported Platform
-
-**Linux only**: This project is designed to run on Kubernetes clusters running on Linux. Other platforms (macOS, Windows) are not supported.
-
 ## Documentation
 
 - [Configuration Reference](docs/configuration-reference.md) - GatewayClassParameters, varnishd args, defaults

@@ -23,7 +23,6 @@ fn default_weight() -> u32 {
     100
 }
 
-
 /// Mirrors Gateway API's HTTPPathMatch types for URL routing decisions.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "PascalCase")]
@@ -230,7 +229,10 @@ fn validate(config: &Config) -> Result<(), String> {
         }
 
         if !vhost.default_backends.is_empty() {
-            validate_backends(&format!("{} default_backends", hostname), &vhost.default_backends)?;
+            validate_backends(
+                &format!("{} default_backends", hostname),
+                &vhost.default_backends,
+            )?;
         }
     }
 
@@ -238,8 +240,8 @@ fn validate(config: &Config) -> Result<(), String> {
 }
 
 /// Ensure vhost keys conform to Gateway API hostname rules.
-/// Wildcards must be leading (*.example.com) to match the single-label
-/// wildcard semantics defined in the Gateway API spec.
+/// Wildcards must be leading (*.example.com) and match any subdomain depth
+/// (e.g., `*.example.com` matches both `foo.example.com` and `foo.bar.example.com`).
 fn validate_hostname(hostname: &str) -> Result<(), String> {
     if hostname.is_empty() {
         return Err("hostname cannot be empty".to_string());
@@ -289,7 +291,6 @@ fn validate_backends(context: &str, backends: &[Backend]) -> Result<(), String> 
     }
     Ok(())
 }
-
 
 /// Enforce Gateway API path constraints and catch regex errors early.
 /// Invalid regexes would panic at match time; malformed paths indicate
@@ -491,8 +492,7 @@ mod tests {
 
     #[test]
     fn test_invalid_wildcard_double() {
-        let file =
-            write_config(r#"{"version": 2, "vhosts": {"*.*.example.com": {"routes": []}}}"#);
+        let file = write_config(r#"{"version": 2, "vhosts": {"*.*.example.com": {"routes": []}}}"#);
         let result = load(file.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only single leading wildcard"));
@@ -604,7 +604,13 @@ mod tests {
         assert!(filters.url_rewrite.is_some());
 
         let url_rewrite = filters.url_rewrite.as_ref().unwrap();
-        assert_eq!(url_rewrite.path_type.as_ref().unwrap(), "ReplacePrefixMatch");
-        assert_eq!(url_rewrite.replace_prefix_match.as_ref().unwrap(), "/api/v2");
+        assert_eq!(
+            url_rewrite.path_type.as_ref().unwrap(),
+            "ReplacePrefixMatch"
+        );
+        assert_eq!(
+            url_rewrite.replace_prefix_match.as_ref().unwrap(),
+            "/api/v2"
+        );
     }
 }

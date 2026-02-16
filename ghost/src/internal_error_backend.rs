@@ -10,7 +10,10 @@ pub struct InternalErrorBackend;
 
 impl VclBackend<InternalErrorBody> for InternalErrorBackend {
     fn get_response(&self, ctx: &mut Ctx) -> Result<Option<InternalErrorBody>, VclError> {
-        let beresp = ctx.http_beresp.as_mut().unwrap();
+        let beresp = ctx
+            .http_beresp
+            .as_mut()
+            .ok_or_else(|| VclError::new("Missing beresp in internal_error backend".to_string()))?;
         beresp.set_status(500);
         beresp.set_header("Content-Type", "text/plain")?;
 

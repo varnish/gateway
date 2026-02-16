@@ -12,7 +12,10 @@ use std::time::SystemTime;
 use arc_swap::ArcSwap;
 use parking_lot::RwLock;
 use regex::Regex;
-use varnish::vcl::{Backend, BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector, VclError};
+use varnish::vcl::{
+    Backend, BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector,
+    VclError,
+};
 
 use crate::backend_pool::BackendPool;
 use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
@@ -42,7 +45,6 @@ pub struct WeightedBackendRef {
     /// Weight for random selection
     pub weight: u32,
 }
-
 
 /// Compiled path match for efficient matching
 #[derive(Debug, Clone)]
@@ -202,6 +204,15 @@ pub struct VhostDirectorMap {
     pub wildcards: Vec<(String, Arc<VhostDirector>)>,
 }
 
+impl VhostDirectorMap {
+    /// Iterate over all vhost directors (exact matches first, then wildcards)
+    pub fn all_directors(&self) -> impl Iterator<Item = &Arc<VhostDirector>> {
+        self.exact
+            .values()
+            .chain(self.wildcards.iter().map(|(_, d)| d))
+    }
+}
+
 /// Build vhost directors from configuration
 ///
 /// Creates a VhostDirector for each vhost in the config. Each director handles
@@ -250,7 +261,8 @@ pub fn build_vhost_directors(
                 .iter()
                 .map(HeaderMatchCompiled::from_config)
                 .collect();
-            let headers = headers.map_err(|e| VclError::new(format!("Invalid header match: {}", e)))?;
+            let headers =
+                headers.map_err(|e| VclError::new(format!("Invalid header match: {}", e)))?;
 
             // Compile query param matches
             let query_params: Result<Vec<_>, _> = route
@@ -258,7 +270,8 @@ pub fn build_vhost_directors(
                 .iter()
                 .map(QueryParamMatchCompiled::from_config)
                 .collect();
-            let query_params = query_params.map_err(|e| VclError::new(format!("Invalid query param match: {}", e)))?;
+            let query_params = query_params
+                .map_err(|e| VclError::new(format!("Invalid query param match: {}", e)))?;
 
             let filters = route.filters.as_ref().map(|f| Arc::new(f.clone()));
 
@@ -276,7 +289,8 @@ pub fn build_vhost_directors(
 
         // Sort routes by priority (descending), then by rule_index (ascending) for tiebreaking
         route_entries.sort_by(|a, b| {
-            b.priority.cmp(&a.priority)
+            b.priority
+                .cmp(&a.priority)
                 .then_with(|| a.rule_index.cmp(&b.rule_index))
         });
 
@@ -328,27 +342,23 @@ pub fn build_vhost_directors(
         }
     }
 
+    // Sort wildcards by descending suffix length so more specific patterns match first
+    // (e.g., *.bar.example.com before *.example.com)
+    wildcards.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
     Ok(VhostDirectorMap { exact, wildcards })
 }
 
 /// Collect all backend keys referenced in vhost directors
-fn collect_referenced_backends_from_directors(directors: &VhostDirectorMap) -> std::collections::HashSet<String> {
+fn collect_referenced_backends_from_directors(
+    directors: &VhostDirectorMap,
+) -> std::collections::HashSet<String> {
     let mut keys = std::collections::HashSet::new();
-
-    // Collect from exact matches
-    for director in directors.exact.values() {
+    for director in directors.all_directors() {
         for key in director.backend_keys() {
             keys.insert(key);
         }
     }
-
-    // Collect from wildcards
-    for (_, director) in &directors.wildcards {
-        for key in director.backend_keys() {
-            keys.insert(key);
-        }
-    }
-
     keys
 }
 
@@ -394,11 +404,13 @@ impl GhostDirector {
         let not_found_ref = SendSyncBackendRef(not_found_backend.as_ref().clone());
 
         // Create synthetic redirect backend
-        let redirect_backend = Backend::new(ctx, "ghost", "ghost_redirect", RedirectBackend, false)?;
+        let redirect_backend =
+            Backend::new(ctx, "ghost", "ghost_redirect", RedirectBackend, false)?;
         let redirect_ref = SendSyncBackendRef(redirect_backend.as_ref().clone());
 
         // Create synthetic 500 backend for matched routes with no backends
-        let internal_error_backend = Backend::new(ctx, "ghost", "ghost_500", InternalErrorBackend, false)?;
+        let internal_error_backend =
+            Backend::new(ctx, "ghost", "ghost_500", InternalErrorBackend, false)?;
         let internal_error_ref = SendSyncBackendRef(internal_error_backend.as_ref().clone());
 
         let director = Self {
@@ -411,7 +423,12 @@ impl GhostDirector {
             last_error: RwLock::new(None),
         };
 
-        Ok((director, not_found_backend, redirect_backend, internal_error_backend))
+        Ok((
+            director,
+            not_found_backend,
+            redirect_backend,
+            internal_error_backend,
+        ))
     }
 
     /// Reload configuration from disk
@@ -431,7 +448,14 @@ impl GhostDirector {
         })?;
 
         // Build new vhost directors
-        let new_directors = build_vhost_directors(&config, &mut backend_pool, ctx, self.redirect_backend.0.clone(), self.internal_error_backend.0.clone()).map_err(|e| {
+        let new_directors = build_vhost_directors(
+            &config,
+            &mut backend_pool,
+            ctx,
+            self.redirect_backend.0.clone(),
+            self.internal_error_backend.0.clone(),
+        )
+        .map_err(|e| {
             let error_msg = format!("Ghost reload failed: {}", e);
             // Log to VSL for visibility in varnishlog
             ctx.log(LogTag::Error, &error_msg);
@@ -466,56 +490,29 @@ impl GhostDirector {
         let directors = self.vhost_directors.load();
         let backends = self.backends.load();
 
-        let mut all_backends = Vec::new();
+        let all_backends: Vec<_> = directors
+            .all_directors()
+            .map(|director| {
+                let selections = director.stats().backend_selections();
+                let total = director.stats().total_requests();
+                let backend_objs =
+                    crate::format::format_backend_selections_json(&selections, total);
 
-        // Collect from exact matches
-        for director in directors.exact.values() {
-            // Build the JSON object directly
-            let selections = director.stats().backend_selections();
-            let total = director.stats().total_requests();
-
-            let backend_objs = crate::format::format_backend_selections_json(&selections, total);
-
-            let obj = serde_json::json!({
-                "name": format!("ghost.{}", director.hostname()),
-                "type": "vhost_director",
-                "admin": "auto",
-                "health": if director.probe(ctx).healthy { "healthy" } else { "sick" },
-                "routes": director.backend_keys().len(),
-                "total_requests": total,
-                "last_request": director.stats().last_request().map(|t| {
-                    use crate::format::format_timestamp;
-                    format_timestamp(Some(t))
-                }),
-                "backends": backend_objs
-            });
-
-            all_backends.push(obj);
-        }
-
-        // Collect from wildcards
-        for (_, director) in &directors.wildcards {
-            let selections = director.stats().backend_selections();
-            let total = director.stats().total_requests();
-
-            let backend_objs = crate::format::format_backend_selections_json(&selections, total);
-
-            let obj = serde_json::json!({
-                "name": format!("ghost.{}", director.hostname()),
-                "type": "vhost_director",
-                "admin": "auto",
-                "health": if director.probe(ctx).healthy { "healthy" } else { "sick" },
-                "routes": director.backend_keys().len(),
-                "total_requests": total,
-                "last_request": director.stats().last_request().map(|t| {
-                    use crate::format::format_timestamp;
-                    format_timestamp(Some(t))
-                }),
-                "backends": backend_objs
-            });
-
-            all_backends.push(obj);
-        }
+                serde_json::json!({
+                    "name": format!("ghost.{}", director.hostname()),
+                    "type": "vhost_director",
+                    "admin": "auto",
+                    "health": if director.probe(ctx).healthy { "healthy" } else { "sick" },
+                    "routes": director.backend_keys().len(),
+                    "total_requests": total,
+                    "last_request": director.stats().last_request().map(|t| {
+                        use crate::format::format_timestamp;
+                        format_timestamp(Some(t))
+                    }),
+                    "backends": backend_objs
+                })
+            })
+            .collect();
 
         let output = serde_json::json!({
             "backends": all_backends,
@@ -561,32 +558,10 @@ impl VclDirector for GhostDirector {
     }
 
     fn probe(&self, ctx: &mut Ctx) -> ProbeResult {
-        // Aggregate health across all vhost directors
-        // Report healthy if any vhost has backends
         let directors = self.vhost_directors.load();
-
-        // Check if any vhost director is healthy
-        for director in directors.exact.values() {
-            if director.probe(ctx).healthy {
-                return ProbeResult {
-                    healthy: true,
-                    last_changed: SystemTime::now(),
-                };
-            }
-        }
-
-        for (_, director) in &directors.wildcards {
-            if director.probe(ctx).healthy {
-                return ProbeResult {
-                    healthy: true,
-                    last_changed: SystemTime::now(),
-                };
-            }
-        }
-
-        // No healthy vhosts
+        let healthy = directors.all_directors().any(|d| d.probe(ctx).healthy);
         ProbeResult {
-            healthy: false,
+            healthy,
             last_changed: SystemTime::now(),
         }
     }
@@ -594,25 +569,17 @@ impl VclDirector for GhostDirector {
     fn report(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
         let directors = self.vhost_directors.load();
 
-        // Brief: table header + rows
         let header = "Backend name                      Admin    Health    Requests\n";
         let _ = vsb.write(&header);
 
-        for director in directors.exact.values() {
-            director.report(ctx, vsb);
-        }
-        for (_, director) in &directors.wildcards {
+        for director in directors.all_directors() {
             director.report(ctx, vsb);
         }
     }
 
     fn report_details(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
         let directors = self.vhost_directors.load();
-
-        for director in directors.exact.values() {
-            director.report_details(ctx, vsb);
-        }
-        for (_, director) in &directors.wildcards {
+        for director in directors.all_directors() {
             director.report_details(ctx, vsb);
         }
     }
@@ -713,12 +680,29 @@ fn str_or_bytes_to_cow<'a>(sob: &'a StrOrBytes<'a>) -> Option<Cow<'a, str>> {
 }
 
 /// Get Host header value (without port)
+///
+/// Handles regular hostnames, IPv4 addresses, and IPv6 bracketed addresses.
 fn get_host_header(http: &HttpHeaders) -> Option<String> {
     let host_value = http.header("host")?;
     let host_str = str_or_bytes_to_cow(&host_value)?;
-    // Strip port if present
-    let host = host_str.split(':').next()?;
-    Some(host.to_lowercase())
+    Some(strip_port(&host_str).to_lowercase())
+}
+
+/// Strip port from a host string, handling IPv6 bracketed addresses.
+fn strip_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        // IPv6 bracketed: [::1]:8080 -> [::1]
+        match host.find(']') {
+            Some(end) => &host[..=end],
+            None => host,
+        }
+    } else {
+        // Regular host or host:port — use rfind to avoid splitting on IPv6 colons
+        match host.rfind(':') {
+            Some(pos) if host[pos + 1..].parse::<u16>().is_ok() => &host[..pos],
+            _ => host,
+        }
+    }
 }
 
 /// Parse query string into key-value pairs
@@ -900,4 +884,83 @@ mod tests {
         // This verifies the behavior used in RouteEntry with None path_match
     }
 
+    #[test]
+    fn test_wildcard_specificity_ordering() {
+        // More specific wildcard (*.bar.example.com) should match before
+        // less specific (*.example.com), regardless of insertion order
+        let directors = VhostDirectorMap {
+            exact: HashMap::new(),
+            wildcards: vec![
+                (
+                    "*.example.com".to_string(),
+                    Arc::new(VhostDirector::new(
+                        "*.example.com".to_string(),
+                        vec![],
+                        Arc::new(crate::backend_pool::BackendPool::new()),
+                        None,
+                        None,
+                    )),
+                ),
+                (
+                    "*.bar.example.com".to_string(),
+                    Arc::new(VhostDirector::new(
+                        "*.bar.example.com".to_string(),
+                        vec![],
+                        Arc::new(crate::backend_pool::BackendPool::new()),
+                        None,
+                        None,
+                    )),
+                ),
+            ],
+        };
+
+        // foo.bar.example.com should match *.bar.example.com (more specific)
+        // but only if wildcards are sorted by specificity. Since VhostDirectorMap
+        // is built by build_vhost_directors which sorts, let's simulate the sort:
+        let mut wildcards = directors.wildcards;
+        wildcards.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        let sorted_directors = VhostDirectorMap {
+            exact: directors.exact,
+            wildcards,
+        };
+
+        let matched = match_hostname(&sorted_directors, "foo.bar.example.com");
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().hostname(), "*.bar.example.com");
+
+        // foo.example.com should match *.example.com
+        let matched = match_hostname(&sorted_directors, "foo.example.com");
+        assert!(matched.is_some());
+        assert_eq!(matched.unwrap().hostname(), "*.example.com");
+    }
+
+    #[test]
+    fn test_strip_port_regular_hostname() {
+        assert_eq!(strip_port("example.com"), "example.com");
+        assert_eq!(strip_port("example.com:8080"), "example.com");
+        assert_eq!(strip_port("example.com:443"), "example.com");
+    }
+
+    #[test]
+    fn test_strip_port_ipv4() {
+        assert_eq!(strip_port("127.0.0.1"), "127.0.0.1");
+        assert_eq!(strip_port("127.0.0.1:8080"), "127.0.0.1");
+    }
+
+    #[test]
+    fn test_strip_port_ipv6_bracketed() {
+        assert_eq!(strip_port("[::1]"), "[::1]");
+        assert_eq!(strip_port("[::1]:8080"), "[::1]");
+        assert_eq!(strip_port("[2001:db8::1]"), "[2001:db8::1]");
+        assert_eq!(strip_port("[2001:db8::1]:443"), "[2001:db8::1]");
+    }
+
+    #[test]
+    fn test_strip_port_ipv6_no_brackets() {
+        // Bare IPv6 without brackets is not a valid Host header format (RFC 2732
+        // requires brackets). The behavior here is best-effort — ambiguous inputs
+        // like "::1" may be misinterpreted, which is acceptable since they're malformed.
+        // Non-ambiguous bare IPv6 (no trailing numeric segment) is preserved.
+        assert_eq!(strip_port("2001:db8::ff"), "2001:db8::ff");
+    }
 }

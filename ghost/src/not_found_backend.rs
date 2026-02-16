@@ -11,7 +11,10 @@ pub struct NotFoundBackend;
 
 impl VclBackend<NotFoundBody> for NotFoundBackend {
     fn get_response(&self, ctx: &mut Ctx) -> Result<Option<NotFoundBody>, VclError> {
-        let beresp = ctx.http_beresp.as_mut().unwrap();
+        let beresp = ctx
+            .http_beresp
+            .as_mut()
+            .ok_or_else(|| VclError::new("Missing beresp in not_found backend".to_string()))?;
         beresp.set_status(404);
         beresp.set_header("Content-Type", "text/plain")?;
 

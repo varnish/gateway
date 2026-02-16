@@ -86,7 +86,7 @@ pub struct ghost_backend {
 ///
 /// - **Virtual host routing**: Route requests based on the Host header
 /// - **Exact hostname matching**: `api.example.com`
-/// - **Wildcard hostname matching**: `*.staging.example.com` (single label only, per Gateway API spec)
+/// - **Wildcard hostname matching**: `*.staging.example.com` (matches any subdomain depth, per Gateway API spec)
 /// - **Weighted backend selection**: Distribute traffic across backends by weight
 /// - **Hot configuration reload**: Update routing without restarting Varnish
 /// - **Default backend fallback**: Catch-all for unmatched requests
@@ -261,12 +261,10 @@ mod ghost {
         // Read filter context from response header
         let filter_json = match resp.header(FILTER_CONTEXT_HEADER) {
             Some(StrOrBytes::Utf8(s)) => s.to_string(),
-            Some(StrOrBytes::Bytes(b)) => {
-                match std::str::from_utf8(b) {
-                    Ok(s) => s.to_string(),
-                    Err(_) => return,
-                }
-            }
+            Some(StrOrBytes::Bytes(b)) => match std::str::from_utf8(b) {
+                Ok(s) => s.to_string(),
+                Err(_) => return,
+            },
             None => return,
         };
 
@@ -345,11 +343,9 @@ mod ghost {
             // Get config path from global state
             let config_path = {
                 let state_guard = STATE.read();
-                let state = state_guard
-                    .as_ref()
-                    .ok_or_else(|| {
-                        VclError::new("ghost.backend: ghost.init() must be called first".to_string())
-                    })?;
+                let state = state_guard.as_ref().ok_or_else(|| {
+                    VclError::new("ghost.backend: ghost.init() must be called first".to_string())
+                })?;
                 state.config_path.clone()
             };
 

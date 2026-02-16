@@ -106,7 +106,8 @@ impl BackendPool {
     /// This is used during config reload to clean up backends that are
     /// no longer referenced in the routing state.
     pub fn retain_only(&mut self, keys_to_keep: &std::collections::HashSet<String>) {
-        self.backends.retain(|key, _backend| keys_to_keep.contains(key));
+        self.backends
+            .retain(|key, _backend| keys_to_keep.contains(key));
     }
 }
 
