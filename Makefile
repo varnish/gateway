@@ -143,8 +143,8 @@ build-ghost:
 test-ghost:
 	cd ghost && cargo clippy --release -- -D warnings
 	cd ghost && cargo build --release
-	cd ghost && cargo test --release --lib
-	cd ghost && cargo test --release run_vtc_tests
+	cd ghost && LD_LIBRARY_PATH=$$(pwd)/target/release cargo test --release --lib
+	cd ghost && LD_LIBRARY_PATH=$$(pwd)/target/release cargo test --release run_vtc_tests
 
 # ============================================================================
 # Docker images
