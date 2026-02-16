@@ -61,33 +61,9 @@ Images are public and require no authentication to pull.
 - Weighted backend selection
 - Async HTTP client with connection pooling
 
-## Reload Flow
+## Config reload
 
-```
-HTTPRoute changes
-       │
-       ▼
-┌─────────────┐
-│  Operator   │ ──► regenerates routing.json in ConfigMap
-└─────────────┘
-       │
-       │ ConfigMap update propagates to pod
-       ▼
-┌─────────────┐
-│  Chaperone  │ ──► merges routing.json + EndpointSlices → ghost.json
-└─────────────┘
-       │
-       │ HTTP request to localhost
-       ▼
-┌─────────────┐
-│   Varnish   │
-│  + ghost    │ ──► ghost.recv() handles reload request
-└─────────────┘
-       │
-       │ ghost reloads config atomically
-       ▼
-   New routing active
-```
+All changes in HTTPRoutes will be 
 
 Two separate reload paths:
 - **VCL changes** (user VCL updates): varnishadm hot-reload
