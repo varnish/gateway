@@ -223,7 +223,7 @@ helm-template:
 
 helm-package:
 	@mkdir -p dist/charts
-	helm package $(CHART_PATH) -d dist/charts --version $(CHART_VERSION) --app-version $(CHART_VERSION)
+	helm package $(CHART_PATH) -d dist/charts --version $(CHART_VERSION) --app-version $(VERSION)
 
 helm-push: helm-package
 	@echo "Pushing Helm chart to $(REGISTRY)/varnish/charts"

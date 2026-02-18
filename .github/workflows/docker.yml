@@ -237,7 +237,7 @@ jobs:
 
       - name: Package Helm chart
         run: |
-          helm package charts/varnish-gateway -d dist/charts --version ${{ steps.version.outputs.chart_version }} --app-version ${{ steps.version.outputs.chart_version }}
+          helm package charts/varnish-gateway -d dist/charts --version ${{ steps.version.outputs.chart_version }} --app-version ${{ steps.version.outputs.version }}
 
       - name: Push Helm chart to OCI registry
         run: |
