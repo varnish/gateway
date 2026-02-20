@@ -108,6 +108,24 @@ spec:
                       description: |
                         Image specifies the container image containing varnish logging tools.
                         Defaults to the same image as the gateway if not specified.
+                extraVolumes:
+                  type: array
+                  description: Additional volumes to add to the varnish pod.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                extraVolumeMounts:
+                  type: array
+                  description: Additional volume mounts for the main varnish-gateway container.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                extraInitContainers:
+                  type: array
+                  description: Additional init containers to run before the main container.
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
       additionalPrinterColumns:
         - name: Age
           type: date

@@ -3,8 +3,11 @@ package controller
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"sort"
 	"strings"
+
+	corev1 "k8s.io/api/core/v1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
@@ -34,6 +37,15 @@ type InfrastructureConfig struct {
 	// listener changes the varnishd listen args and requires a pod restart.
 	// Individual cert ref changes are handled by the TLS file watcher without restart.
 	HasTLS bool
+
+	// ExtraVolumes are additional volumes to add to the varnish pod
+	ExtraVolumes []corev1.Volume
+
+	// ExtraVolumeMounts are additional volume mounts for the main container
+	ExtraVolumeMounts []corev1.VolumeMount
+
+	// ExtraInitContainers are additional init containers to run before the main container
+	ExtraInitContainers []corev1.Container
 }
 
 // ComputeHash returns a deterministic SHA256 hash of the infrastructure configuration
@@ -78,6 +90,24 @@ func (c *InfrastructureConfig) ComputeHash() string {
 	// Include TLS flag (adding/removing HTTPS listeners changes listen args)
 	if c.HasTLS {
 		h.Write([]byte("tls"))
+	}
+	h.Write([]byte{0}) // separator
+
+	// Include extra volumes, mounts, and init containers via JSON marshal.
+	// JSON marshaling of corev1 struct types is deterministic (struct field order).
+	if len(c.ExtraVolumes) > 0 {
+		data, _ := json.Marshal(c.ExtraVolumes)
+		h.Write(data)
+	}
+	h.Write([]byte{0})
+	if len(c.ExtraVolumeMounts) > 0 {
+		data, _ := json.Marshal(c.ExtraVolumeMounts)
+		h.Write(data)
+	}
+	h.Write([]byte{0})
+	if len(c.ExtraInitContainers) > 0 {
+		data, _ := json.Marshal(c.ExtraInitContainers)
+		h.Write(data)
 	}
 
 	return hex.EncodeToString(h.Sum(nil))

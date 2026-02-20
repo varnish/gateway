@@ -157,7 +157,7 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, hasTLS bool) *appsv1.Deployment {
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, hasTLS bool, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -208,8 +208,9 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
-					Containers:                    r.buildContainers(gateway, varnishdExtraArgs, logging, hasTLS),
-					Volumes:                       r.buildVolumes(gateway, hasTLS),
+					InitContainers:                extraInitContainers,
+					Containers:                    r.buildContainers(gateway, varnishdExtraArgs, logging, hasTLS, extraVolumeMounts),
+					Volumes:                       r.buildVolumes(gateway, hasTLS, extraVolumes),
 				},
 			},
 		},
@@ -217,7 +218,7 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 }
 
 // buildVolumes creates the pod volumes, including TLS cert volume if HTTPS is enabled.
-func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, hasTLS bool) []corev1.Volume {
+func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, hasTLS bool, extra []corev1.Volume) []corev1.Volume {
 	volumes := []corev1.Volume{
 		{
 			Name: volumeVCLConfig,
@@ -248,13 +249,15 @@ func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, hasTLS bool
 		})
 	}
 
+	volumes = append(volumes, extra...)
+
 	return volumes
 }
 
 // buildContainers creates the pod containers: main gateway container and optional logging sidecar.
-func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, hasTLS bool) []corev1.Container {
+func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, hasTLS bool, extraVolumeMounts []corev1.VolumeMount) []corev1.Container {
 	containers := []corev1.Container{
-		r.buildGatewayContainer(gateway, varnishdExtraArgs, hasTLS),
+		r.buildGatewayContainer(gateway, varnishdExtraArgs, hasTLS, extraVolumeMounts),
 	}
 
 	// Add logging sidecar if configured
@@ -267,7 +270,7 @@ func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishd
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
 // This container runs chaperone which manages varnishd internally.
-func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, hasTLS bool) corev1.Container {
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, hasTLS bool, extraVolumeMounts []corev1.VolumeMount) corev1.Container {
 	env := []corev1.EnvVar{
 		{
 			Name: "NAMESPACE",
@@ -343,6 +346,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 			ReadOnly:  true,
 		})
 	}
+	volumeMounts = append(volumeMounts, extraVolumeMounts...)
 
 	return corev1.Container{
 		Name:  "varnish-gateway",

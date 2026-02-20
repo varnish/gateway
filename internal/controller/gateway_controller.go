@@ -157,12 +157,18 @@ func (r *GatewayReconciler) reconcileDelete(ctx context.Context, gateway *gatewa
 
 // reconcileResources creates or updates all child resources for a Gateway.
 func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gatewayv1.Gateway) error {
-	// Fetch GatewayClassParameters for extra args and logging config
+	// Fetch GatewayClassParameters for extra args, logging config, and extra pod specs
 	var varnishdExtraArgs []string
 	var logging *gatewayparamsv1alpha1.VarnishLogging
+	var extraVolumes []corev1.Volume
+	var extraVolumeMounts []corev1.VolumeMount
+	var extraInitContainers []corev1.Container
 	if params := r.getGatewayClassParameters(ctx, gateway); params != nil {
 		varnishdExtraArgs = params.Spec.VarnishdExtraArgs
 		logging = params.Spec.Logging
+		extraVolumes = params.Spec.ExtraVolumes
+		extraVolumeMounts = params.Spec.ExtraVolumeMounts
+		extraInitContainers = params.Spec.ExtraInitContainers
 	}
 
 	// Generate VCL content (ghost preamble + user VCL)
@@ -177,11 +183,14 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 
 	// Compute infrastructure hash for pod restart detection
 	infraConfig := InfrastructureConfig{
-		GatewayImage:      r.Config.GatewayImage,
-		VarnishdExtraArgs: varnishdExtraArgs,
-		Logging:           logging,
-		ImagePullSecrets:  imagePullSecrets,
-		HasTLS:            hasTLS,
+		GatewayImage:        r.Config.GatewayImage,
+		VarnishdExtraArgs:   varnishdExtraArgs,
+		Logging:             logging,
+		ImagePullSecrets:    imagePullSecrets,
+		HasTLS:              hasTLS,
+		ExtraVolumes:        extraVolumes,
+		ExtraVolumeMounts:   extraVolumeMounts,
+		ExtraInitContainers: extraInitContainers,
 	}
 	infraHash := infraConfig.ComputeHash()
 
@@ -198,7 +207,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	resources = append(resources,
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
-		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash, hasTLS),
+		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash, hasTLS, extraVolumes, extraVolumeMounts, extraInitContainers),
 		r.buildService(gateway),
 	)
 

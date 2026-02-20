@@ -134,7 +134,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false)
+	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, nil, nil, nil)
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -171,6 +171,73 @@ func TestBuildDeployment(t *testing.T) {
 	expectedSA := "test-gateway-chaperone"
 	if deployment.Spec.Template.Spec.ServiceAccountName != expectedSA {
 		t.Errorf("expected service account %q, got %q", expectedSA, deployment.Spec.Template.Spec.ServiceAccountName)
+	}
+}
+
+func TestBuildDeployment_WithExtras(t *testing.T) {
+	r := &GatewayReconciler{
+		Config: Config{
+			GatewayClassName: "varnish",
+			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+		},
+	}
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	extraVolumes := []corev1.Volume{
+		{Name: "vmod-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	}
+	extraVolumeMounts := []corev1.VolumeMount{
+		{Name: "vmod-vol", MountPath: "/usr/lib/varnish/vmods"},
+	}
+	extraInitContainers := []corev1.Container{
+		{Name: "vmod-loader", Image: "busybox:latest", Command: []string{"cp", "/src/libvmod.so", "/dst/"}},
+	}
+
+	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, extraVolumes, extraVolumeMounts, extraInitContainers)
+
+	// Verify extra volumes
+	foundVol := false
+	for _, v := range deployment.Spec.Template.Spec.Volumes {
+		if v.Name == "vmod-vol" {
+			foundVol = true
+			break
+		}
+	}
+	if !foundVol {
+		t.Error("expected extra volume 'vmod-vol' in deployment volumes")
+	}
+
+	// Verify extra volume mounts on main container
+	container := deployment.Spec.Template.Spec.Containers[0]
+	foundMount := false
+	for _, vm := range container.VolumeMounts {
+		if vm.Name == "vmod-vol" && vm.MountPath == "/usr/lib/varnish/vmods" {
+			foundMount = true
+			break
+		}
+	}
+	if !foundMount {
+		t.Error("expected extra volume mount 'vmod-vol' on main container")
+	}
+
+	// Verify init containers
+	if len(deployment.Spec.Template.Spec.InitContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(deployment.Spec.Template.Spec.InitContainers))
+	}
+	if deployment.Spec.Template.Spec.InitContainers[0].Name != "vmod-loader" {
+		t.Errorf("expected init container name 'vmod-loader', got %q", deployment.Spec.Template.Spec.InitContainers[0].Name)
 	}
 }
 

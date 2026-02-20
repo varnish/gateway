@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -20,12 +21,63 @@ func (in *ConfigMapReference) DeepCopy() *ConfigMapReference {
 }
 
 // DeepCopyInto copies the receiver into out.
+func (in *VarnishLogging) DeepCopyInto(out *VarnishLogging) {
+	*out = *in
+	if in.ExtraArgs != nil {
+		in, out := &in.ExtraArgs, &out.ExtraArgs
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+}
+
+// DeepCopy creates a deep copy of VarnishLogging.
+func (in *VarnishLogging) DeepCopy() *VarnishLogging {
+	if in == nil {
+		return nil
+	}
+	out := new(VarnishLogging)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
 func (in *GatewayClassParametersSpec) DeepCopyInto(out *GatewayClassParametersSpec) {
 	*out = *in
 	if in.UserVCLConfigMapRef != nil {
 		in, out := &in.UserVCLConfigMapRef, &out.UserVCLConfigMapRef
 		*out = new(ConfigMapReference)
 		**out = **in
+	}
+	if in.VarnishdExtraArgs != nil {
+		in, out := &in.VarnishdExtraArgs, &out.VarnishdExtraArgs
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.Logging != nil {
+		in, out := &in.Logging, &out.Logging
+		*out = new(VarnishLogging)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.ExtraVolumes != nil {
+		in, out := &in.ExtraVolumes, &out.ExtraVolumes
+		*out = make([]corev1.Volume, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.ExtraVolumeMounts != nil {
+		in, out := &in.ExtraVolumeMounts, &out.ExtraVolumeMounts
+		*out = make([]corev1.VolumeMount, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.ExtraInitContainers != nil {
+		in, out := &in.ExtraInitContainers, &out.ExtraInitContainers
+		*out = make([]corev1.Container, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
 	}
 }
 

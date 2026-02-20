@@ -3,6 +3,8 @@ package controller
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
 
@@ -131,6 +133,36 @@ func TestInfrastructureConfig_HashChangesOnChange(t *testing.T) {
 				VarnishdExtraArgs: []string{"-p", "thread_pool_stack=160k"},
 				Logging:           nil,
 				ImagePullSecrets:  []string{"different-secret"},
+			},
+		},
+		{
+			name: "extra volumes added",
+			config: InfrastructureConfig{
+				GatewayImage:      "ghcr.io/varnish/gateway:v1.0.0",
+				VarnishdExtraArgs: []string{"-p", "thread_pool_stack=160k"},
+				ExtraVolumes: []corev1.Volume{
+					{Name: "vmod-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				},
+			},
+		},
+		{
+			name: "extra volume mounts added",
+			config: InfrastructureConfig{
+				GatewayImage:      "ghcr.io/varnish/gateway:v1.0.0",
+				VarnishdExtraArgs: []string{"-p", "thread_pool_stack=160k"},
+				ExtraVolumeMounts: []corev1.VolumeMount{
+					{Name: "vmod-vol", MountPath: "/usr/lib/varnish/vmods"},
+				},
+			},
+		},
+		{
+			name: "extra init containers added",
+			config: InfrastructureConfig{
+				GatewayImage:      "ghcr.io/varnish/gateway:v1.0.0",
+				VarnishdExtraArgs: []string{"-p", "thread_pool_stack=160k"},
+				ExtraInitContainers: []corev1.Container{
+					{Name: "vmod-loader", Image: "busybox:latest"},
+				},
 			},
 		},
 	}

@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -39,6 +40,18 @@ type GatewayClassParametersSpec struct {
 	// streaming logs to stdout where they're captured by Kubernetes.
 	// +optional
 	Logging *VarnishLogging `json:"logging,omitempty"`
+
+	// ExtraVolumes specifies additional volumes to add to the varnish pod.
+	// +optional
+	ExtraVolumes []corev1.Volume `json:"extraVolumes,omitempty"`
+
+	// ExtraVolumeMounts specifies additional volume mounts for the main varnish-gateway container.
+	// +optional
+	ExtraVolumeMounts []corev1.VolumeMount `json:"extraVolumeMounts,omitempty"`
+
+	// ExtraInitContainers specifies additional init containers to run before the main container.
+	// +optional
+	ExtraInitContainers []corev1.Container `json:"extraInitContainers,omitempty"`
 }
 
 // VarnishLogging configures varnish logging via a sidecar container.
