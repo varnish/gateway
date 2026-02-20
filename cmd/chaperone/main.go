@@ -21,6 +21,7 @@ import (
 	"github.com/varnish/gateway/internal/varnishadm"
 	"github.com/varnish/gateway/internal/vcl"
 	"github.com/varnish/gateway/internal/vrun"
+	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -278,10 +279,6 @@ func run() error {
 		tlsReloader = vtls.New(vadm, cfg.TLSCertDir, logger.With("component", "tls"))
 	}
 
-	// Start all components concurrently
-	var wg sync.WaitGroup
-	errCh := make(chan error, 6) // buffer for all components
-
 	// Build varnishd arguments
 	listenAddrs := cfg.VarnishListen
 	if len(cfg.TLSListen) > 0 {
@@ -308,77 +305,6 @@ func run() error {
 		return fmt.Errorf("varnishMgr.Start: %w", err)
 	}
 
-	// Wait for Varnish process to exit
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := varnishMgr.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("varnishMgr.Wait: %w", err)
-		}
-	}()
-
-	// Start varnishadm server
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := vadm.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("varnishadm.Run: %w", err)
-		}
-	}()
-
-	// Start ghost watcher (with readyCh so it waits for Varnish before initial reload)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := ghostWatcher.Run(ctx, readyCh); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("ghostWatcher.Run: %w", err)
-		}
-	}()
-
-	// Start VCL reloader
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := vclReloader.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("vclReloader.Run: %w", err)
-		}
-	}()
-
-	// Listen for fatal VCL reload errors
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		select {
-		case err := <-vclReloader.FatalError():
-			slog.Error("fatal VCL reload error - exiting", "error", err)
-			errCh <- err
-		case <-ctx.Done():
-		}
-	}()
-
-	// Start TLS reloader (if TLS enabled)
-	if tlsReloader != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := tlsReloader.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				errCh <- fmt.Errorf("tlsReloader.Run: %w", err)
-			}
-		}()
-
-		// Listen for fatal TLS reload errors
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			select {
-			case err := <-tlsReloader.FatalError():
-				slog.Error("fatal TLS reload error - exiting", "error", err)
-				errCh <- err
-			case <-ctx.Done():
-			}
-		}()
-	}
-
 	// Start health server with drain endpoint for graceful shutdown
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -390,60 +316,123 @@ func run() error {
 		Handler: mux,
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	// Start all components concurrently using errgroup.
+	// If any goroutine returns a non-nil error, gctx is cancelled,
+	// signalling all other goroutines to shut down.
+	g, gctx := errgroup.WithContext(ctx)
+
+	// Wait for Varnish process to exit
+	g.Go(func() error {
+		if err := varnishMgr.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("varnishMgr.Wait: %w", err)
+		}
+		return nil
+	})
+
+	// Start varnishadm server
+	g.Go(func() error {
+		if err := vadm.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("varnishadm.Run: %w", err)
+		}
+		return nil
+	})
+
+	// Start ghost watcher (with readyCh so it waits for Varnish before initial reload)
+	g.Go(func() error {
+		if err := ghostWatcher.Run(gctx, readyCh); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("ghostWatcher.Run: %w", err)
+		}
+		return nil
+	})
+
+	// Start VCL reloader
+	g.Go(func() error {
+		if err := vclReloader.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("vclReloader.Run: %w", err)
+		}
+		return nil
+	})
+
+	// Listen for fatal VCL reload errors
+	g.Go(func() error {
+		select {
+		case err := <-vclReloader.FatalError():
+			slog.Error("fatal VCL reload error - exiting", "error", err)
+			return err
+		case <-gctx.Done():
+			return nil
+		}
+	})
+
+	// Start TLS reloader (if TLS enabled)
+	if tlsReloader != nil {
+		g.Go(func() error {
+			if err := tlsReloader.Run(gctx); err != nil && !errors.Is(err, context.Canceled) {
+				return fmt.Errorf("tlsReloader.Run: %w", err)
+			}
+			return nil
+		})
+
+		// Listen for fatal TLS reload errors
+		g.Go(func() error {
+			select {
+			case err := <-tlsReloader.FatalError():
+				slog.Error("fatal TLS reload error - exiting", "error", err)
+				return err
+			case <-gctx.Done():
+				return nil
+			}
+		})
+	}
+
+	// Health server
+	g.Go(func() error {
 		slog.Debug("health server starting", "addr", cfg.HealthAddr)
 		if err := healthServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- fmt.Errorf("healthServer.ListenAndServe: %w", err)
+			return fmt.Errorf("healthServer.ListenAndServe: %w", err)
 		}
-	}()
+		return nil
+	})
 
 	// Shutdown health server when context is cancelled
-	go func() {
-		<-ctx.Done()
+	g.Go(func() error {
+		<-gctx.Done()
 		if err := healthServer.Close(); err != nil {
 			slog.Error("health server close failed", "error", err)
 		}
-	}()
+		return nil
+	})
 
 	// Startup sequence: wait for varnishadm connection, load VCL, start child
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-
+	g.Go(func() error {
 		// Step 1: Wait for varnishadm connection
 		slog.Debug("waiting for varnishadm connection")
 		select {
 		case <-vadm.Connected():
 			slog.Debug("varnishadm connected")
-		case <-ctx.Done():
-			return
+		case <-gctx.Done():
+			return nil
 		}
 
 		// Step 2: Load initial VCL
 		slog.Debug("loading initial VCL", "path", cfg.VCLPath)
 		if err := vclReloader.Reload(); err != nil {
-			slog.Error("initial VCL load failed", "error", err)
-			errCh <- fmt.Errorf("initial VCL load: %w", err)
-			return
+			return fmt.Errorf("initial VCL load: %w", err)
 		}
 		slog.Info("initial VCL loaded")
 
 		// Step 3: Start the child process
 		slog.Debug("starting Varnish child process")
 		if _, err := vadm.Start(); err != nil {
-			slog.Error("failed to start Varnish child", "error", err)
-			errCh <- fmt.Errorf("vadm.Start: %w", err)
-			return
+			return fmt.Errorf("vadm.Start: %w", err)
 		}
 
 		// Step 4: Wait for child to signal readiness
 		select {
 		case <-readyCh:
 			// Varnish child is running
-		case <-ctx.Done():
-			return
+		case <-gctx.Done():
+			return nil
 		}
 
 		// Step 4.5: Load TLS certificates (if TLS enabled)
@@ -451,9 +440,7 @@ func run() error {
 		if tlsReloader != nil {
 			slog.Debug("loading TLS certificates", "dir", cfg.TLSCertDir)
 			if err := tlsReloader.LoadAll(); err != nil {
-				slog.Error("initial TLS cert load failed", "error", err)
-				errCh <- fmt.Errorf("initial TLS cert load: %w", err)
-				return
+				return fmt.Errorf("initial TLS cert load: %w", err)
 			}
 			slog.Info("TLS certificates loaded")
 		}
@@ -462,22 +449,17 @@ func run() error {
 		select {
 		case <-ghostWatcher.Ready():
 			state.setReady()
-		case <-ctx.Done():
-			return
+		case <-gctx.Done():
 		}
-	}()
-
-	// Wait for first error or context cancellation
-	select {
-	case err := <-errCh:
-		cancel() // Signal other components to stop
-		wg.Wait()
-		return err
-	case <-ctx.Done():
-		slog.Info("shutting down")
-		wg.Wait()
 		return nil
+	})
+
+	slog.Info("all components started, waiting for shutdown")
+	if err := g.Wait(); err != nil {
+		return err
 	}
+	slog.Info("shutting down")
+	return nil
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
