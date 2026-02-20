@@ -91,14 +91,19 @@ func parseVCLLine(line string) (VCLEntry, error) {
 	return entry, nil
 }
 
+var (
+	reParenContent = regexp.MustCompile(`\(([^)]+)\)`)
+	reLabelCount   = regexp.MustCompile(`(\d+)\s+label`)
+	reReturnCount  = regexp.MustCompile(`(\d+)\s+return`)
+)
+
 // parseParenthesesContent extracts numbers from parentheses
 // Examples: "(1 label)" -> labels=1, returns=0
 //
 //	"(1 return(vcl))" -> labels=0, returns=1
 func parseParenthesesContent(content string) (labels, returns int) {
 	// Extract content between parentheses
-	re := regexp.MustCompile(`\(([^)]+)\)`)
-	matches := re.FindStringSubmatch(content)
+	matches := reParenContent.FindStringSubmatch(content)
 	if len(matches) < 2 {
 		return 0, 0
 	}
@@ -107,8 +112,7 @@ func parseParenthesesContent(content string) (labels, returns int) {
 
 	// Look for "N label" or "N return"
 	if strings.Contains(inner, "label") {
-		re = regexp.MustCompile(`(\d+)\s+label`)
-		if numMatches := re.FindStringSubmatch(inner); len(numMatches) >= 2 {
+		if numMatches := reLabelCount.FindStringSubmatch(inner); len(numMatches) >= 2 {
 			if num, err := strconv.Atoi(numMatches[1]); err == nil {
 				labels = num
 			}
@@ -116,8 +120,7 @@ func parseParenthesesContent(content string) (labels, returns int) {
 	}
 
 	if strings.Contains(inner, "return") {
-		re = regexp.MustCompile(`(\d+)\s+return`)
-		if numMatches := re.FindStringSubmatch(inner); len(numMatches) >= 2 {
+		if numMatches := reReturnCount.FindStringSubmatch(inner); len(numMatches) >= 2 {
 			if num, err := strconv.Atoi(numMatches[1]); err == nil {
 				returns = num
 			}

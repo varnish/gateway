@@ -326,11 +326,8 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 		return
 	}
 
-	// Regenerate ghost.json
-	if err := w.regenerateConfig(ctx); err != nil {
-		w.logger.Error("failed to regenerate ghost config", "error", err)
-		w.notifyFatal(err)
-	}
+	// Regenerate ghost.json with retry
+	w.regenerateConfigWithRetry(ctx)
 }
 
 // handleEndpointSliceDelete processes an EndpointSlice delete event.
@@ -383,11 +380,41 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 		return
 	}
 
-	// Regenerate ghost.json
-	if err := w.regenerateConfig(ctx); err != nil {
-		w.logger.Error("failed to regenerate ghost config", "error", err)
-		w.notifyFatal(err)
+	// Regenerate ghost.json with retry
+	w.regenerateConfigWithRetry(ctx)
+}
+
+// regenerateConfigWithRetry retries regenerateConfig up to 3 times with exponential
+// backoff (500ms, 1s, 2s) before sending a fatal error. This prevents transient reload
+// failures (e.g., ghost temporarily unavailable) from crashing the watcher.
+func (w *Watcher) regenerateConfigWithRetry(ctx context.Context) {
+	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		if err := w.regenerateConfig(ctx); err != nil {
+			lastErr = err
+			if attempt < len(backoffs) {
+				w.logger.Warn("ghost reload failed, retrying",
+					"error", err,
+					"attempt", attempt+1,
+					"backoff", backoffs[attempt],
+				)
+				select {
+				case <-time.After(backoffs[attempt]):
+				case <-ctx.Done():
+					w.notifyFatal(err)
+					return
+				}
+				continue
+			}
+			w.logger.Error("ghost reload failed after all retries", "error", err)
+			w.notifyFatal(err)
+			return
+		}
+		return // success
 	}
+	// Should not reach here, but just in case
+	w.notifyFatal(lastErr)
 }
 
 // regenerateConfig generates and writes ghost.json, then triggers a reload.
@@ -569,11 +596,8 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 		return
 	}
 
-	// Regenerate ghost.json and trigger reload
-	if err := w.regenerateConfig(ctx); err != nil {
-		w.logger.Error("failed to regenerate ghost config", "error", err)
-		w.notifyFatal(err)
-	}
+	// Regenerate ghost.json and trigger reload with retry
+	w.regenerateConfigWithRetry(ctx)
 }
 
 // backfillEndpoints queries the EndpointSlice lister for services that are newly watched

@@ -70,9 +70,15 @@ func (r *Reloader) LoadAll() error {
 
 		resp, err := r.varnishadm.TLSCertLoad(name, path, "")
 		if err != nil {
+			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+				r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
+			}
 			return fmt.Errorf("varnishadm.TLSCertLoad(%s, %s): %w", name, path, err)
 		}
 		if err := resp.CheckOK("tls.cert.load %s failed", name); err != nil {
+			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+				r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
+			}
 			return err
 		}
 		loaded++
@@ -86,9 +92,15 @@ func (r *Reloader) LoadAll() error {
 	// Commit all loaded certificates
 	resp, err := r.varnishadm.TLSCertCommit()
 	if err != nil {
+		if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+			r.logger.Error("TLS cert rollback failed after commit error", "error", rbErr)
+		}
 		return fmt.Errorf("varnishadm.TLSCertCommit: %w", err)
 	}
 	if err := resp.CheckOK("tls.cert.commit failed"); err != nil {
+		if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+			r.logger.Error("TLS cert rollback failed after commit error", "error", rbErr)
+		}
 		return err
 	}
 
@@ -202,7 +214,7 @@ func (r *Reloader) Run(ctx context.Context) error {
 			}
 
 			// React to write, create, and remove events on .pem files
-			if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) && !event.Has(fsnotify.Remove) {
+			if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) && !event.Has(fsnotify.Remove) && !event.Has(fsnotify.Rename) {
 				continue
 			}
 

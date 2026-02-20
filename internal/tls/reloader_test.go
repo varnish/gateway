@@ -124,6 +124,18 @@ func TestLoadAll_ErrorOnLoad(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadAll() expected error, got nil")
 	}
+
+	// Verify rollback was called after the load error
+	history := mock.GetCallHistory()
+	var foundRollback bool
+	for _, cmd := range history {
+		if cmd == "tls.cert.rollback" {
+			foundRollback = true
+		}
+	}
+	if !foundRollback {
+		t.Errorf("LoadAll() did not call tls.cert.rollback after load error; history: %v", history)
+	}
 }
 
 func TestLoadAll_DirectoryNotExist(t *testing.T) {

@@ -2,6 +2,7 @@ package status
 
 import (
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -157,7 +158,11 @@ func TestSetCondition_UpdatesTransitionTime(t *testing.T) {
 
 	// Set initial condition as true
 	SetGatewayAccepted(gateway, true, "Accepted", "Initial")
-	firstTime := gateway.Status.Conditions[0].LastTransitionTime
+
+	// Backdate the initial condition's LastTransitionTime to 1 hour ago
+	// so we can reliably detect that a status change updates it.
+	oldTime := metav1.NewTime(time.Now().Add(-1 * time.Hour))
+	gateway.Status.Conditions[0].LastTransitionTime = oldTime
 
 	// Update with different status - LastTransitionTime should change
 	SetGatewayAccepted(gateway, false, "Invalid", "Now invalid")
@@ -170,9 +175,10 @@ func TestSetCondition_UpdatesTransitionTime(t *testing.T) {
 	if cond.Status != metav1.ConditionFalse {
 		t.Errorf("expected status False, got %s", cond.Status)
 	}
-	// Note: In this test, since it runs so fast, the times might be equal
-	// In a real scenario with actual time delays, this would be different
-	_ = firstTime // Suppress unused variable warning
+	if !cond.LastTransitionTime.After(oldTime.Time) {
+		t.Errorf("expected LastTransitionTime to be updated after status change, got %v (old: %v)",
+			cond.LastTransitionTime.Time, oldTime.Time)
+	}
 }
 
 func TestMultipleConditions(t *testing.T) {

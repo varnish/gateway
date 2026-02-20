@@ -3,6 +3,7 @@ package reload
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -47,7 +48,10 @@ func (c *Client) TriggerReload(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("http.Do(%s): %w", url, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		errMsg := resp.Header.Get("x-ghost-error")

@@ -75,9 +75,10 @@ type varnishRequest struct {
 
 // Timeout constants for different operations
 const (
-	defaultCmdTimeout = 30 * time.Second // Overall command timeout
-	readWriteTimeout  = 10 * time.Second // Individual socket I/O operations
-	authTimeout       = 5 * time.Second  // Authentication operations
+	defaultCmdTimeout  = 30 * time.Second      // Overall command timeout
+	readWriteTimeout   = 10 * time.Second      // Individual socket I/O operations
+	authTimeout        = 5 * time.Second       // Authentication operations
+	maxResponseBodyLen = 10 * 1024 * 1024      // 10 MiB sanity limit for response body
 )
 
 func New(port uint16, secret string, logger *slog.Logger) *Server {
@@ -249,17 +250,20 @@ func (v *Server) GetVersion() string {
 	return v.version
 }
 
+var (
+	reBannerEnv     = regexp.MustCompile(`(?m)^([A-Za-z0-9_]+(?:,[^,\r\n]+)+)\s*$`)
+	reBannerVersion = regexp.MustCompile(`(varnish-[^\r\n]+)`)
+)
+
 // parseBanner extracts environment and version information from Varnish CLI banner
 func parseBanner(banner string) (environment, version string) {
 	// Extract environment line (e.g., "Linux,6.8.0-79-generic,x86_64,-jlinux,-smse4,-hcritbit")
-	envRegex := regexp.MustCompile(`(?m)^([A-Za-z0-9_]+(?:,[^,\r\n]+)+)\s*$`)
-	if envMatch := envRegex.FindStringSubmatch(banner); len(envMatch) > 1 {
+	if envMatch := reBannerEnv.FindStringSubmatch(banner); len(envMatch) > 1 {
 		environment = envMatch[1]
 	}
 
 	// Extract version line (e.g., "varnish-plus-6.0.15r1 revision d0b65fce8c712013f9bd614bacca1e67a45799e8")
-	versionRegex := regexp.MustCompile(`(varnish-[^\r\n]+)`)
-	if versionMatch := versionRegex.FindStringSubmatch(banner); len(versionMatch) > 1 {
+	if versionMatch := reBannerVersion.FindStringSubmatch(banner); len(versionMatch) > 1 {
 		version = versionMatch[1]
 	}
 
@@ -371,6 +375,9 @@ func (v *Server) readFromConnection(conn *net.TCPConn, timeout time.Duration) (s
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
 		return "", 0, fmt.Errorf("conn.SetDeadline(body): %w", err)
+	}
+	if bodyLen > maxResponseBodyLen {
+		return "", 0, fmt.Errorf("response body length %d exceeds maximum %d", bodyLen, maxResponseBodyLen)
 	}
 	// Read the body + trailing newline
 	bodyWithNewline := make([]byte, bodyLen+1)

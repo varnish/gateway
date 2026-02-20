@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
+	"time"
 )
 
 // Manager manages the varnishd process lifecycle
@@ -17,6 +19,8 @@ type Manager struct {
 	secret     string
 	logger     *slog.Logger
 	cmd        *exec.Cmd
+	stdoutLog  *logWriter
+	stderrLog  *logWriter
 }
 
 // New creates a new Varnish manager
@@ -91,6 +95,10 @@ func (m *Manager) Start(ctx context.Context, varnishCmd string, args []string) (
 
 	// Create the command, ctx lets us cancel and kill varnishd
 	m.cmd = exec.CommandContext(ctx, varnishCmd, args...)
+	m.cmd.Cancel = func() error {
+		return m.cmd.Process.Signal(syscall.SIGTERM)
+	}
+	m.cmd.WaitDelay = 10 * time.Second
 	if m.varnishDir != "" {
 		m.cmd.Dir = m.varnishDir
 	}
@@ -102,8 +110,10 @@ func (m *Manager) Start(ctx context.Context, varnishCmd string, args []string) (
 	ready := make(chan struct{})
 
 	// Route varnishd output through our structured logging
-	m.cmd.Stdout = newLogWriter(m.logger, "varnishd", ready)
-	m.cmd.Stderr = newLogWriter(m.logger, "varnishd", ready)
+	m.stdoutLog = newLogWriter(m.logger, "varnishd", ready)
+	m.stderrLog = newLogWriter(m.logger, "varnishd", ready)
+	m.cmd.Stdout = m.stdoutLog
+	m.cmd.Stderr = m.stderrLog
 
 	m.logger.Debug("Starting Varnish")
 
@@ -123,6 +133,13 @@ func (m *Manager) Wait() error {
 	}
 
 	err := m.cmd.Wait()
+	// Close logwriters so scanner goroutines exit cleanly
+	if m.stdoutLog != nil {
+		m.stdoutLog.Close()
+	}
+	if m.stderrLog != nil {
+		m.stderrLog.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("varnish process failed: %w", err)
 	}
