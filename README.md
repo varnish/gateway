@@ -138,4 +138,34 @@ kubectl apply -f deploy/
 
 See [INSTALL.md](INSTALL.md) for detailed installation instructions and configuration options.
 
+## Loading Custom VMODs
+
+To load custom Varnish VMODs (or any other files) into the gateway pods, use `extraVolumes`, `extraVolumeMounts`, and `extraInitContainers` in `GatewayClassParameters`. This follows the standard Kubernetes pattern of using an init container to populate a shared volume before the main container starts.
+
+```yaml
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: varnish-params
+spec:
+  varnishdExtraArgs:
+    - "-p"
+    - "vmod_path=/usr/lib/varnish/vmods:/extra-vmods"
+  extraVolumes:
+    - name: extra-vmods
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: extra-vmods
+      mountPath: /extra-vmods
+  extraInitContainers:
+    - name: install-vmods
+      image: my-registry/my-vmods:latest
+      command: ["cp", "/vmods/libvmod_custom.so", "/dst/"]
+      volumeMounts:
+        - name: extra-vmods
+          mountPath: /dst
+```
+
+The init container copies the `.so` files into a shared `emptyDir` volume, the main container mounts that volume, and `varnishdExtraArgs` extends the VMOD search path so Varnish finds them. The same mechanism works for any file you need inside the pod (config files, TLS certs from external sources, etc.).
+
 See [CLAUDE.md](CLAUDE.md) for development setup and detailed documentation.
