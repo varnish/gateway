@@ -55,6 +55,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.txt
 
   test-rust:
     runs-on: ubuntu-latest
