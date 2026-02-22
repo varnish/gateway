@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -218,6 +219,374 @@ func TestConstants(t *testing.T) {
 				t.Errorf("%s = %v, want %v", tt.name, tt.constant, tt.expected)
 			}
 		})
+	}
+}
+
+func TestMockConnected(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	ch := mock.Connected()
+	if ch == nil {
+		t.Fatal("Connected() returned nil")
+	}
+
+	// Mock's connected channel should be immediately closed
+	select {
+	case <-ch:
+		// expected
+	default:
+		t.Error("Mock Connected channel should be closed immediately")
+	}
+}
+
+func TestMock_VCLInline(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+	mock.ClearCallHistory()
+
+	resp, err := mock.VCLInline("test-vcl", "vcl 4.0; backend default { .host = \"localhost\"; }")
+	if err != nil {
+		t.Fatalf("VCLInline() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	history := mock.GetCallHistory()
+	if len(history) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(history))
+	}
+	if !strings.Contains(history[0], "vcl.inline test-vcl") {
+		t.Errorf("expected vcl.inline command, got %q", history[0])
+	}
+}
+
+func TestMock_VCLLabel(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+	mock.ClearCallHistory()
+
+	resp, err := mock.VCLLabel("label-api", "vcl-api-v2")
+	if err != nil {
+		t.Fatalf("VCLLabel() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	history := mock.GetCallHistory()
+	expectedCmd := "vcl.label label-api vcl-api-v2"
+	if len(history) != 1 || history[0] != expectedCmd {
+		t.Errorf("expected command %q, got %v", expectedCmd, history)
+	}
+}
+
+func TestMock_TLSCertLoadWithPrivateKey(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+	mock.ClearCallHistory()
+
+	resp, err := mock.TLSCertLoad("example", "/path/to/cert.pem", "/path/to/key.pem")
+	if err != nil {
+		t.Fatalf("TLSCertLoad() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	history := mock.GetCallHistory()
+	expectedCmd := "tls.cert.load example /path/to/cert.pem -k /path/to/key.pem"
+	if len(history) != 1 || history[0] != expectedCmd {
+		t.Errorf("expected command %q, got %v", expectedCmd, history)
+	}
+}
+
+func TestMock_TLSCertDiscard(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Set initial state with a cert
+	mock.SetTLSState([]TLSCertEntry{
+		{
+			CertificateID: "cert-001",
+			Frontend:      "main",
+			State:         "active",
+			Hostname:      "example.com",
+			Expiration:    time.Now().Add(90 * 24 * time.Hour),
+		},
+	})
+
+	// Discard existing cert (starts a transaction)
+	resp, err := mock.TLSCertDiscard("cert-001")
+	if err != nil {
+		t.Fatalf("TLSCertDiscard() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	// Commit the discard
+	resp, err = mock.TLSCertCommit()
+	if err != nil {
+		t.Fatalf("TLSCertCommit() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("commit statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	// Verify cert is gone
+	state := mock.GetTLSState()
+	if len(state) != 0 {
+		t.Errorf("expected 0 certs after discard+commit, got %d", len(state))
+	}
+}
+
+func TestMock_TLSCertDiscardNonExistent(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Discard non-existent cert
+	resp, err := mock.TLSCertDiscard("does-not-exist")
+	if err != nil {
+		t.Fatalf("TLSCertDiscard() error = %v", err)
+	}
+	if resp.statusCode != 300 {
+		t.Errorf("statusCode = %v, want 300 (not found)", resp.statusCode)
+	}
+}
+
+func TestMock_TLSTransactionLoadCommit(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Load a cert
+	resp, err := mock.TLSCertLoad("cert-new", "/path/to/cert.pem", "")
+	if err != nil {
+		t.Fatalf("TLSCertLoad() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("load statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	// Before commit, GetTLSState should show no certs (not committed yet)
+	state := mock.GetTLSState()
+	if len(state) != 0 {
+		t.Errorf("expected 0 committed certs before commit, got %d", len(state))
+	}
+
+	// Commit
+	resp, err = mock.TLSCertCommit()
+	if err != nil {
+		t.Fatalf("TLSCertCommit() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("commit statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	// After commit, GetTLSState should show the cert
+	state = mock.GetTLSState()
+	if len(state) != 1 {
+		t.Fatalf("expected 1 committed cert after commit, got %d", len(state))
+	}
+	if state[0].CertificateID != "cert-new" {
+		t.Errorf("CertificateID = %q, want cert-new", state[0].CertificateID)
+	}
+}
+
+func TestMock_TLSTransactionLoadRollback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Load a cert
+	_, err := mock.TLSCertLoad("cert-temp", "/path/to/cert.pem", "")
+	if err != nil {
+		t.Fatalf("TLSCertLoad() error = %v", err)
+	}
+
+	// Rollback
+	resp, err := mock.TLSCertRollback()
+	if err != nil {
+		t.Fatalf("TLSCertRollback() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("rollback statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+
+	// After rollback, no certs should be committed
+	state := mock.GetTLSState()
+	if len(state) != 0 {
+		t.Errorf("expected 0 committed certs after rollback, got %d", len(state))
+	}
+}
+
+func TestMock_TLSTransactionDuplicateLoad(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Load a cert
+	_, err := mock.TLSCertLoad("cert-dup", "/path/to/cert.pem", "")
+	if err != nil {
+		t.Fatalf("first TLSCertLoad() error = %v", err)
+	}
+
+	// Load same cert again — should fail
+	resp, err := mock.TLSCertLoad("cert-dup", "/path/to/cert2.pem", "")
+	if err != nil {
+		t.Fatalf("second TLSCertLoad() error = %v", err)
+	}
+	if resp.statusCode != 300 {
+		t.Errorf("duplicate load statusCode = %v, want 300", resp.statusCode)
+	}
+	if !strings.Contains(resp.payload, "already exists") {
+		t.Errorf("expected 'already exists' in payload, got %q", resp.payload)
+	}
+}
+
+func TestMock_TLSCommitNoTransaction(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	resp, err := mock.TLSCertCommit()
+	if err != nil {
+		t.Fatalf("TLSCertCommit() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+	if !strings.Contains(resp.payload, "No changes") {
+		t.Errorf("expected 'No changes' in payload, got %q", resp.payload)
+	}
+}
+
+func TestMock_TLSRollbackNoTransaction(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	resp, err := mock.TLSCertRollback()
+	if err != nil {
+		t.Fatalf("TLSCertRollback() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+	if !strings.Contains(resp.payload, "No changes") {
+		t.Errorf("expected 'No changes' in payload, got %q", resp.payload)
+	}
+}
+
+func TestMock_GetTLSState(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Initially empty
+	state := mock.GetTLSState()
+	if len(state) != 0 {
+		t.Errorf("initial state should be empty, got %d entries", len(state))
+	}
+
+	// Set state with multiple certs
+	certs := []TLSCertEntry{
+		{CertificateID: "cert-a", Frontend: "main", State: "active", Hostname: "a.example.com"},
+		{CertificateID: "cert-b", Frontend: "api", State: "active", Hostname: "b.example.com"},
+	}
+	mock.SetTLSState(certs)
+
+	state = mock.GetTLSState()
+	if len(state) != 2 {
+		t.Fatalf("expected 2 certs, got %d", len(state))
+	}
+
+	// Verify certs are present (order may vary due to map iteration)
+	certIDs := make(map[string]bool)
+	for _, cert := range state {
+		certIDs[cert.CertificateID] = true
+	}
+	if !certIDs["cert-a"] || !certIDs["cert-b"] {
+		t.Errorf("expected cert-a and cert-b, got %v", certIDs)
+	}
+}
+
+func TestMock_TLSCertLoadBadUsage(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Send a malformed tls.cert.load command (too few args)
+	resp, err := mock.Exec("tls.cert.load")
+	if err != nil {
+		t.Fatalf("Exec() error = %v", err)
+	}
+	if resp.statusCode != ClisUnknown {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisUnknown)
+	}
+}
+
+func TestMock_TLSCertDiscardBadUsage(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Send a malformed tls.cert.discard command (too few args)
+	resp, err := mock.Exec("tls.cert.discard")
+	if err != nil {
+		t.Fatalf("Exec() error = %v", err)
+	}
+	if resp.statusCode != ClisUnknown {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisUnknown)
+	}
+}
+
+func TestMock_TLSCertListFromState(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Set some TLS state and verify the list output
+	mock.SetTLSState([]TLSCertEntry{
+		{
+			CertificateID: "cert-test",
+			Frontend:      "main",
+			State:         "active",
+			Hostname:      "test.example.com",
+			Expiration:    time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC),
+			OCSPStapling:  true,
+		},
+	})
+
+	resp, err := mock.TLSCertList()
+	if err != nil {
+		t.Fatalf("TLSCertList() error = %v", err)
+	}
+	if resp.statusCode != ClisOk {
+		t.Errorf("statusCode = %v, want %v", resp.statusCode, ClisOk)
+	}
+	if !strings.Contains(resp.payload, "cert-test") {
+		t.Errorf("expected cert-test in payload, got %q", resp.payload)
+	}
+	if !strings.Contains(resp.payload, "test.example.com") {
+		t.Errorf("expected hostname in payload, got %q", resp.payload)
+	}
+}
+
+func TestMock_TLSCertListEmptyFrontend(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	mock := NewMock(2000, "secret", logger)
+
+	// Set state with empty Frontend — should default to "default"
+	mock.SetTLSState([]TLSCertEntry{
+		{
+			CertificateID: "cert-x",
+			Frontend:      "",
+			State:         "active",
+			Hostname:      "x.example.com",
+			Expiration:    time.Now().Add(24 * time.Hour),
+		},
+	})
+
+	resp, err := mock.TLSCertList()
+	if err != nil {
+		t.Fatalf("TLSCertList() error = %v", err)
+	}
+	if !strings.Contains(resp.payload, "default") {
+		t.Errorf("expected 'default' frontend in payload, got %q", resp.payload)
 	}
 }
 

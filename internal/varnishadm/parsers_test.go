@@ -332,6 +332,18 @@ func TestParseParenthesesContent(t *testing.T) {
 			expectedLabels:  0,
 			expectedReturns: 0,
 		},
+		{
+			name:            "No parentheses at all",
+			content:         "no parens here",
+			expectedLabels:  0,
+			expectedReturns: 0,
+		},
+		{
+			name:            "Empty string",
+			content:         "",
+			expectedLabels:  0,
+			expectedReturns: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -345,5 +357,108 @@ func TestParseParenthesesContent(t *testing.T) {
 				t.Errorf("parseParenthesesContent() returns = %d, want %d", returns, tt.expectedReturns)
 			}
 		})
+	}
+}
+
+func TestParseVCLLine_TooFewParts(t *testing.T) {
+	_, err := parseVCLLine("active auto/warm")
+	if err == nil {
+		t.Error("expected error for line with insufficient parts")
+	}
+}
+
+func TestParseVCLList_MalformedLine(t *testing.T) {
+	// A well-formed line followed by a malformed one
+	payload := "active      auto/warm          - boot\ntoo short"
+	_, err := parseVCLList(payload)
+	if err == nil {
+		t.Error("expected error for malformed line in vcl.list output")
+	}
+}
+
+func TestParseTLSCertLine_TooFewParts(t *testing.T) {
+	_, err := parseTLSCertLine("main active example.com")
+	if err == nil {
+		t.Error("expected error for TLS cert line with insufficient parts")
+	}
+}
+
+func TestParseTLSCertLine_OCSPEnabled(t *testing.T) {
+	// "enabled" should be treated as OCSP=true
+	line := "main     active  example.com      cert-001        Dec 31 23:59:59 2024 GMT  enabled"
+	entry, err := parseTLSCertLine(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !entry.OCSPStapling {
+		t.Error("expected OCSPStapling=true for 'enabled'")
+	}
+}
+
+func TestParseTLSCertLine_OCSPDisabledVariant(t *testing.T) {
+	// "disabled" should be treated as OCSP=false
+	line := "main     active  example.com      cert-001        Dec 31 23:59:59 2024 GMT  disabled"
+	entry, err := parseTLSCertLine(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.OCSPStapling {
+		t.Error("expected OCSPStapling=false for 'disabled'")
+	}
+}
+
+func TestParseTLSCertLine_InvalidDate(t *testing.T) {
+	// Invalid date format — should still parse without error (date field is zero)
+	line := "main     active  example.com      cert-001        not a real date and GMT  false"
+	entry, err := parseTLSCertLine(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.CertificateID != "cert-001" {
+		t.Errorf("CertificateID = %q, want cert-001", entry.CertificateID)
+	}
+	if !entry.Expiration.IsZero() {
+		t.Errorf("Expiration should be zero for invalid date, got %v", entry.Expiration)
+	}
+}
+
+func TestParseTLSCertList_MalformedLine(t *testing.T) {
+	payload := "Frontend State   Hostname         Certificate ID  Expiration date           OCSP stapling\ntoo short"
+	_, err := parseTLSCertList(payload)
+	if err == nil {
+		t.Error("expected error for malformed TLS cert line")
+	}
+}
+
+func TestParseTLSCertList_OnlyHeader(t *testing.T) {
+	payload := "Frontend State   Hostname         Certificate ID  Expiration date           OCSP stapling"
+	result, err := parseTLSCertList(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 0 {
+		t.Errorf("expected 0 entries, got %d", len(result.Entries))
+	}
+}
+
+func TestParseVCLList_BlankLines(t *testing.T) {
+	payload := "\n\nactive      auto/warm          - boot\n\n"
+	result, err := parseVCLList(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 1 {
+		t.Errorf("expected 1 entry, got %d", len(result.Entries))
+	}
+}
+
+func TestParseTLSCertList_BlankLines(t *testing.T) {
+	payload := "\nmain     active  example.com      cert-001        Dec 31 23:59:59 2024 GMT  true\n\n"
+	result, err := parseTLSCertList(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 1 {
+		t.Errorf("expected 1 entry, got %d", len(result.Entries))
 	}
 }

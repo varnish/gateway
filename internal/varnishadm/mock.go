@@ -204,6 +204,20 @@ func (m *MockVarnishadm) Exec(cmd string) (VarnishResponse, error) {
 		}, nil
 	}
 
+	if strings.HasPrefix(cmd, "vcl.label") {
+		return VarnishResponse{
+			statusCode: ClisOk,
+			payload:    "VCL label applied",
+		}, nil
+	}
+
+	if strings.HasPrefix(cmd, "vcl.discard") {
+		return VarnishResponse{
+			statusCode: ClisOk,
+			payload:    "VCL discarded",
+		}, nil
+	}
+
 	if strings.HasPrefix(cmd, "param.set") {
 		return VarnishResponse{
 			statusCode: ClisOk,
