@@ -31,6 +31,28 @@ type Server struct {
 	version        string // Stores the Varnish version (e.g., "varnish-7.7.3")
 	connected      chan struct{}
 	connectedOnce  sync.Once
+	cmdTimeout     time.Duration // Overall command timeout (default: 30s)
+	rwTimeout      time.Duration // Individual socket I/O operations (default: 10s)
+	authTimeout    time.Duration // Authentication operations (default: 5s)
+}
+
+// ServerOption is a functional option for configuring a Server.
+type ServerOption func(*Server)
+
+// WithTimeouts returns a ServerOption that sets the command, read/write, and
+// authentication timeouts. Zero values are replaced with defaults.
+func WithTimeouts(cmd, rw, auth time.Duration) ServerOption {
+	return func(s *Server) {
+		if cmd > 0 {
+			s.cmdTimeout = cmd
+		}
+		if rw > 0 {
+			s.rwTimeout = rw
+		}
+		if auth > 0 {
+			s.authTimeout = auth
+		}
+	}
 }
 
 // VarnishResponse is a type the maps the response
@@ -75,20 +97,27 @@ type varnishRequest struct {
 
 // Timeout constants for different operations
 const (
-	defaultCmdTimeout  = 30 * time.Second      // Overall command timeout
-	readWriteTimeout   = 10 * time.Second      // Individual socket I/O operations
-	authTimeout        = 5 * time.Second       // Authentication operations
-	maxResponseBodyLen = 10 * 1024 * 1024      // 10 MiB sanity limit for response body
+	defaultCmdTimeout    = 30 * time.Second // Overall command timeout
+	readWriteTimeout     = 10 * time.Second // Individual socket I/O operations
+	authTimeoutDuration  = 5 * time.Second  // Authentication operations
+	maxResponseBodyLen   = 10 * 1024 * 1024 // 10 MiB sanity limit for response body
 )
 
-func New(port uint16, secret string, logger *slog.Logger) *Server {
-	return &Server{
-		Port:      port,
-		Secret:    secret,
-		logger:    logger,
-		reqCh:     make(chan varnishRequest, 1),
-		connected: make(chan struct{}),
+func New(port uint16, secret string, logger *slog.Logger, opts ...ServerOption) *Server {
+	s := &Server{
+		Port:        port,
+		Secret:      secret,
+		logger:      logger,
+		reqCh:       make(chan varnishRequest, 1),
+		connected:   make(chan struct{}),
+		cmdTimeout:  defaultCmdTimeout,
+		rwTimeout:   readWriteTimeout,
+		authTimeout: authTimeoutDuration,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Connected returns a channel that is closed when varnishd has connected and authenticated.
@@ -154,7 +183,9 @@ func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
 
 	v.logger.Info("Varnish connected and authenticated", "version", v.version, "remote_addr", tcpConn.RemoteAddr())
 
-	// Signal that connection is established
+	// Signal that connection is established.
+	// TODO: sync.Once means Connected() only signals the first successful connection.
+	// After a reconnect, callers waiting on Connected() won't be notified again.
 	v.connectedOnce.Do(func() {
 		close(v.connected)
 	})
@@ -166,6 +197,9 @@ func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
 		case req := <-v.reqCh:
 			resp, err := v.run(tcpConn, req.command)
 			if err != nil {
+				// TODO: No automatic reconnection after connection drop. The pending
+				// Exec caller's responseChan is never written to; Exec will hang
+				// until cmdTimeout fires.
 				return fmt.Errorf("readFromConnection: %w", err)
 			}
 			if resp.statusCode != ClisOk {
@@ -180,9 +214,9 @@ func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
 // Authentication is always required since we control Varnish startup with -S secret
 func (v *Server) readBanner(c *net.TCPConn) error {
 
-	payload, statusCode, err := v.readFromConnection(c, authTimeout)
+	payload, statusCode, err := v.readFromConnection(c, v.authTimeout)
 	if err != nil {
-		v.logger.Error("Authentication challenge read failed", "error", err, "timeout_used", authTimeout)
+		v.logger.Error("Authentication challenge read failed", "error", err, "timeout_used", v.authTimeout)
 		return fmt.Errorf("failed to read authentication challenge: %w", err)
 	}
 
@@ -278,6 +312,9 @@ func (v *Server) Exec(cmd string) (VarnishResponse, error) {
 		command:      cmd,
 		responseChan: respCh,
 	}
+	// TODO: If handleConnection returns on run() error, this Exec caller hangs until
+	// cmdTimeout because nobody sends on responseChan. Consider closing reqCh or
+	// broadcasting an error to pending callers.
 	select {
 	case resp := <-respCh:
 		if resp.statusCode != ClisOk {
@@ -286,8 +323,8 @@ func (v *Server) Exec(cmd string) (VarnishResponse, error) {
 		}
 		v.logger.Debug("Varnishadm command succeeded", "command", cmd, "status", resp.statusCode, "payload", resp.payload, "response", resp.payload)
 		return resp, nil
-	case <-time.After(defaultCmdTimeout):
-		v.logger.Error("Varnishadm command timed out", "command", cmd, "timeout", defaultCmdTimeout)
+	case <-time.After(v.cmdTimeout):
+		v.logger.Error("Varnishadm command timed out", "command", cmd, "timeout", v.cmdTimeout)
 		return VarnishResponse{}, errors.New("command timed out")
 	}
 }
@@ -305,7 +342,7 @@ func (v *Server) run(c *net.TCPConn, cmd string) (out VarnishResponse, err error
 	writeBuffer.WriteString(NewLine)
 
 	// Set deadline for write operation
-	deadline := time.Now().Add(readWriteTimeout)
+	deadline := time.Now().Add(v.rwTimeout)
 	if err := c.SetDeadline(deadline); err != nil {
 		out.statusCode = ClisComms
 		return out, fmt.Errorf("failed to set write deadline: %w", err)
@@ -325,7 +362,7 @@ func (v *Server) run(c *net.TCPConn, cmd string) (out VarnishResponse, err error
 	}
 
 	// Read response with timeout
-	out.payload, out.statusCode, err = v.readFromConnection(c, readWriteTimeout)
+	out.payload, out.statusCode, err = v.readFromConnection(c, v.rwTimeout)
 	return out, err
 }
 

@@ -52,7 +52,10 @@ func makeTCPPair(t *testing.T) (serverSide *net.TCPConn, varnishdSide *net.TCPCo
 
 func testServer() *Server {
 	return &Server{
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		cmdTimeout:  defaultCmdTimeout,
+		rwTimeout:   readWriteTimeout,
+		authTimeout: authTimeoutDuration,
 	}
 }
 
