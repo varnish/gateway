@@ -442,8 +442,18 @@ func updateVersionFiles(repo *git.Repository, cfg config, output io.Writer, newV
 		if len(trimmedContent) > 0 && !semver.IsValid(normalizeVersion(trimmedContent)) {
 			return fmt.Errorf("invalid version in file %s: '%s'", path, trimmedContent)
 		}
+		// Preserve the v-prefix convention of the existing file content.
+		fileVersion := newVersion
+		if len(trimmedContent) > 0 {
+			if hasVPrefix(trimmedContent) {
+				fileVersion = normalizeVersion(newVersion)
+			} else {
+				fileVersion = stripVPrefix(newVersion)
+			}
+		}
+
 		// print the action to the output.
-		_, _ = fmt.Fprintf(output, "Updating version in file %s to %s\n", path, newVersion)
+		_, _ = fmt.Fprintf(output, "Updating version in file %s to %s\n", path, fileVersion)
 
 		filesUpdated++
 
@@ -451,7 +461,7 @@ func updateVersionFiles(repo *git.Repository, cfg config, output io.Writer, newV
 			return nil // return early if we are in dry-run mode
 		}
 		// write the new version to the file
-		err = os.WriteFile(path, []byte(newVersion), 0644)
+		err = os.WriteFile(path, []byte(fileVersion), 0644)
 		if err != nil {
 			return fmt.Errorf("failed to write file: %w", err)
 		}
