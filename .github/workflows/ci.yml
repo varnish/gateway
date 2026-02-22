@@ -49,7 +49,12 @@ jobs:
       - name: Run Go tests
         run: |
           KUBEBUILDER_ASSETS="$(pwd)/$(./bin/setup-envtest use 1.31.0 --bin-dir testbin -p path)" \
-            go test -tags=integration ./...
+            go test -tags=integration -coverprofile=coverage.txt ./...
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   test-rust:
     runs-on: ubuntu-latest
