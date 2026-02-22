@@ -34,6 +34,7 @@ func newLogWriter(logger *slog.Logger, source string, ready chan<- struct{}) *lo
 
 	go func() {
 		scanner := bufio.NewScanner(pr)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max token size
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
@@ -73,6 +74,9 @@ func newLogWriter(logger *slog.Logger, source string, ready chan<- struct{}) *lo
 			}
 			// Log with source attribution
 			logger.Log(context.Background(), level, line, "source", source)
+		}
+		if err := scanner.Err(); err != nil {
+			logger.Error("log scanner error", "source", source, "error", err)
 		}
 	}()
 

@@ -26,6 +26,7 @@ func ServiceKey(namespace, name string) string {
 }
 
 // endpointsToBackends converts discovered endpoints to ghost backends using the routing rule.
+// For multi-port services, only endpoints matching the rule's port are included.
 func endpointsToBackends(rule RoutingRule, endpoints ServiceEndpoints) []Backend {
 	key := ServiceKey(rule.Namespace, rule.Service)
 	eps, ok := endpoints[key]
@@ -38,6 +39,8 @@ func endpointsToBackends(rule RoutingRule, endpoints ServiceEndpoints) []Backend
 		port := ep.Port
 		if port == 0 {
 			port = rule.Port
+		} else if rule.Port != 0 && port != rule.Port {
+			continue
 		}
 		weight := rule.Weight
 		backends = append(backends, Backend{
@@ -226,6 +229,7 @@ func Generate(routingConfig *RoutingConfig, endpoints ServiceEndpoints) *Config 
 }
 
 // routeToBackends converts a route with endpoints to backend list.
+// For multi-port services, only endpoints matching the route's port are included.
 func routeToBackends(route Route, endpoints ServiceEndpoints) []Backend {
 	key := ServiceKey(route.Namespace, route.Service)
 	eps, ok := endpoints[key]
@@ -238,6 +242,10 @@ func routeToBackends(route Route, endpoints ServiceEndpoints) []Backend {
 		port := ep.Port
 		if port == 0 {
 			port = route.Port
+		} else if route.Port != 0 && port != route.Port {
+			// Skip endpoints whose port doesn't match the route's target port.
+			// This filters out irrelevant ports for multi-port services.
+			continue
 		}
 		weight := route.Weight
 		backends = append(backends, Backend{

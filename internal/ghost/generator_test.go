@@ -307,6 +307,54 @@ func TestGenerateRoutingConfigNoDefault(t *testing.T) {
 	}
 }
 
+func TestRouteToBackendsMultiPort(t *testing.T) {
+	// Multi-port service: endpoints contain entries for both ports
+	endpoints := ServiceEndpoints{
+		"default/multi-port-svc": {
+			{IP: "10.0.0.1", Port: 8080},
+			{IP: "10.0.0.1", Port: 9090},
+			{IP: "10.0.0.2", Port: 8080},
+			{IP: "10.0.0.2", Port: 9090},
+		},
+	}
+
+	// Route targeting port 8080
+	route8080 := Route{
+		Service:   "multi-port-svc",
+		Namespace: "default",
+		Port:      8080,
+		Weight:    100,
+	}
+
+	backends := routeToBackends(route8080, endpoints)
+	if len(backends) != 2 {
+		t.Fatalf("expected 2 backends for port 8080, got %d", len(backends))
+	}
+	for _, b := range backends {
+		if b.Port != 8080 {
+			t.Errorf("expected all backends on port 8080, got port %d", b.Port)
+		}
+	}
+
+	// Route targeting port 9090
+	route9090 := Route{
+		Service:   "multi-port-svc",
+		Namespace: "default",
+		Port:      9090,
+		Weight:    50,
+	}
+
+	backends = routeToBackends(route9090, endpoints)
+	if len(backends) != 2 {
+		t.Fatalf("expected 2 backends for port 9090, got %d", len(backends))
+	}
+	for _, b := range backends {
+		if b.Port != 9090 {
+			t.Errorf("expected all backends on port 9090, got port %d", b.Port)
+		}
+	}
+}
+
 // TestMethodMatchingConformancePipeline simulates the full pipeline for the
 // HTTPRouteMethodMatching conformance test. It verifies that the ghost.json
 // produced by the operator→chaperone pipeline contains correct priorities

@@ -155,6 +155,11 @@ func TestBuildArgsProtectedFlagRejection(t *testing.T) {
 		{"reject -F", []string{"-F"}},
 		{"reject -f", []string{"-f", "/path/to/vcl"}},
 		{"reject -n", []string{"-n", "/var/lib/varnish"}},
+		// Prefix bypass attempts
+		{"reject -M:9999", []string{"-M:9999"}},
+		{"reject -S/tmp/evil", []string{"-S/tmp/evil"}},
+		{"reject -f/tmp/hack.vcl", []string{"-f/tmp/hack.vcl"}},
+		{"reject -n/custom", []string{"-n/custom"}},
 	}
 
 	for _, tt := range protectedTests {

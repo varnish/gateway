@@ -134,8 +134,11 @@ func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigM
 		return
 	}
 
+	r.lastVCLMux.Lock()
+
 	// Deduplicate via ResourceVersion
 	if cm.ResourceVersion != "" && cm.ResourceVersion == r.lastConfigMapRV {
+		r.lastVCLMux.Unlock()
 		r.logger.Debug("skipping duplicate ConfigMap update", "resourceVersion", cm.ResourceVersion)
 		return
 	}
@@ -144,12 +147,12 @@ func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigM
 	// Extract main.vcl
 	newVCL, ok := cm.Data["main.vcl"]
 	if !ok {
+		r.lastVCLMux.Unlock()
 		r.logger.Warn("ConfigMap missing main.vcl key", "name", cm.Name)
 		return
 	}
 
 	// Check if VCL content actually changed
-	r.lastVCLMux.Lock()
 	if r.lastVCL == newVCL {
 		r.lastVCLMux.Unlock()
 		r.logger.Debug("ConfigMap updated but main.vcl unchanged, skipping reload",

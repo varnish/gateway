@@ -32,10 +32,13 @@ var protectedFlags = []string{"-M", "-S", "-F", "-f", "-n"}
 // BuildArgs constructs varnishd command line arguments from Config.
 // Returns an error if ExtraArgs contains protected flags.
 func BuildArgs(cfg *Config) ([]string, error) {
-	// Validate ExtraArgs doesn't contain protected flags
+	// Validate ExtraArgs doesn't contain protected flags.
+	// Use prefix matching to prevent bypasses like "-M:9999" or "-S/tmp/evil".
+	// All protected flags are single-letter (-M, -S, -F, -f, -n) so prefix
+	// matching is safe — varnishd has no longer flags starting with these letters.
 	for _, arg := range cfg.ExtraArgs {
 		for _, protected := range protectedFlags {
-			if arg == protected {
+			if strings.HasPrefix(arg, protected) {
 				return nil, fmt.Errorf("BuildArgs: cannot override protected argument %s", protected)
 			}
 		}

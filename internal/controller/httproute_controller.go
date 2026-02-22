@@ -778,6 +778,68 @@ func (r *HTTPRouteReconciler) findHTTPRoutesForGateway(ctx context.Context, obj 
 	return requests
 }
 
+// findHTTPRoutesForService returns reconcile requests for all HTTPRoutes
+// that reference the changed Service as a backend.
+func (r *HTTPRouteReconciler) findHTTPRoutesForService(ctx context.Context, obj client.Object) []reconcile.Request {
+	svc, ok := obj.(*corev1.Service)
+	if !ok {
+		return nil
+	}
+
+	// List all HTTPRoutes
+	var routeList gatewayv1.HTTPRouteList
+	if err := r.List(ctx, &routeList); err != nil {
+		r.Logger.Error("failed to list HTTPRoutes for Service watch", "error", err)
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, route := range routeList.Items {
+		if routeReferencesService(&route, svc.Name, svc.Namespace) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      route.Name,
+					Namespace: route.Namespace,
+				},
+			})
+		}
+	}
+
+	if len(requests) > 0 {
+		r.Logger.Debug("Service changed, re-reconciling referencing HTTPRoutes",
+			"service", fmt.Sprintf("%s/%s", svc.Namespace, svc.Name),
+			"routes", len(requests))
+	}
+
+	return requests
+}
+
+// routeReferencesService checks if any backendRef in the route references the given Service.
+func routeReferencesService(route *gatewayv1.HTTPRoute, serviceName, serviceNamespace string) bool {
+	for _, rule := range route.Spec.Rules {
+		for _, backendRef := range rule.BackendRefs {
+			// Skip non-Service refs
+			if backendRef.Kind != nil && *backendRef.Kind != "Service" {
+				continue
+			}
+			if backendRef.Group != nil && *backendRef.Group != "" {
+				continue
+			}
+			if string(backendRef.Name) != serviceName {
+				continue
+			}
+			refNS := route.Namespace
+			if backendRef.Namespace != nil {
+				refNS = string(*backendRef.Namespace)
+			}
+			if refNS == serviceNamespace {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -788,6 +850,10 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			// Only trigger on spec changes (generation bump), ignore status-only updates
 			// to prevent reconciliation loops between HTTPRoute and Gateway controllers
 			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
+		Watches(
+			&corev1.Service{},
+			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForService),
 		).
 		Complete(r)
 }

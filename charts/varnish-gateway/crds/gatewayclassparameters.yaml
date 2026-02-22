@@ -117,6 +117,14 @@ spec:
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
+                resources:
+                  type: object
+                  description: |
+                    Resource requirements for the main varnish-gateway container.
+                    If not set, defaults to requests of 100m CPU and 256Mi memory with no limits.
+                    Varnish memory usage varies by deployment, so users should configure limits
+                    appropriate for their workload.
+                  x-kubernetes-preserve-unknown-fields: true
       additionalPrinterColumns:
         - name: Age
           type: date

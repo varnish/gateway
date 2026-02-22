@@ -157,7 +157,7 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, hasTLS bool, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container) *appsv1.Deployment {
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, hasTLS bool, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -209,7 +209,7 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
 					InitContainers:                extraInitContainers,
-					Containers:                    r.buildContainers(gateway, varnishdExtraArgs, logging, hasTLS, extraVolumeMounts),
+					Containers:                    r.buildContainers(gateway, varnishdExtraArgs, logging, hasTLS, extraVolumeMounts, resources),
 					Volumes:                       r.buildVolumes(gateway, hasTLS, extraVolumes),
 				},
 			},
@@ -255,9 +255,9 @@ func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, hasTLS bool
 }
 
 // buildContainers creates the pod containers: main gateway container and optional logging sidecar.
-func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, hasTLS bool, extraVolumeMounts []corev1.VolumeMount) []corev1.Container {
+func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, hasTLS bool, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) []corev1.Container {
 	containers := []corev1.Container{
-		r.buildGatewayContainer(gateway, varnishdExtraArgs, hasTLS, extraVolumeMounts),
+		r.buildGatewayContainer(gateway, varnishdExtraArgs, hasTLS, extraVolumeMounts, resources),
 	}
 
 	// Add logging sidecar if configured
@@ -270,7 +270,7 @@ func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishd
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
 // This container runs chaperone which manages varnishd internally.
-func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, hasTLS bool, extraVolumeMounts []corev1.VolumeMount) corev1.Container {
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, hasTLS bool, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) corev1.Container {
 	env := []corev1.EnvVar{
 		{
 			Name: "NAMESPACE",
@@ -348,6 +348,19 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 	}
 	volumeMounts = append(volumeMounts, extraVolumeMounts...)
 
+	// Apply resource requirements: use user-specified or sensible defaults.
+	// Defaults are requests only (no limits) because Varnish memory usage
+	// varies enormously by deployment.
+	resourceReqs := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    mustParseQuantity("100m"),
+			corev1.ResourceMemory: mustParseQuantity("256Mi"),
+		},
+	}
+	if resources != nil {
+		resourceReqs = *resources
+	}
+
 	return corev1.Container{
 		Name:  "varnish-gateway",
 		Image: r.Config.GatewayImage,
@@ -359,6 +372,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		},
 		Ports:        ports,
 		VolumeMounts: volumeMounts,
+		Resources:    resourceReqs,
 		// PreStop hook triggers graceful shutdown before SIGTERM
 		Lifecycle: &corev1.Lifecycle{
 			PreStop: &corev1.LifecycleHandler{

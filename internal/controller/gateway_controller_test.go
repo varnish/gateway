@@ -142,7 +142,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, nil, nil, nil)
+	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, nil, nil, nil, nil)
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -213,7 +213,7 @@ func TestBuildDeployment_WithExtras(t *testing.T) {
 		{Name: "vmod-loader", Image: "busybox:latest", Command: []string{"cp", "/src/libvmod.so", "/dst/"}},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, extraVolumes, extraVolumeMounts, extraInitContainers)
+	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, extraVolumes, extraVolumeMounts, extraInitContainers, nil)
 
 	// Verify extra volumes
 	foundVol := false
@@ -965,7 +965,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 				},
 			}
 
-			container := r.buildGatewayContainer(gateway, tc.varnishdExtraArgs, tc.hasTLS, tc.extraVolumeMounts)
+			container := r.buildGatewayContainer(gateway, tc.varnishdExtraArgs, tc.hasTLS, tc.extraVolumeMounts, nil)
 
 			if len(container.Ports) != tc.expectPorts {
 				t.Errorf("expected %d ports, got %d", tc.expectPorts, len(container.Ports))
@@ -1105,7 +1105,7 @@ func TestBuildContainers(t *testing.T) {
 	}
 
 	t.Run("without logging", func(t *testing.T) {
-		containers := r.buildContainers(gateway, nil, nil, false, nil)
+		containers := r.buildContainers(gateway, nil, nil, false, nil, nil)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container, got %d", len(containers))
 		}
@@ -1116,7 +1116,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("with logging", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishlog"}
-		containers := r.buildContainers(gateway, nil, logging, false, nil)
+		containers := r.buildContainers(gateway, nil, logging, false, nil, nil)
 		if len(containers) != 2 {
 			t.Errorf("expected 2 containers, got %d", len(containers))
 		}
@@ -1127,7 +1127,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("logging with empty mode is not added", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: ""}
-		containers := r.buildContainers(gateway, nil, logging, false, nil)
+		containers := r.buildContainers(gateway, nil, logging, false, nil, nil)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container when logging mode is empty, got %d", len(containers))
 		}

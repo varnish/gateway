@@ -14,28 +14,6 @@ func ptr[T any](v T) *T {
 	return &v
 }
 
-func TestSanitizeServiceName(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"my-service", "my_service"},
-		{"my.service", "my_service"},
-		{"my-service.default", "my_service_default"},
-		{"simple", "simple"},
-		{"a-b.c-d", "a_b_c_d"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.input, func(t *testing.T) {
-			result := SanitizeServiceName(tc.input)
-			if result != tc.expected {
-				t.Errorf("SanitizeServiceName(%q) = %q, expected %q", tc.input, result, tc.expected)
-			}
-		})
-	}
-}
-
 func TestGenerate_GhostPreamble(t *testing.T) {
 	result := Generate(nil, GeneratorConfig{})
 

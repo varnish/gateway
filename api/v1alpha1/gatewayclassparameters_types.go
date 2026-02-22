@@ -52,6 +52,13 @@ type GatewayClassParametersSpec struct {
 	// ExtraInitContainers specifies additional init containers to run before the main container.
 	// +optional
 	ExtraInitContainers []corev1.Container `json:"extraInitContainers,omitempty"`
+
+	// Resources specifies resource requirements for the main varnish-gateway container.
+	// If not set, defaults to requests of 100m CPU and 256Mi memory with no limits.
+	// Varnish memory usage varies by deployment, so users should configure limits
+	// appropriate for their workload.
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // VarnishLogging configures varnish logging via a sidecar container.

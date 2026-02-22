@@ -489,8 +489,26 @@ func diffEndpoints(oldEndpoints, newEndpoints []Endpoint) (added, removed []Endp
 }
 
 // extractEndpoints extracts ready endpoints from an EndpointSlice.
+// An endpoint entry is created for each (address, port) combination so that
+// multi-port Services are represented correctly. The generator filters by
+// the route's target port when building backends.
 func extractEndpoints(slice *discoveryv1.EndpointSlice) []Endpoint {
 	var endpoints []Endpoint
+
+	// Collect all ports from the slice. If no ports are defined, use port 0
+	// (the generator will fall back to the route's port).
+	ports := []int{0}
+	if len(slice.Ports) > 0 {
+		ports = make([]int, 0, len(slice.Ports))
+		for _, p := range slice.Ports {
+			if p.Port != nil {
+				ports = append(ports, int(*p.Port))
+			}
+		}
+		if len(ports) == 0 {
+			ports = []int{0}
+		}
+	}
 
 	for _, ep := range slice.Endpoints {
 		// Skip endpoints that are not ready
@@ -498,18 +516,14 @@ func extractEndpoints(slice *discoveryv1.EndpointSlice) []Endpoint {
 			continue
 		}
 
-		// Get port from slice ports if available
-		port := 0
-		if len(slice.Ports) > 0 && slice.Ports[0].Port != nil {
-			port = int(*slice.Ports[0].Port)
-		}
-
-		// Add an endpoint for each address
+		// Add an endpoint for each (address, port) combination
 		for _, addr := range ep.Addresses {
-			endpoints = append(endpoints, Endpoint{
-				IP:   addr,
-				Port: port,
-			})
+			for _, port := range ports {
+				endpoints = append(endpoints, Endpoint{
+					IP:   addr,
+					Port: port,
+				})
+			}
 		}
 	}
 
@@ -579,6 +593,14 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 	oldServiceWatch := w.serviceWatch
 	w.routingConfig = config
 	w.updateServiceWatch(config)
+
+	// Prune endpoints for services no longer watched
+	for key := range w.endpoints {
+		if _, ok := w.serviceWatch[key]; !ok {
+			delete(w.endpoints, key)
+			w.logger.Debug("pruned stale endpoints", "service", key)
+		}
+	}
 
 	// Backfill endpoints for newly-watched services from the informer cache.
 	// When the ConfigMap adds new services, the EndpointSlice informer may have

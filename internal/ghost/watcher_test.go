@@ -331,6 +331,42 @@ func TestExtractEndpointsNoPorts(t *testing.T) {
 	}
 }
 
+func TestExtractEndpointsMultiPort(t *testing.T) {
+	int32Ptr := func(i int32) *int32 { return &i }
+	boolPtr := func(b bool) *bool { return &b }
+
+	slice := &discoveryv1.EndpointSlice{
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				Addresses:  []string{"10.0.0.1", "10.0.0.2"},
+				Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)},
+			},
+		},
+		Ports: []discoveryv1.EndpointPort{
+			{Port: int32Ptr(8080)},
+			{Port: int32Ptr(9090)},
+		},
+	}
+
+	endpoints := extractEndpoints(slice)
+	// 2 addresses * 2 ports = 4 endpoints
+	if len(endpoints) != 4 {
+		t.Fatalf("expected 4 endpoints, got %d", len(endpoints))
+	}
+
+	// Verify we get all combinations
+	portCounts := make(map[int]int)
+	for _, ep := range endpoints {
+		portCounts[ep.Port]++
+	}
+	if portCounts[8080] != 2 {
+		t.Errorf("expected 2 endpoints on port 8080, got %d", portCounts[8080])
+	}
+	if portCounts[9090] != 2 {
+		t.Errorf("expected 2 endpoints on port 9090, got %d", portCounts[9090])
+	}
+}
+
 // TestWatcherReloadFailureFatal verifies that ghost reload failures cause the watcher to exit
 func TestWatcherReloadFailureFatal(t *testing.T) {
 	// Create a fake HTTP server that returns 503 for reload requests

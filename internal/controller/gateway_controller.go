@@ -163,12 +163,14 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 	var extraInitContainers []corev1.Container
+	var containerResources *corev1.ResourceRequirements
 	if params := r.getGatewayClassParameters(ctx, gateway); params != nil {
 		varnishdExtraArgs = params.Spec.VarnishdExtraArgs
 		logging = params.Spec.Logging
 		extraVolumes = params.Spec.ExtraVolumes
 		extraVolumeMounts = params.Spec.ExtraVolumeMounts
 		extraInitContainers = params.Spec.ExtraInitContainers
+		containerResources = params.Spec.Resources
 	}
 
 	// Generate VCL content (ghost preamble + user VCL)
@@ -207,7 +209,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	resources = append(resources,
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
-		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash, hasTLS, extraVolumes, extraVolumeMounts, extraInitContainers),
+		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash, hasTLS, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources),
 		r.buildService(gateway),
 	)
 

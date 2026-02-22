@@ -2,6 +2,7 @@ package vrun
 
 import (
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,5 +82,31 @@ func TestLogWriter_LogLevels(t *testing.T) {
 		t.Fatal("ready channel should not be closed without readiness line")
 	default:
 		// expected
+	}
+}
+
+// TestLogWriter_OversizedLine verifies that lines exceeding the default 64KB
+// bufio.Scanner limit are handled correctly with the increased buffer.
+func TestLogWriter_OversizedLine(t *testing.T) {
+	ready := make(chan struct{})
+	lw := newLogWriter(slog.Default(), "test", ready)
+	defer lw.Close()
+
+	// Create a line larger than the default 64KB scanner limit
+	bigLine := "Info: " + strings.Repeat("x", 128*1024) + "\n"
+	if _, err := lw.Write([]byte(bigLine)); err != nil {
+		t.Fatalf("Write oversized line: %v", err)
+	}
+
+	// Write a normal line after to verify the scanner is still working
+	if _, err := lw.Write([]byte("Info: Child (9999) said Child starts\n")); err != nil {
+		t.Fatalf("Write readiness line: %v", err)
+	}
+
+	select {
+	case <-ready:
+		// success - scanner survived the oversized line
+	case <-time.After(2 * time.Second):
+		t.Fatal("scanner goroutine died after oversized line; ready channel never closed")
 	}
 }

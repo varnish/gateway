@@ -84,14 +84,6 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	return sb.String()
 }
 
-// SanitizeServiceName converts a Kubernetes service name to a valid identifier.
-// Dots and hyphens are replaced with underscores.
-func SanitizeServiceName(name string) string {
-	s := strings.ReplaceAll(name, ".", "_")
-	s = strings.ReplaceAll(s, "-", "_")
-	return s
-}
-
 // CalculateRoutePriority calculates the priority for a route based on all match criteria.
 // Higher priority = more specific match. Path specificity dominates over other criteria
 // to ensure path-based routing works correctly per Gateway API spec.
