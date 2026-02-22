@@ -1,5 +1,8 @@
 # Varnish Gateway Operator
 
+[![CI](https://github.com/varnish/gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/varnish/gateway/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/github/varnish/gateway/graph/badge.svg)](https://codecov.io/github/varnish/gateway)
+
 Kubernetes Gateway API implementation using Varnish.
 
 ## Container Images
