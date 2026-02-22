@@ -119,8 +119,11 @@ func (f *FakeVarnishd) Stop() {
 	if f.cancel != nil {
 		f.cancel()
 	}
-	if f.conn != nil {
-		f.conn.Close()
+	f.mu.Lock()
+	conn := f.conn
+	f.mu.Unlock()
+	if conn != nil {
+		conn.Close()
 	}
 	<-f.done
 }
@@ -128,12 +131,14 @@ func (f *FakeVarnishd) Stop() {
 func (f *FakeVarnishd) run(ctx context.Context) {
 	defer close(f.done)
 
-	var err error
-	f.conn, err = net.DialTimeout("tcp", f.addr, 2*time.Second)
+	conn, err := net.DialTimeout("tcp", f.addr, 2*time.Second)
 	if err != nil {
 		f.t.Logf("FakeVarnishd: dial failed: %v", err)
 		return
 	}
+	f.mu.Lock()
+	f.conn = conn
+	f.mu.Unlock()
 
 	if !f.doAuth(ctx) {
 		return
