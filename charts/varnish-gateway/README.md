@@ -9,16 +9,6 @@ This Helm chart installs the Varnish Gateway operator, which implements the Kube
 
 ## Installation
 
-### Install the chart
-
-```bash
-helm install varnish-gateway ./charts/varnish-gateway \
-  --namespace varnish-gateway-system \
-  --create-namespace
-```
-
-### Install from OCI registry
-
 ```bash
 helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --version 0.9.2 \
@@ -80,7 +70,7 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 ### Install with custom operator image
 
 ```bash
-helm install varnish-gateway ./charts/varnish-gateway \
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --set operator.image.tag=v0.8.0 \
   --set chaperone.image.tag=v0.8.0
 ```
@@ -90,14 +80,14 @@ helm install varnish-gateway ./charts/varnish-gateway \
 If you've already installed Gateway API CRDs cluster-wide:
 
 ```bash
-helm install varnish-gateway ./charts/varnish-gateway \
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --set installGatewayAPICRDs=false
 ```
 
 ### Customize VCL configuration
 
 ```bash
-helm install varnish-gateway ./charts/varnish-gateway \
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --set-file gatewayClass.defaultParams.userVCL.content=./my-custom.vcl
 ```
 
@@ -106,7 +96,7 @@ helm install varnish-gateway ./charts/varnish-gateway \
 If you want to create your own GatewayClassParameters:
 
 ```bash
-helm install varnish-gateway ./charts/varnish-gateway \
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --set gatewayClass.createDefaultParams=false
 ```
 
@@ -115,7 +105,7 @@ helm install varnish-gateway ./charts/varnish-gateway \
 ### Upgrade the chart
 
 ```bash
-helm upgrade varnish-gateway ./charts/varnish-gateway \
+helm upgrade varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --namespace varnish-gateway-system
 ```
 
