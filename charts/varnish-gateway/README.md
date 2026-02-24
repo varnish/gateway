@@ -21,7 +21,7 @@ helm install varnish-gateway ./charts/varnish-gateway \
 
 ```bash
 helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
-  --version 0.7.2 \
+  --version 0.9.2 \
   --namespace varnish-gateway-system \
   --create-namespace
 ```
