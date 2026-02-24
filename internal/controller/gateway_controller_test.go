@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1227,6 +1228,210 @@ func TestNeedsDeploymentUpdate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			result := needsDeploymentUpdate(tc.existing, tc.desired)
+			if result != tc.expectUpdate {
+				t.Errorf("expected %v, got %v", tc.expectUpdate, result)
+			}
+		})
+	}
+}
+
+func TestNeedsServiceUpdate(t *testing.T) {
+	tests := []struct {
+		name         string
+		existing     *corev1.Service
+		desired      *corev1.Service
+		expectUpdate bool
+	}{
+		{
+			name: "same ports",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			expectUpdate: false,
+		},
+		{
+			name: "HTTPS port added",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+						{Name: "https", Port: 443, TargetPort: intstr.FromInt(8443), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "port number changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 8080, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "port removed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+						{Name: "https", Port: 443, TargetPort: intstr.FromInt(8443), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "target port changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(9090), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "ignores API server added fields like NodePort",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP, NodePort: 31234},
+					},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{Name: "http", Port: 80, TargetPort: intstr.FromInt(8080), Protocol: corev1.ProtocolTCP},
+					},
+				},
+			},
+			expectUpdate: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := needsServiceUpdate(tc.existing, tc.desired)
+			if result != tc.expectUpdate {
+				t.Errorf("expected %v, got %v", tc.expectUpdate, result)
+			}
+		})
+	}
+}
+
+func TestNeedsSecretUpdate(t *testing.T) {
+	tests := []struct {
+		name         string
+		existing     *corev1.Secret
+		desired      *corev1.Secret
+		expectUpdate bool
+	}{
+		{
+			name: "same data",
+			existing: &corev1.Secret{
+				Data: map[string][]byte{"cert.pem": []byte("certdata")},
+			},
+			desired: &corev1.Secret{
+				Data: map[string][]byte{"cert.pem": []byte("certdata")},
+			},
+			expectUpdate: false,
+		},
+		{
+			name: "cert added",
+			existing: &corev1.Secret{
+				Data: map[string][]byte{"cert.pem": []byte("certdata")},
+			},
+			desired: &corev1.Secret{
+				Data: map[string][]byte{
+					"cert.pem":  []byte("certdata"),
+					"cert2.pem": []byte("certdata2"),
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "cert removed",
+			existing: &corev1.Secret{
+				Data: map[string][]byte{
+					"cert.pem":  []byte("certdata"),
+					"cert2.pem": []byte("certdata2"),
+				},
+			},
+			desired: &corev1.Secret{
+				Data: map[string][]byte{"cert.pem": []byte("certdata")},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "cert data changed",
+			existing: &corev1.Secret{
+				Data: map[string][]byte{"cert.pem": []byte("olddata")},
+			},
+			desired: &corev1.Secret{
+				Data: map[string][]byte{"cert.pem": []byte("newdata")},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "both empty",
+			existing: &corev1.Secret{
+				Data: map[string][]byte{},
+			},
+			desired: &corev1.Secret{
+				Data: map[string][]byte{},
+			},
+			expectUpdate: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := needsSecretUpdate(tc.existing, tc.desired)
 			if result != tc.expectUpdate {
 				t.Errorf("expected %v, got %v", tc.expectUpdate, result)
 			}

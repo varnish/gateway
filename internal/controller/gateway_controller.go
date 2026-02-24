@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/pem"
 	"fmt"
@@ -291,6 +292,37 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		}
 	}
 
+	// For Services, update if ports changed (e.g., adding HTTPS listener)
+	if desiredSvc, ok := desired.(*corev1.Service); ok {
+		existingSvc := existing.(*corev1.Service)
+		if needsServiceUpdate(existingSvc, desiredSvc) {
+			existingSvc.Spec.Ports = desiredSvc.Spec.Ports
+			if err := r.Update(ctx, existingSvc); err != nil {
+				return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
+			}
+			r.Logger.Info("updated service ports",
+				"name", desired.GetName())
+		}
+		return nil
+	}
+
+	// For TLS bundle Secrets, update if cert data changed.
+	// Admin secrets (suffix -secret) are generated once and must not be overwritten.
+	if desiredSecret, ok := desired.(*corev1.Secret); ok {
+		if strings.HasSuffix(desired.GetName(), "-tls") {
+			existingSecret := existing.(*corev1.Secret)
+			if needsSecretUpdate(existingSecret, desiredSecret) {
+				existingSecret.Data = desiredSecret.Data
+				if err := r.Update(ctx, existingSecret); err != nil {
+					return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
+				}
+				r.Logger.Info("updated TLS secret",
+					"name", desired.GetName())
+			}
+		}
+		return nil
+	}
+
 	return nil
 }
 
@@ -318,6 +350,42 @@ func needsDeploymentUpdate(existing, desired *appsv1.Deployment) bool {
 	}
 
 	return existingHash != desiredHash
+}
+
+// needsServiceUpdate checks if the Service ports need to be updated.
+// Compares only the fields we control (name, port, targetPort, protocol).
+func needsServiceUpdate(existing, desired *corev1.Service) bool {
+	if len(existing.Spec.Ports) != len(desired.Spec.Ports) {
+		return true
+	}
+	existingPorts := make(map[string]corev1.ServicePort, len(existing.Spec.Ports))
+	for _, p := range existing.Spec.Ports {
+		existingPorts[p.Name] = p
+	}
+	for _, dp := range desired.Spec.Ports {
+		ep, ok := existingPorts[dp.Name]
+		if !ok {
+			return true
+		}
+		if ep.Port != dp.Port || ep.TargetPort != dp.TargetPort || ep.Protocol != dp.Protocol {
+			return true
+		}
+	}
+	return false
+}
+
+// needsSecretUpdate checks if the Secret data needs to be updated.
+func needsSecretUpdate(existing, desired *corev1.Secret) bool {
+	if len(existing.Data) != len(desired.Data) {
+		return true
+	}
+	for key, desiredVal := range desired.Data {
+		existingVal, ok := existing.Data[key]
+		if !ok || !bytes.Equal(existingVal, desiredVal) {
+			return true
+		}
+	}
+	return false
 }
 
 // updateGatewayStatus updates Gateway status using Server-Side Apply.
