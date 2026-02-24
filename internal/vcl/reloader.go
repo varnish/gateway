@@ -16,6 +16,10 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
+// Note: VCL compilation failure is intentionally non-fatal. When Varnish rejects a
+// VCL update it keeps the previously active VCL, so the gateway continues serving
+// traffic. Chaperone logs the error and waits for the next config change.
+
 const (
 	// DefaultKeepCount is the default number of old VCLs to keep for rollback
 	DefaultKeepCount = 3
@@ -38,10 +42,6 @@ type Reloader struct {
 	lastVCL            string
 	lastVCLMux         sync.RWMutex
 	lastConfigMapRV    string
-
-	// Fatal error signaling
-	fatalErrCh   chan error
-	fatalErrOnce sync.Once
 }
 
 // New creates a new VCL reloader
@@ -68,14 +68,7 @@ func New(
 		configMapName:      configMapName,
 		configMapNamespace: configMapNamespace,
 		logger:             logger,
-		fatalErrCh:         make(chan error, 1),
 	}
-}
-
-// FatalError returns a channel that receives fatal errors from VCL reload failures.
-// VCL reload failures are fatal because the gateway cannot serve with incorrect configuration.
-func (r *Reloader) FatalError() <-chan error {
-	return r.fatalErrCh
 }
 
 // Run starts watching the VCL file and reloading on changes
@@ -165,13 +158,10 @@ func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigM
 	r.logger.Info("main.vcl changed, triggering VCL reload",
 		"resourceVersion", cm.ResourceVersion)
 
-	// Trigger varnishadm reload with inline VCL
+	// Trigger varnishadm reload with inline VCL.
+	// On failure Varnish keeps the previously active VCL, so we log and continue.
 	if err := r.ReloadInline(newVCL); err != nil {
-		r.logger.Error("VCL reload failed - this is fatal", "error", err)
-		// Send fatal error (only once to avoid blocking)
-		r.fatalErrOnce.Do(func() {
-			r.fatalErrCh <- fmt.Errorf("VCL reload failed: %w", err)
-		})
+		r.logger.Error("VCL reload failed - keeping previous VCL", "error", err)
 	}
 }
 

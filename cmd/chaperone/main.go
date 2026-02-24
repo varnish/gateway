@@ -353,17 +353,6 @@ func run() error {
 		return nil
 	})
 
-	// Listen for fatal VCL reload errors
-	g.Go(func() error {
-		select {
-		case err := <-vclReloader.FatalError():
-			slog.Error("fatal VCL reload error - exiting", "error", err)
-			return err
-		case <-gctx.Done():
-			return nil
-		}
-	})
-
 	// Start TLS reloader (if TLS enabled)
 	if tlsReloader != nil {
 		g.Go(func() error {

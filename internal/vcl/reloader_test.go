@@ -414,7 +414,7 @@ func (f *failingVarnishadm) VCLInline(name, vcl string) (varnishadm.VarnishRespo
 	return varnishadm.NewVarnishResponse(varnishadm.ClisSyntax, "VCL compilation failed: syntax error"), nil
 }
 
-func TestVCLReloadFailure_Fatal(t *testing.T) {
+func TestVCLReloadFailure_NonFatal(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	baseMock := varnishadm.NewMock(6082, "secret", logger)
 	mock := &failingVarnishadm{MockVarnishadm: baseMock}
@@ -427,7 +427,8 @@ func TestVCLReloadFailure_Fatal(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Trigger a VCL reload that will fail
+	// Trigger a VCL reload that will fail due to compilation error.
+	// Varnish keeps the old VCL active in this case, so chaperone must not exit.
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "test-cm",
@@ -438,18 +439,17 @@ func TestVCLReloadFailure_Fatal(t *testing.T) {
 			"main.vcl": "invalid vcl",
 		},
 	}
-	r.handleConfigMapUpdate(ctx, cm)
+	// handleConfigMapUpdate must return without panicking or blocking.
+	done := make(chan struct{})
+	go func() {
+		r.handleConfigMapUpdate(ctx, cm)
+		close(done)
+	}()
 
-	// Verify that FatalError channel received an error
 	select {
-	case err := <-r.FatalError():
-		if err == nil {
-			t.Error("expected non-nil error from FatalError channel")
-		}
-		if !strings.Contains(err.Error(), "VCL reload failed") {
-			t.Errorf("expected error to mention VCL reload failure, got: %v", err)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("expected to receive fatal error on FatalError channel")
+	case <-done:
+		// good: reloader survived the failure
+	case <-time.After(500 * time.Millisecond):
+		t.Error("handleConfigMapUpdate blocked after VCL compilation failure")
 	}
 }
