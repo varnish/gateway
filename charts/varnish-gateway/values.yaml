@@ -81,7 +81,7 @@ gatewayClass:
       configMap:
         name: varnish-user-vcl
         key: user.vcl
-      # Content of user VCL (if enabled, creates ConfigMap)
+      # Default content for initial install (Helm will not overwrite on upgrades)
       content: |
         # Disable caching for all requests
         sub vcl_recv {

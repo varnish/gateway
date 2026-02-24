@@ -52,7 +52,7 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 | `gatewayClass.controllerName` | Controller identifier | `varnish-software.com/gateway` |
 | `gatewayClass.createDefaultParams` | Create default GatewayClassParameters | `true` |
 | `gatewayClass.defaultParams.userVCL.enabled` | Enable user VCL configuration | `true` |
-| `gatewayClass.defaultParams.userVCL.content` | VCL content to inject | See values.yaml |
+| `gatewayClass.defaultParams.userVCL.content` | Default VCL for initial install (not overwritten on upgrade) | See values.yaml |
 | `gatewayClass.defaultParams.logging.enabled` | Enable logging | `true` |
 | `gatewayClass.defaultParams.logging.mode` | Logging mode (varnishlog or varnishncsa) | `varnishlog` |
 | `gatewayClass.defaultParams.varnishdExtraArgs` | Extra varnishd arguments | See values.yaml |
