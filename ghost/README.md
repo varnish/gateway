@@ -200,9 +200,10 @@ set bereq.backend = router.backend();
 
 Create a new ghost backend instance.
 
-Must be called after `ghost.init()` has been called. This creates
-a director with empty routing state. Backends will be populated
-on the first `reload()` call after chaperone generates ghost.json.
+Must be called after `ghost.init()` has been called. If the config
+file (ghost.json) already exists on disk, routing state is loaded
+immediately. Otherwise the director starts empty and backends will
+be populated on the first `reload()` call from chaperone.
 
 ##### Errors
 

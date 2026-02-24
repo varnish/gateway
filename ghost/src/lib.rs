@@ -332,9 +332,10 @@ mod ghost {
     impl ghost_backend {
         /// Create a new ghost backend instance.
         ///
-        /// Must be called after `ghost.init()` has been called. This creates
-        /// a director with empty routing state. Backends will be populated
-        /// on the first `reload()` call after chaperone generates ghost.json.
+        /// Must be called after `ghost.init()` has been called. If the config
+        /// file (ghost.json) already exists on disk, routing state is loaded
+        /// immediately. Otherwise the director starts empty and backends will
+        /// be populated on the first `reload()` call from chaperone.
         ///
         /// # Errors
         ///
@@ -349,21 +350,31 @@ mod ghost {
                 state.config_path.clone()
             };
 
-            // Don't load configuration here - it may not exist yet during startup.
-            // Start with empty vhost directors. The first reload() call from chaperone
-            // will populate backends after ghost.json is generated.
+            // Start with empty routing state
             use std::collections::HashMap;
-            let vhost_directors = director::VhostDirectorMap {
+            let empty_directors = director::VhostDirectorMap {
                 exact: HashMap::new(),
                 wildcards: Vec::new(),
             };
-
-            // Create empty backend pool
             let backend_pool = BackendPool::new();
 
-            // Create director (Arc-wrapped so we can clone for reload access)
             let (ghost_director_impl, not_found_backend, redirect_backend, internal_error_backend) =
-                GhostDirector::new(ctx, Arc::new(vhost_directors), backend_pool, config_path)?;
+                GhostDirector::new(ctx, Arc::new(empty_directors), backend_pool, config_path)?;
+
+            // Pre-load config if the file already exists on disk.
+            // On initial startup the file won't exist yet (chaperone hasn't
+            // generated it), so reload() returns an empty config — same as before.
+            // On VCL reload the file is already populated, so we get routing
+            // state immediately with no empty window between vcl.use and the
+            // next ghost reload from chaperone.
+            if let Err(e) = ghost_director_impl.reload(ctx) {
+                // Non-fatal: chaperone will trigger reload once ghost.json is ready
+                ctx.log(
+                    varnish::vcl::LogTag::Error,
+                    &format!("ghost init: pre-load skipped: {}", e),
+                );
+            }
+
             let ghost_director = Arc::new(ghost_director_impl);
             let shared_director = SharedGhostDirector(Arc::clone(&ghost_director));
             let director = Director::new(ctx, "ghost", name, shared_director)?;
