@@ -17,7 +17,7 @@ helm install varnish-gateway ./charts/varnish-gateway \
   --create-namespace
 ```
 
-### Install from OCI registry (when published)
+### Install from OCI registry
 
 ```bash
 helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
