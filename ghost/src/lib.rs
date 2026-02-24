@@ -371,7 +371,7 @@ mod ghost {
                 // Non-fatal: chaperone will trigger reload once ghost.json is ready
                 ctx.log(
                     varnish::vcl::LogTag::Error,
-                    &format!("ghost init: pre-load skipped: {}", e),
+                    format!("ghost init: pre-load skipped: {}", e),
                 );
             }
 
