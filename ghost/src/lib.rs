@@ -77,20 +77,10 @@ pub struct ghost_backend {
     _internal_error_backend: varnish::vcl::Backend<InternalErrorBackend, InternalErrorBody>,
 }
 
-/// Ghost VMOD - Gateway API routing for Varnish
+/// Ghost VMOD - Gateway API routing for Varnish.
 ///
-/// Ghost is a purpose-built Varnish VMOD for Kubernetes Gateway API implementation.
-/// It handles virtual host routing, backend selection, and configuration hot-reloading.
-///
-/// ## Features
-///
-/// - **Virtual host routing**: Route requests based on the Host header
-/// - **Exact hostname matching**: `api.example.com`
-/// - **Wildcard hostname matching**: `*.staging.example.com` (matches any subdomain depth, per Gateway API spec)
-/// - **Weighted backend selection**: Distribute traffic across backends by weight
-/// - **Hot configuration reload**: Update routing without restarting Varnish
-/// - **Default backend fallback**: Catch-all for unmatched requests
-/// - **Native backends**: Uses Varnish's built-in HTTP client for optimal performance
+/// Routes requests by hostname and path to weighted backends using Varnish native
+/// directors. Configuration is hot-reloaded from `ghost.json` without restarting Varnish.
 ///
 /// ## Minimal VCL Example
 ///
@@ -102,88 +92,20 @@ pub struct ghost_backend {
 /// backend dummy { .host = "127.0.0.1"; .port = "80"; }
 ///
 /// sub vcl_init {
-///     # Initialize ghost with the configuration file path
 ///     ghost.init("/etc/varnish/ghost.json");
-///
-///     # Create the ghost backend router
 ///     new router = ghost.ghost_backend();
 /// }
 ///
 /// sub vcl_recv {
-///     # Intercept reload requests (localhost only) and bypass cache
 ///     if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
 ///         return (pass);
 ///     }
 /// }
 ///
 /// sub vcl_backend_fetch {
-///     # Use ghost for backend selection based on Host header
-///     # Ghost handles reload requests internally, returning 200/500 status
 ///     set bereq.backend = router.backend();
 /// }
-///
-/// sub vcl_backend_error {
-///     # Handle cases where ghost director returns no backend
-///     if (beresp.status == 503) {
-///         set beresp.http.Content-Type = "application/json";
-///         synthetic({"{"error": "Backend selection failed"}"});
-///     }
-///     return (deliver);
-/// }
 /// ```
-///
-/// ## Configuration File Format (ghost.json)
-///
-/// ```json
-/// {
-///   "version": 2,
-///   "vhosts": {
-///     "api.example.com": {
-///       "routes": [
-///         {
-///           "path_match": {"type": "PathPrefix", "value": "/api"},
-///           "backends": [
-///             {"address": "10.0.0.1", "port": 8080, "weight": 100},
-///             {"address": "10.0.0.2", "port": 8080, "weight": 100}
-///           ],
-///           "priority": 100
-///         }
-///       ]
-///     },
-///     "*.staging.example.com": {
-///       "routes": [
-///         {
-///           "backends": [
-///             {"address": "10.0.2.1", "port": 8080, "weight": 100}
-///           ],
-///           "priority": 100
-///         }
-///       ],
-///       "default_backends": [
-///         {"address": "10.0.99.1", "port": 80, "weight": 100}
-///       ]
-///     }
-///   }
-/// }
-/// ```
-///
-/// ## Error Handling
-///
-/// When no backend is found (no vhost match and no default), the director returns `None`,
-/// causing Varnish to trigger `vcl_backend_error` with status 503. Handle this in your VCL
-/// to provide appropriate error responses.
-///
-/// ## Hot Reload
-///
-/// Trigger a configuration reload by sending:
-///
-/// ```bash
-/// curl -i http://localhost/.varnish-ghost/reload
-/// ```
-///
-/// Returns HTTP 200 on success, HTTP 500 on failure (with error in `x-ghost-error` header).
-/// The reload happens within the director, creating new backends as needed while preserving
-/// existing connections for unchanged backends.
 #[varnish::vmod(docs = "API.md")]
 mod ghost {
     use super::*;
@@ -225,22 +147,7 @@ mod ghost {
         Ok(())
     }
 
-    /// Pre-routing hook for `vcl_recv`.
-    ///
-    /// Reserved for future use in vcl_recv for request inspection and potential
-    /// modification. Currently returns None (no action).
-    ///
-    /// # Future Use Cases
-    ///
-    /// This will enable:
-    /// - URL normalization/rewriting (may require &mut Ctx for bereq modification)
-    /// - Authentication checks (read-only)
-    /// - Rate limiting decisions (read-only with external state)
-    ///
-    /// # Note
-    ///
-    /// The ctx parameter is currently unused but kept for API stability.
-    /// Future implementations may need mutable access for request modification.
+    /// Pre-routing hook for `vcl_recv`. Currently a no-op, reserved for future use.
     #[allow(unused_variables)]
     pub fn recv(ctx: &Ctx) -> Option<String> {
         // Placeholder for future URL rewriting logic
@@ -390,20 +297,8 @@ mod ghost {
 
         /// Get the VCL backend for use in `vcl_backend_fetch`.
         ///
-        /// When this backend is used, ghost will:
-        /// 1. Match the request's Host header against configured virtual hosts
-        /// 2. Select a backend using weighted random selection
-        /// 3. Return a native Varnish backend pointer for the selected endpoint
-        /// 4. Varnish handles the actual HTTP request and connection pooling
-        ///
-        /// If no backend is found, returns `None` which causes `vcl_backend_error`
-        /// with status 503.
-        ///
-        /// # Safety
-        ///
-        /// This function returns a raw VCL_BACKEND pointer that must only be used
-        /// within VCL backend fetch context. The pointer is valid for the lifetime
-        /// of the ghost_backend object.
+        /// Matches the Host header against configured virtual hosts, selects a
+        /// backend by weighted random, and returns a native Varnish backend.
         ///
         /// # Example
         ///
@@ -447,28 +342,7 @@ mod ghost {
             self.ghost_director.reload(ctx).is_ok()
         }
 
-        /// Get the last reload error message.
-        ///
-        /// Returns the error message from the most recent failed reload attempt,
-        /// or an empty string if the last reload succeeded or no reload has been attempted.
-        ///
-        /// # Returns
-        ///
-        /// The error message as a string, or empty string if no error.
-        ///
-        /// # Example
-        ///
-        /// ```vcl
-        /// sub vcl_recv {
-        ///     if (req.url == "/.varnish-ghost/reload") {
-        ///         if (!router.reload()) {
-        ///             set req.http.X-Ghost-Error = router.last_error();
-        ///             return (synth(500, req.http.X-Ghost-Error));
-        ///         }
-        ///         return (synth(200, "OK"));
-        ///     }
-        /// }
-        /// ```
+        /// Get the last reload error message, or empty string if no error.
         pub fn last_error(&self) -> String {
             self.ghost_director.last_error().unwrap_or_default()
         }

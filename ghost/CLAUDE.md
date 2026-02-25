@@ -1,7 +1,7 @@
 # Ghost VMOD
 
-Rust vmod for Varnish Gateway API routing. See `ghost-vmod.md` for full plan and `README.md` for auto-generated API
-documentation.
+Rust vmod for Varnish Gateway API routing. See `ghost-vmod.md` for full plan and `API.md` for auto-generated API
+reference.
 
 ## Monorepo Structure
 
