@@ -307,6 +307,12 @@ mod ghost {
         ///     set bereq.backend = router.backend();
         /// }
         /// ```
+        ///
+        /// # Safety
+        ///
+        /// The returned `VCL_BACKEND` pointer is only valid for the lifetime of
+        /// this director. Callers must ensure the director is not dropped while
+        /// the backend pointer is in use.
         pub unsafe fn backend(&self) -> VCL_BACKEND {
             self.director.as_ref().vcl_ptr()
         }

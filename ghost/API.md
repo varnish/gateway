@@ -131,6 +131,12 @@ set bereq.backend = router.backend();
 }
 ```
 
+##### Safety
+
+The returned `VCL_BACKEND` pointer is only valid for the lifetime of
+this director. Callers must ensure the director is not dropped while
+the backend pointer is in use.
+
 #### Method `BOOL <object>.reload()`
 
 Reload the configuration for this ghost backend.
