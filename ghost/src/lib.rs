@@ -184,7 +184,7 @@ pub struct ghost_backend {
 /// Returns HTTP 200 on success, HTTP 500 on failure (with error in `x-ghost-error` header).
 /// The reload happens within the director, creating new backends as needed while preserving
 /// existing connections for unchanged backends.
-#[varnish::vmod(docs = "README.md")]
+#[varnish::vmod(docs = "API.md")]
 mod ghost {
     use super::*;
     use varnish::ffi::VCL_BACKEND;
