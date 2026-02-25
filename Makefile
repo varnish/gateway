@@ -201,8 +201,8 @@ endif
 
 deploy-update:
 	@echo "Updating deploy/01-operator.yaml to version $(VERSION)"
-	@sed -i 's|gateway-operator:[v0-9.]*|gateway-operator:$(VERSION)|' deploy/01-operator.yaml
-	@sed -i 's|gateway-chaperone:[v0-9.]*"|gateway-chaperone:$(VERSION)"|' deploy/01-operator.yaml
+	@sed -i '' 's|gateway-operator:[v0-9.]*|gateway-operator:$(VERSION)|' deploy/01-operator.yaml
+	@sed -i '' 's|gateway-chaperone:[v0-9.]*"|gateway-chaperone:$(VERSION)"|' deploy/01-operator.yaml
 
 deploy: deploy-update
 	kubectl apply -f deploy/00-prereqs.yaml -f deploy/01-operator.yaml -f deploy/02-chaperone-rbac.yaml -f deploy/03-gatewayclass.yaml
