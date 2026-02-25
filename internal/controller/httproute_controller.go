@@ -44,9 +44,14 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	var route gatewayv1.HTTPRoute
 	if err := r.Get(ctx, req.NamespacedName, &route); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Route deleted - nothing to do here. The Gateway controller's
-			// HTTPRoute watch will trigger re-reconciliation of affected Gateways
-			// to update AttachedRoutes counts.
+			// Route was deleted. We can't read its parentRefs, so regenerate
+			// routing.json for all our Gateways to remove any stale entries.
+			// The Gateway controller's HTTPRoute watch separately handles
+			// updating AttachedRoutes counts.
+			if err := r.regenerateAllGateways(ctx); err != nil {
+				log.Error("failed to regenerate routing after route deletion", "error", err)
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
@@ -586,6 +591,32 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		"routes", len(routes),
 		"backends", len(collectedRoutes))
 
+	return nil
+}
+
+// regenerateAllGateways lists all Gateways managed by our GatewayClass and
+// regenerates routing.json for each. This is called when an HTTPRoute is deleted
+// and we can no longer read its parentRefs to know which Gateway was affected.
+// The no-op check in updateConfigMap avoids unnecessary writes for unaffected Gateways.
+func (r *HTTPRouteReconciler) regenerateAllGateways(ctx context.Context) error {
+	var gatewayList gatewayv1.GatewayList
+	if err := r.List(ctx, &gatewayList); err != nil {
+		return fmt.Errorf("List(GatewayList): %w", err)
+	}
+
+	for i := range gatewayList.Items {
+		gw := &gatewayList.Items[i]
+		if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+			continue
+		}
+		routes, err := r.listRoutesForGateway(ctx, gw)
+		if err != nil {
+			return fmt.Errorf("listRoutesForGateway(%s/%s): %w", gw.Namespace, gw.Name, err)
+		}
+		if err := r.updateConfigMap(ctx, gw, routes); err != nil {
+			return fmt.Errorf("updateConfigMap(%s/%s): %w", gw.Namespace, gw.Name, err)
+		}
+	}
 	return nil
 }
 

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -477,6 +478,145 @@ func TestHTTPRouteReconcile_NotFoundReturnsNoError(t *testing.T) {
 	}
 	if result.Requeue {
 		t.Error("expected no requeue for not found route")
+	}
+}
+
+func TestReconcile_DeletedRouteUpdatesRoutingJSON(t *testing.T) {
+	scheme := newTestScheme()
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway-vcl",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"main.vcl":     "vcl 4.1;",
+			"routing.json": `{"version": 2, "vhosts": {}}`,
+		},
+	}
+
+	route1 := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "route-1",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Name: "test-gateway"},
+				},
+			},
+			Hostnames: []gatewayv1.Hostname{"api.example.com"},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "api-svc",
+									Port: ptr(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	route2 := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "route-2",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Name: "test-gateway"},
+				},
+			},
+			Hostnames: []gatewayv1.Hostname{"web.example.com"},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "web-svc",
+									Port: ptr(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gateway, configMap, route1, route2)
+
+	// Step 1: Reconcile route-1 to populate routing.json with both routes
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "route-1", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile route-1 failed: %v", err)
+	}
+
+	// Verify both hostnames are in routing.json
+	var cm corev1.ConfigMap
+	if err := r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway-vcl", Namespace: "default"}, &cm); err != nil {
+		t.Fatalf("failed to get ConfigMap: %v", err)
+	}
+	routingJSON := cm.Data["routing.json"]
+	if !strings.Contains(routingJSON, "api.example.com") {
+		t.Fatal("expected routing.json to contain api.example.com before deletion")
+	}
+	if !strings.Contains(routingJSON, "web.example.com") {
+		t.Fatal("expected routing.json to contain web.example.com before deletion")
+	}
+
+	// Step 2: Delete route-1 from the API
+	if err := r.Delete(context.Background(), route1); err != nil {
+		t.Fatalf("failed to delete route-1: %v", err)
+	}
+
+	// Step 3: Reconcile the deleted route (simulates the deletion event)
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "route-1", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile deleted route failed: %v", err)
+	}
+	if result.Requeue {
+		t.Error("expected no requeue for deleted route")
+	}
+
+	// Step 4: Verify routing.json no longer contains the deleted route
+	if err := r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway-vcl", Namespace: "default"}, &cm); err != nil {
+		t.Fatalf("failed to get ConfigMap after deletion: %v", err)
+	}
+	routingJSON = cm.Data["routing.json"]
+	if strings.Contains(routingJSON, "api.example.com") {
+		t.Errorf("expected routing.json to NOT contain api.example.com after deletion, got: %s", routingJSON)
+	}
+	if !strings.Contains(routingJSON, "web.example.com") {
+		t.Errorf("expected routing.json to still contain web.example.com after deletion, got: %s", routingJSON)
 	}
 }
 
