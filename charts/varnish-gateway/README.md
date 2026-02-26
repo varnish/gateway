@@ -11,7 +11,7 @@ This Helm chart installs the Varnish Gateway operator, which implements the Kube
 
 ```bash
 helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
-  --version 0.9.2 \
+  --version 0.x.y \
   --namespace varnish-gateway-system \
   --create-namespace
 ```
@@ -71,8 +71,8 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 
 ```bash
 helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
-  --set operator.image.tag=v0.8.0 \
-  --set chaperone.image.tag=v0.8.0
+  --set operator.image.tag=v0.x.y \
+  --set chaperone.image.tag=v0.x.y
 ```
 
 ### Install without Gateway API CRDs
