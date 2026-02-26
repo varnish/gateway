@@ -14,7 +14,7 @@ ghcr.io/varnish/gateway-operator
 ghcr.io/varnish/gateway-chaperone
 ```
 
-Images are public and require no authentication to pull.
+Images are public and require no authentication to pull. Currently amd64 only.
 
 ## Architecture
 
