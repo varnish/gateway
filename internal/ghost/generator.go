@@ -95,6 +95,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 		headers     string // JSON serialization of Headers
 		queryParams string // JSON serialization of QueryParams
 		filters     string // JSON serialization of Filters
+		listeners   string // sorted, comma-joined
 		priority    int
 		ruleIndex   int
 	}
@@ -107,6 +108,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			headers:     serializeHeaders(route.Headers),
 			queryParams: serializeQueryParams(route.QueryParams),
 			filters:     serializeFilters(route.Filters),
+			listeners:   serializeListeners(route.Listeners),
 			priority:    route.Priority,
 			ruleIndex:   route.RuleIndex,
 		}
@@ -134,6 +136,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			QueryParams: firstRoute.QueryParams,
 			Filters:     firstRoute.Filters,
 			Backends:    allBackends,
+			Listeners:   firstRoute.Listeners,
 			Priority:    key.priority,
 			RuleIndex:   key.ruleIndex,
 		})
@@ -189,6 +192,14 @@ func serializeFilters(filters *RouteFilters) string {
 	}
 	data, _ := json.Marshal(filters)
 	return string(data)
+}
+
+// serializeListeners converts listeners to string for grouping.
+func serializeListeners(listeners []string) string {
+	if len(listeners) == 0 {
+		return ""
+	}
+	return strings.Join(listeners, ",")
 }
 
 // Generate creates a ghost.json Config by merging routing rules with discovered endpoints.

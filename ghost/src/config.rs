@@ -139,6 +139,10 @@ pub struct Route {
     #[serde(default)]
     pub filters: Option<RouteFilters>,
     pub backends: Vec<Backend>,
+    /// Listener names this route applies to (e.g., ["http"], ["https"]).
+    /// Empty means match all listeners (backwards compatible).
+    #[serde(default)]
+    pub listeners: Vec<String>,
     pub priority: i32,
     #[serde(default)]
     pub rule_index: i32,

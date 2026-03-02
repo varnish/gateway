@@ -191,6 +191,9 @@ pub struct RouteEntry {
     pub query_params: Vec<QueryParamMatchCompiled>,
     pub filters: Option<Arc<crate::config::RouteFilters>>,
     pub backends: Vec<WeightedBackendRef>,
+    /// Listener names this route applies to (e.g., ["http"], ["https"]).
+    /// Empty means match all listeners.
+    pub listeners: Vec<String>,
     pub priority: i32,
     pub rule_index: i32,
 }
@@ -282,6 +285,7 @@ pub fn build_vhost_directors(
                 query_params,
                 filters,
                 backends: backend_refs,
+                listeners: route.listeners.clone(),
                 priority: route.priority,
                 rule_index: route.rule_index,
             });
@@ -311,6 +315,7 @@ pub fn build_vhost_directors(
                 query_params: Vec::new(),
                 filters: None,
                 backends: default_refs,
+                listeners: Vec::new(),
                 priority: 0,
                 rule_index: i32::MAX,
             });
@@ -485,6 +490,34 @@ impl GhostDirector {
         self.last_error.read().clone()
     }
 
+    /// Full routing in client context: hostname match → vhost → route → backend.
+    /// Returns (Option<BackendRef>, log_messages).
+    ///
+    /// Used by the recv() VMOD method to route requests in vcl_recv using
+    /// req headers and local_socket() for listener-aware routing.
+    pub fn route_request(
+        &self,
+        http: &mut HttpHeaders,
+        listener: Option<&str>,
+    ) -> (Option<BackendRef>, Vec<(LogTag, String)>) {
+        let host = match get_host_header(http) {
+            Some(h) => h,
+            None => return (None, Vec::new()),
+        };
+
+        let directors = self.vhost_directors.load();
+        let vhost = match match_hostname(&directors, &host) {
+            Some(dir) => dir,
+            None => return (Some(self.not_found_backend.0.clone()), Vec::new()),
+        };
+
+        let (result, log_msgs) = vhost.route_request(http, listener);
+        match result {
+            Some(backend) => (Some(backend), log_msgs),
+            None => (Some(self.not_found_backend.0.clone()), log_msgs),
+        }
+    }
+
     /// JSON output format for backend.list -j
     fn list_json(&self, ctx: &mut Ctx, vsb: &mut Buffer) {
         let directors = self.vhost_directors.load();
@@ -527,34 +560,12 @@ impl GhostDirector {
 
 impl VclDirector for GhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
-        // Get bereq for Host header extraction
-        let bereq = ctx.http_bereq.as_ref()?;
-
-        // Get Host header
-        let host = get_host_header(bereq)?;
-
-        // Load vhost directors (lock-free atomic load)
-        let directors = self.vhost_directors.load();
-
-        // Match hostname to vhost director
-        let vhost_director = match match_hostname(&directors, &host) {
-            Some(dir) => dir,
-            None => {
-                // No vhost found for this hostname
-                // Return 404 backend
-                return Some(self.not_found_backend.0.clone());
-            }
-        };
-
-        // Delegate to vhost director for route matching and backend selection
-        match vhost_director.resolve(ctx) {
-            Some(backend) => Some(backend),
-            None => {
-                // No backend found for this path/method/headers
-                // Return 404 backend
-                Some(self.not_found_backend.0.clone())
-            }
+        let bereq = ctx.http_bereq.as_mut()?;
+        let (result, log_msgs) = self.route_request(bereq, None);
+        for (tag, msg) in log_msgs {
+            ctx.log(tag, &msg);
         }
+        result
     }
 
     fn probe(&self, ctx: &mut Ctx) -> ProbeResult {

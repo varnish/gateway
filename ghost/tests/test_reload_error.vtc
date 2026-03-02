@@ -33,6 +33,7 @@ varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
                 return (synth(500, "Reload failed"));
             }
         }
+        set req.backend_hint = router.recv();
     }
 
     sub vcl_synth {
@@ -49,9 +50,6 @@ varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
         }
     }
 
-    sub vcl_backend_fetch {
-        set bereq.backend = router.backend();
-    }
 } -start
 
 # Test reload with invalid config

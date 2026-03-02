@@ -57,12 +57,14 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 		t.Error("expected router.reload() call for reload requests")
 	}
 
-	// Check vcl_backend_fetch
-	if !strings.Contains(result, "sub vcl_backend_fetch {") {
-		t.Error("expected vcl_backend_fetch subroutine")
+	// Check vcl_recv uses router.recv() for routing
+	if !strings.Contains(result, "router.recv()") {
+		t.Error("expected router.recv() call in vcl_recv")
 	}
-	if !strings.Contains(result, "router.backend()") {
-		t.Error("expected router.backend() call")
+
+	// vcl_backend_fetch should NOT contain ghost routing (routing is in vcl_recv now)
+	if strings.Contains(result, "sub vcl_backend_fetch {") {
+		t.Error("vcl_backend_fetch should not be generated (routing moved to vcl_recv)")
 	}
 
 	// Check user VCL marker
@@ -329,7 +331,7 @@ func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, "default")
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default")
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -556,7 +558,7 @@ func TestMethodMatchingConformanceFullPipeline(t *testing.T) {
 	}
 
 	// Step 1: CollectHTTPRouteBackends (what the operator does)
-	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, ns)
+	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, nil, ns)
 
 	t.Logf("CollectHTTPRouteBackends produced %d routes:", len(collectedRoutes))
 	for i, r := range collectedRoutes {
@@ -743,7 +745,7 @@ func TestCollectHTTPRouteBackends_NoMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, "default")
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default")
 
 	if len(collectedRoutes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(collectedRoutes))

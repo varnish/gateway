@@ -65,11 +65,11 @@ sub vcl_recv {
             return (synth(500, "Reload failed"));
         }
     }
+    set req.backend_hint = router.recv();
 }
 
 sub vcl_backend_fetch {
     std.log("BEFORE: bereq.url=" + bereq.url);
-    set bereq.backend = router.backend();
     std.log("AFTER: bereq.url=" + bereq.url);
 }
 VCLEOF

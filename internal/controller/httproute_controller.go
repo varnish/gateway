@@ -540,7 +540,7 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	filteredRoutes := filterRouteHostnames(routes, gateway)
 
 	// Generate routing.json for ghost with path-based routing
-	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway.Namespace)
+	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace)
 
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)

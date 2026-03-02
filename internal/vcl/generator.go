@@ -38,7 +38,7 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    new router = ghost.ghost_backend();\n")
 	sb.WriteString("}\n\n")
 
-	// Generate vcl_recv - intercept reload requests
+	// Generate vcl_recv - intercept reload requests + route via ghost
 	sb.WriteString("sub vcl_recv {\n")
 	sb.WriteString("    # Handle reload endpoint (localhost only)\n")
 	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\" && (client.ip == \"127.0.0.1\" || client.ip == \"::1\")) {\n")
@@ -49,6 +49,8 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("            return (synth(500, \"Reload failed\"));\n")
 	sb.WriteString("        }\n")
 	sb.WriteString("    }\n")
+	sb.WriteString("    # Route request using ghost (listener-aware)\n")
+	sb.WriteString("    set req.backend_hint = router.recv();\n")
 	sb.WriteString("}\n\n")
 
 	// Generate vcl_synth - surface reload errors
@@ -61,14 +63,9 @@ func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	sb.WriteString("    }\n")
 	sb.WriteString("}\n\n")
 
-	// Generate vcl_backend_fetch
-	sb.WriteString("sub vcl_backend_fetch {\n")
-	sb.WriteString("    set bereq.backend = router.backend();\n")
-	sb.WriteString("}\n\n")
-
-	// Generate vcl_backend_response - copy filter context to beresp
+	// Generate vcl_backend_response - copy filter context from req to beresp
 	sb.WriteString("sub vcl_backend_response {\n")
-	sb.WriteString("    # Copy filter context from bereq to beresp for vcl_deliver\n")
+	sb.WriteString("    # Copy filter context from req to beresp for vcl_deliver\n")
 	sb.WriteString("    if (bereq.http.X-Ghost-Filter-Context) {\n")
 	sb.WriteString("        set beresp.http.X-Ghost-Filter-Context = bereq.http.X-Ghost-Filter-Context;\n")
 	sb.WriteString("    }\n")
@@ -142,7 +139,8 @@ func CalculateRoutePriority(
 
 // CollectHTTPRouteBackends extracts backend and path match information from HTTPRoutes for config generation.
 // Returns a list of Route structs that include path matching rules.
-func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []ghost.Route {
+// When gateway is provided, listener information is computed for each route based on parentRef sectionNames.
+func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, namespace string) []ghost.Route {
 	var collectedRoutes []ghost.Route
 
 	ruleIndex := 0
@@ -151,6 +149,9 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 		if routeNS == "" {
 			routeNS = namespace
 		}
+
+		// Compute which listeners this route applies to
+		listeners := listenersForRoute(&route, gateway)
 
 		// When no hostnames are specified, the route matches all hostnames.
 		// Use "*" as a sentinel that ghost VMOD treats as a catch-all.
@@ -187,6 +188,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 							Namespace: routeNS,
 							Port:      0,
 							Weight:    0,
+							Listeners: listeners,
 							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
 							RuleIndex: ruleIndex,
 						})
@@ -226,6 +228,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 							Namespace: backendNS,
 							Port:      port,
 							Weight:    weight,
+							Listeners: listeners,
 							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
 							RuleIndex: ruleIndex,
 						})
@@ -338,6 +341,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 									Namespace:   routeNS,
 									Port:        0,
 									Weight:      0,
+									Listeners:   listeners,
 									Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
 									RuleIndex:   ruleIndex,
 								})
@@ -376,6 +380,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, namespace string) []
 								Namespace:   backendNS,
 								Port:        port,
 								Weight:      weight,
+								Listeners:   listeners,
 								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
 								RuleIndex:   ruleIndex,
 							})
@@ -519,5 +524,79 @@ func convertRequestRedirectFilter(f *gatewayv1.HTTPRequestRedirectFilter) *ghost
 		port := int(*f.Port)
 		result.Port = &port
 	}
+	return result
+}
+
+// socketNameForProtocol maps Gateway API protocol types to Varnish listener socket names.
+// These names correspond to the -a flag socket names used when configuring Varnish listeners.
+func socketNameForProtocol(protocol gatewayv1.ProtocolType) string {
+	switch protocol {
+	case gatewayv1.HTTPSProtocolType, gatewayv1.TLSProtocolType:
+		return "https"
+	default:
+		return "http"
+	}
+}
+
+// listenersForRoute computes which Varnish listeners a route applies to based on its
+// parentRef sectionNames and the Gateway's listener configuration.
+// Returns nil if the route applies to all listeners (no filtering needed).
+func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) []string {
+	if gateway == nil {
+		return nil
+	}
+
+	// Build map: listener name → socket name
+	listenerSockets := make(map[string]string)
+	for _, l := range gateway.Spec.Listeners {
+		listenerSockets[string(l.Name)] = socketNameForProtocol(l.Protocol)
+	}
+
+	// Collect socket names from parentRefs targeting this gateway
+	socketSet := make(map[string]bool)
+	hasSectionName := false
+	for _, parentRef := range route.Spec.ParentRefs {
+		// Skip non-Gateway refs
+		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+			continue
+		}
+		// Check this parentRef targets the given gateway
+		if string(parentRef.Name) != gateway.Name {
+			continue
+		}
+		refNS := route.Namespace
+		if parentRef.Namespace != nil {
+			refNS = string(*parentRef.Namespace)
+		}
+		if refNS != gateway.Namespace {
+			continue
+		}
+
+		if parentRef.SectionName == nil {
+			// No sectionName = all listeners
+			return nil
+		}
+		hasSectionName = true
+		sn := string(*parentRef.SectionName)
+		if socket, ok := listenerSockets[sn]; ok {
+			socketSet[socket] = true
+		}
+	}
+
+	if !hasSectionName {
+		return nil
+	}
+
+	// If the route covers both http and https, that's the same as all listeners
+	if socketSet["http"] && socketSet["https"] {
+		return nil
+	}
+
+	// Build sorted result
+	var result []string
+	for s := range socketSet {
+		result = append(result, s)
+	}
+	slices.Sort(result)
 	return result
 }

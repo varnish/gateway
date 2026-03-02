@@ -29,12 +29,14 @@ new router = ghost.ghost_backend();
 
 sub vcl_recv {
 if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
-return (pass);
+if (router.reload()) {
+return (synth(200, "OK"));
+} else {
+set req.http.X-Ghost-Error = router.last_error();
+return (synth(500, "Reload failed"));
 }
 }
-
-sub vcl_backend_fetch {
-set bereq.backend = router.backend();
+set req.backend_hint = router.recv();
 }
 ```
 
@@ -116,12 +118,34 @@ be populated on the first `reload()` call from chaperone.
 
 Returns an error if `ghost.init()` has not been called first.
 
+#### Method `BACKEND <object>.recv()`
+
+Route the request in `vcl_recv` context.
+
+Performs full routing (hostname → vhost → route → backend) using
+`req` headers and `local.socket` for listener-aware routing.
+Returns a concrete backend, not a director.
+
+##### Example
+
+```vcl
+sub vcl_recv {
+set req.backend_hint = router.recv();
+}
+```
+
+##### Safety
+
+The returned `VCL_BACKEND` pointer is only valid for the lifetime of
+this director. Callers must ensure the director is not dropped while
+the backend pointer is in use.
+
 #### Method `BACKEND <object>.backend()`
 
-Get the VCL backend for use in `vcl_backend_fetch`.
+Get the VCL backend (director) for use in `vcl_backend_fetch`.
 
-Matches the Host header against configured virtual hosts, selects a
-backend by weighted random, and returns a native Varnish backend.
+Returns the ghost director which resolves backends in backend
+context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
 
 ##### Example
 

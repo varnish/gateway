@@ -200,16 +200,26 @@ impl VhostDirector {
         let json_str = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
         let _ = vsb.write(&json_str);
     }
-}
 
-impl VclDirector for VhostDirector {
-    fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
-        // Extract request components (owned strings to avoid borrow conflicts with ctx.log)
+    /// Route a request using the given HTTP headers.
+    /// Returns (Option<BackendRef>, log_messages).
+    ///
+    /// This is the core routing logic extracted from resolve() so it can work
+    /// with either req (vcl_recv) or bereq (vcl_backend_fetch) headers.
+    /// The listener parameter comes from ctx.local_socket() and filters routes
+    /// by which Varnish listener received the request.
+    /// Log messages are collected and returned so the caller can emit them
+    /// (avoids borrow conflicts between HttpHeaders and Ctx).
+    pub fn route_request(
+        &self,
+        http: &mut HttpHeaders,
+        listener: Option<&str>,
+    ) -> (Option<BackendRef>, Vec<(LogTag, String)>) {
+        let mut log_msgs: Vec<(LogTag, String)> = Vec::new();
+
+        // Extract request components (owned strings to avoid borrow conflicts)
         let (path_owned, query_string_owned, method_owned) = {
-            let bereq = ctx.http_bereq.as_ref()?;
-
-            // Extract URL from bereq
-            let url = bereq
+            let url = http
                 .url()
                 .and_then(|u| match u {
                     StrOrBytes::Utf8(s) => Some(s),
@@ -217,11 +227,9 @@ impl VclDirector for VhostDirector {
                 })
                 .unwrap_or("/");
 
-            // Extract path and query string (borrow from url)
             let (path, query_string) = extract_path_and_query(url);
 
-            // Extract method
-            let method = bereq
+            let method = http
                 .method()
                 .and_then(|m| match m {
                     StrOrBytes::Utf8(s) => Some(s),
@@ -229,7 +237,6 @@ impl VclDirector for VhostDirector {
                 })
                 .unwrap_or("GET");
 
-            // Clone to owned strings
             (
                 path.to_string(),
                 query_string.map(|s| s.to_string()),
@@ -237,17 +244,18 @@ impl VclDirector for VhostDirector {
             )
         };
 
-        // Re-borrow bereq for route matching
-        let bereq = ctx.http_bereq.as_ref()?;
-
         // Match routes (already sorted by priority)
-        let match_result = match_routes(
+        let match_result = match match_routes(
             &self.routes,
             &path_owned,
             &method_owned,
-            bereq,
+            http,
             query_string_owned.as_deref(),
-        )?;
+            listener,
+        ) {
+            Some(r) => r,
+            None => return (None, log_msgs),
+        };
         let backend_refs = match_result.backends;
         let matched_filters = match_result.filters.as_ref();
 
@@ -255,14 +263,11 @@ impl VclDirector for VhostDirector {
         if let Some(filters) = matched_filters {
             // RequestRedirect - takes precedence over all other filters
             if let Some(redirect_filter) = &filters.request_redirect {
-                ctx.log(LogTag::Debug, "Applying request redirect filter");
+                log_msgs.push((LogTag::Debug, "Applying request redirect filter".to_string()));
 
-                // Extract original request components from bereq
+                // Extract original request components
                 let (original_scheme, original_hostname, original_port) = {
-                    let bereq_mut = ctx.http_bereq.as_ref()?;
-
-                    // Get Host header and parse host:port
-                    let host_header = bereq_mut
+                    let host_header = http
                         .header("Host")
                         .and_then(|h| match h {
                             StrOrBytes::Utf8(s) => Some(s),
@@ -271,17 +276,15 @@ impl VclDirector for VhostDirector {
                         .unwrap_or("localhost");
                     let (hostname, port_opt) = parse_host_and_port(host_header);
 
-                    // Get scheme from X-Forwarded-Proto or default to http
-                    let scheme = bereq_mut
-                        .header("X-Forwarded-Proto")
-                        .and_then(|h| match h {
-                            StrOrBytes::Utf8(s) => Some(s),
-                            StrOrBytes::Bytes(b) => std::str::from_utf8(b).ok(),
-                        })
-                        .unwrap_or("http");
+                    // Determine scheme from listener name (authoritative)
+                    let scheme = if listener == Some("https") {
+                        "https"
+                    } else {
+                        "http"
+                    };
 
-                    // Determine port (u16)
-                    let port = port_opt.unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
+                    let port =
+                        port_opt.unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
 
                     (scheme.to_string(), hostname.to_string(), port)
                 };
@@ -290,10 +293,9 @@ impl VclDirector for VhostDirector {
                 let matched_path_str = match_result.matched_path.and_then(|pm| match pm {
                     PathMatchCompiled::PathPrefix(prefix) => Some(prefix.clone()),
                     PathMatchCompiled::Exact(path) => Some(path.clone()),
-                    PathMatchCompiled::Regex(_) => None, // Can't extract from regex
+                    PathMatchCompiled::Regex(_) => None,
                 });
 
-                // Store redirect configuration in internal header
                 let redirect_config = RedirectConfig {
                     filter: redirect_filter.clone(),
                     original_scheme,
@@ -307,46 +309,45 @@ impl VclDirector for VhostDirector {
                 let config_json = match serde_json::to_string(&redirect_config) {
                     Ok(json) => json,
                     Err(e) => {
-                        ctx.log(
+                        log_msgs.push((
                             LogTag::Error,
                             format!("Failed to serialize redirect config: {}", e),
-                        );
-                        return None;
+                        ));
+                        return (None, log_msgs);
                     }
                 };
 
-                let bereq_mut = ctx.http_bereq.as_mut()?;
-                if let Err(e) = bereq_mut.set_header("X-Ghost-Redirect-Config", &config_json) {
-                    ctx.log(
+                if let Err(e) = http.set_header("X-Ghost-Redirect-Config", &config_json) {
+                    log_msgs.push((
                         LogTag::Error,
                         format!("Failed to set redirect config header: {}", e),
-                    );
-                    return None;
+                    ));
+                    return (None, log_msgs);
                 }
 
-                // Return redirect backend ref
-                return self.redirect_backend.as_ref().map(|r| r.0.clone());
+                return (
+                    self.redirect_backend.as_ref().map(|r| r.0.clone()),
+                    log_msgs,
+                );
             }
 
             // Apply other filters only if NOT redirecting
-            // RequestHeaderModifier
             if let Some(req_header_mod) = &filters.request_header_modifier {
-                let _ = apply_request_header_filter(ctx, req_header_mod);
+                let _ = apply_request_header_filter(http, req_header_mod);
             }
 
-            // URLRewrite
             if let Some(url_rewrite) = &filters.url_rewrite {
-                ctx.log(LogTag::Debug, "Applying URL rewrite filter");
-                if let Err(e) =
-                    apply_url_rewrite_filter(ctx, url_rewrite, match_result.matched_path)
-                {
-                    ctx.log(LogTag::Error, format!("URL rewrite failed: {}", e));
+                log_msgs.push((LogTag::Debug, "Applying URL rewrite filter".to_string()));
+                match apply_url_rewrite_filter(http, url_rewrite, match_result.matched_path) {
+                    Ok(msgs) => log_msgs.extend(msgs),
+                    Err(e) => {
+                        log_msgs.push((LogTag::Error, format!("URL rewrite failed: {}", e)));
+                    }
                 }
             }
 
-            // Store response filter context
             if filters.response_header_modifier.is_some() {
-                let _ = store_filter_context(ctx, filters);
+                let _ = store_filter_context(http, filters);
             }
         }
 
@@ -354,8 +355,10 @@ impl VclDirector for VhostDirector {
         let backend_ref = match select_backend_weighted(backend_refs) {
             Some(br) => br,
             None => {
-                // Route matched but no backends available — return 500
-                return self.internal_error_backend.as_ref().map(|r| r.0.clone());
+                return (
+                    self.internal_error_backend.as_ref().map(|r| r.0.clone()),
+                    log_msgs,
+                );
             }
         };
 
@@ -363,9 +366,26 @@ impl VclDirector for VhostDirector {
         self.stats.record_request(&backend_ref.key);
 
         // Look up in backend pool
-        let backend = self.backend_pool.get(&backend_ref.key)?;
+        let backend = match self.backend_pool.get(&backend_ref.key) {
+            Some(b) => b,
+            None => return (None, log_msgs),
+        };
 
-        Some(AsRef::<BackendRef>::as_ref(&*backend).clone())
+        (
+            Some(AsRef::<BackendRef>::as_ref(&*backend).clone()),
+            log_msgs,
+        )
+    }
+}
+
+impl VclDirector for VhostDirector {
+    fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
+        let bereq = ctx.http_bereq.as_mut()?;
+        let (result, log_msgs) = self.route_request(bereq, None);
+        for (tag, msg) in log_msgs {
+            ctx.log(tag, &msg);
+        }
+        result
     }
 
     fn probe(&self, _ctx: &mut Ctx) -> ProbeResult {
@@ -395,15 +415,25 @@ impl VclDirector for VhostDirector {
 }
 
 /// Match routes against all conditions (already sorted by priority)
-/// All conditions within a match are AND-ed together
+/// All conditions within a match are AND-ed together.
+/// The listener parameter filters routes by which Varnish listener received the request.
 fn match_routes<'a>(
     routes: &'a [RouteEntry],
     path: &str,
     method: &str,
-    bereq: &HttpHeaders,
+    http: &HttpHeaders,
     query_string: Option<&str>,
+    listener: Option<&str>,
 ) -> Option<RouteMatchResult<'a>> {
     for route in routes {
+        // Listener filter (empty = match all)
+        if !route.listeners.is_empty() {
+            match listener {
+                Some(l) if route.listeners.iter().any(|rl| rl == l) => {}
+                _ => continue,
+            }
+        }
+
         // Check path match
         if let Some(ref pm) = route.path_match {
             if !pm.matches(path) {
@@ -419,7 +449,7 @@ fn match_routes<'a>(
         }
 
         // Check header matches (all must match - AND)
-        if !route.headers.iter().all(|hm| hm.matches(bereq)) {
+        if !route.headers.iter().all(|hm| hm.matches(http)) {
             continue;
         }
 
@@ -597,6 +627,7 @@ mod tests {
                 key: "10.0.0.1:8080".to_string(),
                 weight: 100,
             }],
+            listeners: Vec::new(),
             priority: 100,
             rule_index: 0,
         }];
@@ -620,6 +651,7 @@ mod tests {
                 key: "10.0.0.1:8080".to_string(),
                 weight: 100,
             }],
+            listeners: Vec::new(),
             priority: 100,
             rule_index: 0,
         }];
@@ -646,6 +678,7 @@ mod tests {
                     key: "10.0.0.1:8080".to_string(),
                     weight: 100,
                 }],
+                listeners: Vec::new(),
                 priority: 100,
                 rule_index: 0,
             }],
@@ -744,58 +777,52 @@ mod tests {
 }
 
 fn apply_request_header_filter(
-    ctx: &mut Ctx,
+    http: &mut HttpHeaders,
     filter: &crate::config::RequestHeaderFilter,
 ) -> Result<(), VclError> {
-    let bereq = ctx
-        .http_bereq
-        .as_mut()
-        .ok_or_else(|| VclError::new("no bereq".to_string()))?;
-
     // Remove headers
     for name in &filter.remove {
-        bereq.unset_header(name);
+        http.unset_header(name);
     }
 
     // Set headers (replaces) — must unset first since set_header() appends
     for action in &filter.set {
-        bereq.unset_header(&action.name);
-        bereq.set_header(&action.name, &action.value)?;
+        http.unset_header(&action.name);
+        http.set_header(&action.name, &action.value)?;
     }
 
     // Add headers (appends to existing value per Gateway API spec)
     // Must unset+set to avoid duplicate header slots
     for action in &filter.add {
-        if let Some(existing) = bereq.header(&action.name) {
+        if let Some(existing) = http.header(&action.name) {
             let existing_str = match existing {
                 StrOrBytes::Utf8(s) => s.to_string(),
                 StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
             };
             let combined = format!("{},{}", existing_str, action.value);
-            bereq.unset_header(&action.name);
-            bereq.set_header(&action.name, &combined)?;
+            http.unset_header(&action.name);
+            http.set_header(&action.name, &combined)?;
         } else {
-            bereq.set_header(&action.name, &action.value)?;
+            http.set_header(&action.name, &action.value)?;
         }
     }
 
     Ok(())
 }
 
+/// Apply URL rewrite filter to HTTP headers.
+/// Returns a list of log messages to be emitted by the caller.
 fn apply_url_rewrite_filter(
-    ctx: &mut Ctx,
+    http: &mut HttpHeaders,
     filter: &crate::config::URLRewriteFilter,
     matched_path: Option<&PathMatchCompiled>,
-) -> Result<(), VclError> {
-    let bereq = ctx
-        .http_bereq
-        .as_mut()
-        .ok_or_else(|| VclError::new("no bereq".to_string()))?;
+) -> Result<Vec<(LogTag, String)>, VclError> {
+    let mut log_msgs = Vec::new();
 
     // Rewrite hostname — must unset first since set_header() appends
     if let Some(hostname) = &filter.hostname {
-        bereq.unset_header("host");
-        bereq.set_header("host", hostname)?;
+        http.unset_header("host");
+        http.set_header("host", hostname)?;
     }
 
     // Rewrite path
@@ -803,7 +830,7 @@ fn apply_url_rewrite_filter(
         match path_type.as_str() {
             "ReplaceFullPath" => {
                 if let Some(path) = &filter.replace_full_path {
-                    let current_url = bereq
+                    let current_url = http
                         .url()
                         .and_then(|u| match u {
                             StrOrBytes::Utf8(s) => Some(s),
@@ -816,12 +843,12 @@ fn apply_url_rewrite_filter(
                     } else {
                         path.to_string()
                     };
-                    bereq.set_url(&final_url)?;
+                    http.set_url(&final_url)?;
                 }
             }
             "ReplacePrefixMatch" => {
                 if let Some(new_prefix) = &filter.replace_prefix_match {
-                    let current_url = bereq
+                    let current_url = http
                         .url()
                         .and_then(|u| match u {
                             StrOrBytes::Utf8(s) => Some(s),
@@ -831,7 +858,6 @@ fn apply_url_rewrite_filter(
 
                     let (path, query) = extract_path_and_query(current_url);
 
-                    // Compute new path and any log messages without borrowing ctx
                     let (new_path, log_msg) =
                         apply_replace_prefix_match(path, new_prefix, matched_path);
 
@@ -841,24 +867,23 @@ fn apply_url_rewrite_filter(
                         new_path
                     };
 
-                    bereq.set_url(&final_url)?;
+                    http.set_url(&final_url)?;
 
-                    // Log after we're done with bereq
-                    if let Some((tag, msg)) = log_msg {
-                        ctx.log(tag, msg);
+                    if let Some(msg) = log_msg {
+                        log_msgs.push(msg);
                     }
                 }
             }
             _ => {
-                ctx.log(
-                    varnish::vcl::LogTag::Error,
+                log_msgs.push((
+                    LogTag::Error,
                     format!("Unknown path rewrite type: {}", path_type),
-                );
+                ));
             }
         }
     }
 
-    Ok(())
+    Ok(log_msgs)
 }
 
 /// Apply ReplacePrefixMatch path rewrite logic
@@ -1021,17 +1046,12 @@ fn parse_host_and_port(host_header: &str) -> (&str, Option<u16>) {
     (host_header, None)
 }
 
-fn store_filter_context(ctx: &mut Ctx, filters: &Arc<RouteFilters>) -> Result<(), VclError> {
-    let bereq = ctx
-        .http_bereq
-        .as_mut()
-        .ok_or_else(|| VclError::new("no bereq".to_string()))?;
-
+fn store_filter_context(http: &mut HttpHeaders, filters: &Arc<RouteFilters>) -> Result<(), VclError> {
     // Serialize response filter to JSON
     if let Some(resp_filter) = &filters.response_header_modifier {
         let json = serde_json::to_string(resp_filter)
             .map_err(|e| VclError::new(format!("serialize filter: {}", e)))?;
-        bereq.set_header(FILTER_CONTEXT_HEADER, &json)?;
+        http.set_header(FILTER_CONTEXT_HEADER, &json)?;
     }
 
     Ok(())

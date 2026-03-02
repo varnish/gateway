@@ -98,12 +98,14 @@ pub struct ghost_backend {
 ///
 /// sub vcl_recv {
 ///     if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
-///         return (pass);
+///         if (router.reload()) {
+///             return (synth(200, "OK"));
+///         } else {
+///             set req.http.X-Ghost-Error = router.last_error();
+///             return (synth(500, "Reload failed"));
+///         }
 ///     }
-/// }
-///
-/// sub vcl_backend_fetch {
-///     set bereq.backend = router.backend();
+///     set req.backend_hint = router.recv();
 /// }
 /// ```
 #[varnish::vmod(docs = "API.md")]
@@ -295,10 +297,53 @@ mod ghost {
             })
         }
 
-        /// Get the VCL backend for use in `vcl_backend_fetch`.
+        /// Route the request in `vcl_recv` context.
         ///
-        /// Matches the Host header against configured virtual hosts, selects a
-        /// backend by weighted random, and returns a native Varnish backend.
+        /// Performs full routing (hostname → vhost → route → backend) using
+        /// `req` headers and `local.socket` for listener-aware routing.
+        /// Returns a concrete backend, not a director.
+        ///
+        /// # Example
+        ///
+        /// ```vcl
+        /// sub vcl_recv {
+        ///     set req.backend_hint = router.recv();
+        /// }
+        /// ```
+        ///
+        /// # Safety
+        ///
+        /// The returned `VCL_BACKEND` pointer is only valid for the lifetime of
+        /// this director. Callers must ensure the director is not dropped while
+        /// the backend pointer is in use.
+        pub unsafe fn recv(&self, ctx: &mut Ctx) -> VCL_BACKEND {
+            // Copy listener to owned String to avoid borrow conflict:
+            // local_socket() borrows ctx immutably, http_req.as_mut() needs mutable.
+            let listener_owned = ctx.local_socket().map(|s| s.to_string());
+            let fallback = self.director.as_ref().vcl_ptr();
+
+            let req = match ctx.http_req.as_mut() {
+                Some(r) => r,
+                None => return fallback,
+            };
+
+            let (result, log_msgs) =
+                self.ghost_director
+                    .route_request(req, listener_owned.as_deref());
+            for (tag, msg) in log_msgs {
+                ctx.log(tag, &msg);
+            }
+
+            match result {
+                Some(backend_ref) => backend_ref.vcl_ptr(),
+                None => fallback,
+            }
+        }
+
+        /// Get the VCL backend (director) for use in `vcl_backend_fetch`.
+        ///
+        /// Returns the ghost director which resolves backends in backend
+        /// context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
         ///
         /// # Example
         ///
