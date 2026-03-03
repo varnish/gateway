@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -539,8 +540,11 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	// Filter route hostnames to only those intersecting with gateway listeners
 	filteredRoutes := filterRouteHostnames(routes, gateway)
 
+	// Build port map to resolve service ports to target ports
+	portMap := r.buildServicePortMap(ctx, filteredRoutes, gateway.Namespace)
+
 	// Generate routing.json for ghost with path-based routing
-	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace)
+	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace, portMap)
 
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)
@@ -592,6 +596,80 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		"backends", len(collectedRoutes))
 
 	return nil
+}
+
+// buildServicePortMap iterates all BackendRefs across routes, fetches each Service,
+// and maps {namespace/service:servicePort → targetPort}. This resolves the domain
+// mismatch between HTTPRoute BackendRef ports (service ports) and EndpointSlice
+// ports (target/container ports).
+func (r *HTTPRouteReconciler) buildServicePortMap(ctx context.Context, routes []gatewayv1.HTTPRoute, defaultNS string) vcl.ServicePortMap {
+	portMap := make(vcl.ServicePortMap)
+	for _, route := range routes {
+		routeNS := route.Namespace
+		if routeNS == "" {
+			routeNS = defaultNS
+		}
+		for _, rule := range route.Spec.Rules {
+			for _, backend := range rule.BackendRefs {
+				// Skip non-Service backends
+				if backend.Kind != nil && *backend.Kind != "Service" {
+					continue
+				}
+				if backend.Group != nil && *backend.Group != "" {
+					continue
+				}
+				if backend.Name == "" {
+					continue
+				}
+
+				backendNS := routeNS
+				if backend.Namespace != nil {
+					backendNS = string(*backend.Namespace)
+				}
+
+				servicePort := 80
+				if backend.Port != nil {
+					servicePort = int(*backend.Port)
+				}
+
+				key := fmt.Sprintf("%s/%s:%d", backendNS, backend.Name, servicePort)
+				if _, exists := portMap[key]; exists {
+					continue // already resolved
+				}
+
+				// Fetch the Service to find the targetPort
+				var svc corev1.Service
+				if err := r.Get(ctx, types.NamespacedName{
+					Name:      string(backend.Name),
+					Namespace: backendNS,
+				}, &svc); err != nil {
+					r.Logger.Debug("failed to fetch Service for port resolution",
+						"service", fmt.Sprintf("%s/%s", backendNS, backend.Name),
+						"error", err)
+					continue // leave unmapped, falls through to service port
+				}
+
+				// Find matching port in Service spec
+				for _, sp := range svc.Spec.Ports {
+					if int(sp.Port) != servicePort {
+						continue
+					}
+					if sp.TargetPort.Type == intstr.Int {
+						if sp.TargetPort.IntVal != 0 {
+							portMap[key] = int(sp.TargetPort.IntVal)
+						}
+						// IntVal == 0 means targetPort defaults to servicePort (no mapping needed)
+					} else {
+						// Named port: set to 0 to disable port filtering in routeToBackends,
+						// letting it use whatever port the EndpointSlice provides
+						portMap[key] = 0
+					}
+					break
+				}
+			}
+		}
+	}
+	return portMap
 }
 
 // regenerateAllGateways lists all Gateways managed by our GatewayClass and

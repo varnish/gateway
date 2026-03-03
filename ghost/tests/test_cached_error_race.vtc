@@ -1,0 +1,111 @@
+varnishtest "cached 500 blocks recovery after ghost reload with backends"
+
+# Reproduces the conformance test failure pattern:
+# 1. Ghost loads config with a route but no backends (simulating startup race)
+# 2. Request hits the route → InternalErrorBackend returns 500
+# 3. Varnish caches the 500 response (default_ttl = 120s)
+# 4. Ghost reloads with real backends
+# 5. Next request SHOULD get 200 from backend, but gets cached 500 instead
+#
+# This is the root cause of all conformance test failures after commit 969d99a:
+# Moving routing from vcl_backend_fetch (director resolve → vcl_backend_error → uncacheable)
+# to vcl_recv (concrete backend → vcl_backend_response → cacheable) changed error caching behavior.
+
+# Real backend server
+server s1 {
+    rxreq
+    txresp -body "real-backend-response"
+} -start
+
+# Phase 1: Config with route but NO backends (simulates startup race)
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "app.example.com": {
+            "routes": [
+                {
+                    "backends": [],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+        set req.backend_hint = router.recv();
+    }
+} -start
+
+# Load config with empty backends
+client c_reload1 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# First request: route matches but no backends → 500 from InternalErrorBackend
+# This 500 gets cached by Varnish (default_ttl)
+client c1 {
+    txreq -url "/" -hdr "Host: app.example.com"
+    rxresp
+    expect resp.status == 500
+} -run
+
+# Phase 2: Update config with real backends (simulates EndpointSlice discovery completing)
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "app.example.com": {
+            "routes": [
+                {
+                    "backends": [
+                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+# Reload ghost with backends
+client c_reload2 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# Second request: ghost now has real backends, should get 200
+# BUG: Varnish serves the cached 500 instead of routing to s1
+client c2 {
+    txreq -url "/" -hdr "Host: app.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "real-backend-response"
+} -run

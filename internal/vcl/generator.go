@@ -137,10 +137,15 @@ func CalculateRoutePriority(
 	return priority
 }
 
+// ServicePortMap maps "namespace/service:servicePort" to the resolved targetPort.
+// Used to translate HTTPRoute BackendRef service ports to actual pod ports.
+type ServicePortMap map[string]int
+
 // CollectHTTPRouteBackends extracts backend and path match information from HTTPRoutes for config generation.
 // Returns a list of Route structs that include path matching rules.
 // When gateway is provided, listener information is computed for each route based on parentRef sectionNames.
-func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, namespace string) []ghost.Route {
+// When portMap is provided, service ports from BackendRefs are resolved to target ports.
+func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, namespace string, portMap ServicePortMap) []ghost.Route {
 	var collectedRoutes []ghost.Route
 
 	ruleIndex := 0
@@ -207,6 +212,13 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 						port := 80
 						if backend.Port != nil {
 							port = int(*backend.Port)
+						}
+						// Resolve service port to target port
+						if portMap != nil {
+							key := fmt.Sprintf("%s/%s:%d", backendNS, backend.Name, port)
+							if tp, ok := portMap[key]; ok {
+								port = tp
+							}
 						}
 
 						weight := 1 // Gateway API default when unspecified
@@ -362,6 +374,13 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							port := 80
 							if backend.Port != nil {
 								port = int(*backend.Port)
+							}
+							// Resolve service port to target port
+							if portMap != nil {
+								key := fmt.Sprintf("%s/%s:%d", backendNS, backend.Name, port)
+								if tp, ok := portMap[key]; ok {
+									port = tp
+								}
 							}
 
 							weight := 100

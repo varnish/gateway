@@ -331,7 +331,7 @@ func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default")
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil)
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -558,7 +558,7 @@ func TestMethodMatchingConformanceFullPipeline(t *testing.T) {
 	}
 
 	// Step 1: CollectHTTPRouteBackends (what the operator does)
-	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, nil, ns)
+	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, nil, ns, nil)
 
 	t.Logf("CollectHTTPRouteBackends produced %d routes:", len(collectedRoutes))
 	for i, r := range collectedRoutes {
@@ -745,7 +745,7 @@ func TestCollectHTTPRouteBackends_NoMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default")
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil)
 
 	if len(collectedRoutes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(collectedRoutes))
@@ -759,5 +759,163 @@ func TestCollectHTTPRouteBackends_NoMatches(t *testing.T) {
 	}
 	if collectedRoutes[0].PathMatch.Value != "/" {
 		t.Errorf("expected path match value /, got %s", collectedRoutes[0].PathMatch.Value)
+	}
+}
+
+func TestCollectHTTPRouteBackends_PortMapResolution(t *testing.T) {
+	prefixType := gatewayv1.PathMatchPathPrefix
+
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Hostnames: []gatewayv1.Hostname{"app.example.com"},
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/api")}},
+						},
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{
+								BackendRef: gatewayv1.BackendRef{
+									BackendObjectReference: gatewayv1.BackendObjectReference{
+										Name: "web-svc",
+										Port: ptr(gatewayv1.PortNumber(80)),
+									},
+								},
+							},
+						},
+					},
+					{
+						// No matches (default route)
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{
+								BackendRef: gatewayv1.BackendRef{
+									BackendObjectReference: gatewayv1.BackendObjectReference{
+										Name: "fallback-svc",
+										Port: ptr(gatewayv1.PortNumber(8080)),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	portMap := ServicePortMap{
+		"default/web-svc:80":        3000, // service port 80 → target port 3000
+		"default/fallback-svc:8080": 9090, // service port 8080 → target port 9090
+	}
+
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap)
+
+	if len(collectedRoutes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
+	}
+
+	// Find the routes by path
+	var apiRoute, defaultRoute *ghost.Route
+	for i := range collectedRoutes {
+		r := &collectedRoutes[i]
+		if r.PathMatch != nil && r.PathMatch.Value == "/api" {
+			apiRoute = r
+		}
+		if r.PathMatch != nil && r.PathMatch.Value == "/" {
+			defaultRoute = r
+		}
+	}
+
+	if apiRoute == nil {
+		t.Fatal("api route not found")
+	}
+	if apiRoute.Port != 3000 {
+		t.Errorf("api route port = %d, want 3000 (resolved from service port 80)", apiRoute.Port)
+	}
+
+	if defaultRoute == nil {
+		t.Fatal("default route not found")
+	}
+	if defaultRoute.Port != 9090 {
+		t.Errorf("default route port = %d, want 9090 (resolved from service port 8080)", defaultRoute.Port)
+	}
+}
+
+func TestCollectHTTPRouteBackends_PortMapPartialResolution(t *testing.T) {
+	prefixType := gatewayv1.PathMatchPathPrefix
+
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Hostnames: []gatewayv1.Hostname{"app.example.com"},
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/mapped")}},
+						},
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "mapped-svc",
+									Port: ptr(gatewayv1.PortNumber(80)),
+								},
+							}},
+						},
+					},
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/unmapped")}},
+						},
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "unmapped-svc",
+									Port: ptr(gatewayv1.PortNumber(9090)),
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Only map one of the two services
+	portMap := ServicePortMap{
+		"default/mapped-svc:80": 3000,
+		// unmapped-svc:9090 not in map → falls through to service port
+	}
+
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap)
+
+	if len(collectedRoutes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
+	}
+
+	var mappedRoute, unmappedRoute *ghost.Route
+	for i := range collectedRoutes {
+		r := &collectedRoutes[i]
+		if r.Service == "mapped-svc" {
+			mappedRoute = r
+		}
+		if r.Service == "unmapped-svc" {
+			unmappedRoute = r
+		}
+	}
+
+	if mappedRoute == nil {
+		t.Fatal("mapped route not found")
+	}
+	if mappedRoute.Port != 3000 {
+		t.Errorf("mapped route port = %d, want 3000", mappedRoute.Port)
+	}
+
+	if unmappedRoute == nil {
+		t.Fatal("unmapped route not found")
+	}
+	if unmappedRoute.Port != 9090 {
+		t.Errorf("unmapped route port = %d, want 9090 (should keep service port)", unmappedRoute.Port)
 	}
 }

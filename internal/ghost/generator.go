@@ -240,7 +240,9 @@ func Generate(routingConfig *RoutingConfig, endpoints ServiceEndpoints) *Config 
 }
 
 // routeToBackends converts a route with endpoints to backend list.
-// For multi-port services, only endpoints matching the route's port are included.
+// For multi-port services, only endpoints matching the route's target port are included.
+// After service-port-to-target-port resolution in the operator, route.Port contains the
+// target port that matches what EndpointSlice reports.
 func routeToBackends(route Route, endpoints ServiceEndpoints) []Backend {
 	key := ServiceKey(route.Namespace, route.Service)
 	eps, ok := endpoints[key]

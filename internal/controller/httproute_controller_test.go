@@ -10,6 +10,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -1118,6 +1119,212 @@ func TestReconcile_NotAllowedByListeners(t *testing.T) {
 	}
 	if !foundAccepted {
 		t.Error("expected Accepted condition to be set")
+	}
+}
+
+func TestBuildServicePortMap(t *testing.T) {
+	scheme := newTestScheme()
+
+	// Service with targetPort different from servicePort (the common case this fixes)
+	svcDiffPort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-svc", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Port:       80,
+					TargetPort: intstr.FromInt32(3000),
+				},
+			},
+		},
+	}
+
+	// Service where targetPort equals servicePort
+	svcSamePort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "api-svc", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Port:       8080,
+					TargetPort: intstr.FromInt32(8080),
+				},
+			},
+		},
+	}
+
+	// Service with named targetPort
+	svcNamedPort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "named-svc", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Port:       443,
+					TargetPort: intstr.FromString("https"),
+				},
+			},
+		},
+	}
+
+	// Service with multiple ports
+	svcMultiPort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "multi-svc", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{Port: 80, TargetPort: intstr.FromInt32(8080)},
+				{Port: 443, TargetPort: intstr.FromInt32(8443)},
+			},
+		},
+	}
+
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "web-svc",
+									Port: ptr(gatewayv1.PortNumber(80)),
+								},
+							}},
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "api-svc",
+									Port: ptr(gatewayv1.PortNumber(8080)),
+								},
+							}},
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "named-svc",
+									Port: ptr(gatewayv1.PortNumber(443)),
+								},
+							}},
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "missing-svc", // does not exist
+									Port: ptr(gatewayv1.PortNumber(80)),
+								},
+							}},
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "multi-svc",
+									Port: ptr(gatewayv1.PortNumber(80)),
+								},
+							}},
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "multi-svc",
+									Port: ptr(gatewayv1.PortNumber(443)),
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, svcDiffPort, svcSamePort, svcNamedPort, svcMultiPort)
+
+	portMap := r.buildServicePortMap(context.Background(), routes, "default")
+
+	tests := []struct {
+		name     string
+		key      string
+		wantPort int
+		wantOK   bool
+	}{
+		{
+			name:     "service port 80 resolves to target port 3000",
+			key:      "default/web-svc:80",
+			wantPort: 3000,
+			wantOK:   true,
+		},
+		{
+			name:     "service port equals target port - still mapped",
+			key:      "default/api-svc:8080",
+			wantPort: 8080,
+			wantOK:   true,
+		},
+		{
+			name:     "named target port resolves to 0",
+			key:      "default/named-svc:443",
+			wantPort: 0,
+			wantOK:   true,
+		},
+		{
+			name:   "missing service leaves key unmapped",
+			key:    "default/missing-svc:80",
+			wantOK: false,
+		},
+		{
+			name:     "multi-port service port 80 resolves to 8080",
+			key:      "default/multi-svc:80",
+			wantPort: 8080,
+			wantOK:   true,
+		},
+		{
+			name:     "multi-port service port 443 resolves to 8443",
+			key:      "default/multi-svc:443",
+			wantPort: 8443,
+			wantOK:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			port, ok := portMap[tc.key]
+			if ok != tc.wantOK {
+				t.Errorf("portMap[%q]: exists=%v, want exists=%v (map=%v)", tc.key, ok, tc.wantOK, portMap)
+				return
+			}
+			if ok && port != tc.wantPort {
+				t.Errorf("portMap[%q] = %d, want %d", tc.key, port, tc.wantPort)
+			}
+		})
+	}
+}
+
+func TestBuildServicePortMap_UnmatchedPort(t *testing.T) {
+	scheme := newTestScheme()
+
+	// Service exists but doesn't have port 9090
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-svc", Namespace: "default"},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{Port: 80, TargetPort: intstr.FromInt32(3000)},
+			},
+		},
+	}
+
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "web-svc",
+									Port: ptr(gatewayv1.PortNumber(9090)), // no such port on service
+								},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, svc)
+	portMap := r.buildServicePortMap(context.Background(), routes, "default")
+
+	// Port 9090 not found in service spec → should be unmapped
+	if _, ok := portMap["default/web-svc:9090"]; ok {
+		t.Error("expected unmapped key for port not found in service spec")
 	}
 }
 
