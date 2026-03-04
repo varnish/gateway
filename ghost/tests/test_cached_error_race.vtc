@@ -26,7 +26,7 @@ shell {
         "app.example.com": {
             "routes": [
                 {
-                    "backends": [],
+                    "backend_groups": [],
                     "priority": 100
                 }
             ]
@@ -82,8 +82,10 @@ shell {
         "app.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
                     ],
                     "priority": 100
                 }

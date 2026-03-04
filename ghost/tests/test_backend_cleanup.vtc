@@ -34,8 +34,10 @@ shell {
         "host1.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
                     ],
                     "priority": 100
                 }
@@ -44,8 +46,10 @@ shell {
         "host2.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s2_addr}", "port": ${s2_port}}
+                        ]}
                     ],
                     "priority": 100
                 }
@@ -54,8 +58,10 @@ shell {
         "host3.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s3_addr}", "port": ${s3_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s3_addr}", "port": ${s3_port}}
+                        ]}
                     ],
                     "priority": 100
                 }
@@ -127,8 +133,10 @@ shell {
         "host1.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
                     ],
                     "priority": 100
                 }
@@ -137,8 +145,10 @@ shell {
         "host2.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s2_addr}", "port": ${s2_port}}
+                        ]}
                     ],
                     "priority": 100
                 }

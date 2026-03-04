@@ -8,14 +8,22 @@ import (
 
 // VHost represents a virtual host configuration with its backends.
 type VHost struct {
-	Backends []Backend `json:"backends"`
+	Backends []BackendGroup `json:"backends"`
 }
 
 // Backend represents a single backend endpoint.
 type Backend struct {
 	Address string `json:"address"`
 	Port    int    `json:"port"`
-	Weight  int    `json:"weight"`
+}
+
+// BackendGroup represents a group of backends sharing a weight.
+// This enables correct weighted traffic distribution: the weight belongs to
+// the service group (not individual pods), and selection is two-level:
+// (1) pick a group by weight, (2) pick a random pod within the group.
+type BackendGroup struct {
+	Weight   int       `json:"weight"`
+	Backends []Backend `json:"backends"`
 }
 
 // RoutingRule defines which Kubernetes service handles a vhost.
@@ -142,21 +150,21 @@ type RoutingConfig struct {
 
 // RouteBackends represents a route with resolved backend IPs.
 type RouteBackends struct {
-	PathMatch   *PathMatch        `json:"path_match,omitempty"`
-	Method      *string           `json:"method,omitempty"`
-	Headers     []HeaderMatch     `json:"headers,omitempty"`
-	QueryParams []QueryParamMatch `json:"query_params,omitempty"`
-	Filters     *RouteFilters     `json:"filters,omitempty"`
-	Backends    []Backend         `json:"backends"`
-	Listeners   []string          `json:"listeners,omitempty"` // Listener names (e.g., ["http"], ["https"])
-	Priority    int               `json:"priority"`
-	RuleIndex   int               `json:"rule_index"`
+	PathMatch     *PathMatch        `json:"path_match,omitempty"`
+	Method        *string           `json:"method,omitempty"`
+	Headers       []HeaderMatch     `json:"headers,omitempty"`
+	QueryParams   []QueryParamMatch `json:"query_params,omitempty"`
+	Filters       *RouteFilters     `json:"filters,omitempty"`
+	BackendGroups []BackendGroup    `json:"backend_groups"`
+	Listeners     []string          `json:"listeners,omitempty"` // Listener names (e.g., ["http"], ["https"])
+	Priority      int               `json:"priority"`
+	RuleIndex     int               `json:"rule_index"`
 }
 
 // VHostConfig represents a virtual host with path-based routing in ghost.json.
 type VHostConfig struct {
 	Routes          []RouteBackends `json:"routes"`
-	DefaultBackends []Backend       `json:"default_backends,omitempty"`
+	DefaultBackends []BackendGroup  `json:"default_backends,omitempty"`
 }
 
 // Config represents the ghost.json configuration file.

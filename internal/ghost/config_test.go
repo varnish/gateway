@@ -22,8 +22,10 @@ func TestParseConfig(t *testing.T) {
 						"routes": [
 							{
 								"path_match": {"type": "PathPrefix", "value": "/"},
-								"backends": [
-									{"address": "10.0.0.1", "port": 8080, "weight": 100}
+								"backend_groups": [
+									{"weight": 100, "backends": [
+										{"address": "10.0.0.1", "port": 8080}
+									]}
 								],
 								"priority": 100
 							}
@@ -40,7 +42,9 @@ func TestParseConfig(t *testing.T) {
 				"vhosts": {},
 				"default": {
 					"backends": [
-						{"address": "10.0.0.1", "port": 80, "weight": 100}
+						{"weight": 100, "backends": [
+							{"address": "10.0.0.1", "port": 80}
+						]}
 					]
 				}
 			}`,
@@ -162,17 +166,21 @@ func TestWriteAndParseConfig(t *testing.T) {
 		Routes: []RouteBackends{
 			{
 				PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/"},
-				Backends: []Backend{
-					{Address: "10.0.0.1", Port: 8080, Weight: 100},
-					{Address: "10.0.0.2", Port: 8080, Weight: 100},
+				BackendGroups: []BackendGroup{
+					{Weight: 100, Backends: []Backend{
+						{Address: "10.0.0.1", Port: 8080},
+						{Address: "10.0.0.2", Port: 8080},
+					}},
 				},
 				Priority: 100,
 			},
 		},
 	}
 	config.Default = &VHost{
-		Backends: []Backend{
-			{Address: "10.0.99.1", Port: 80, Weight: 100},
+		Backends: []BackendGroup{
+			{Weight: 100, Backends: []Backend{
+				{Address: "10.0.99.1", Port: 80},
+			}},
 		},
 	}
 
@@ -210,14 +218,17 @@ func TestWriteAndParseConfig(t *testing.T) {
 	if len(vhost.Routes) != 1 {
 		t.Errorf("expected 1 route, got %d", len(vhost.Routes))
 	}
-	if len(vhost.Routes[0].Backends) != 2 {
-		t.Errorf("expected 2 backends, got %d", len(vhost.Routes[0].Backends))
+	if len(vhost.Routes[0].BackendGroups) != 1 {
+		t.Errorf("expected 1 backend group, got %d", len(vhost.Routes[0].BackendGroups))
+	}
+	if len(vhost.Routes[0].BackendGroups[0].Backends) != 2 {
+		t.Errorf("expected 2 backends in group, got %d", len(vhost.Routes[0].BackendGroups[0].Backends))
 	}
 	if loaded.Default == nil {
 		t.Error("expected default vhost")
 	}
 	if len(loaded.Default.Backends) != 1 {
-		t.Errorf("expected 1 default backend, got %d", len(loaded.Default.Backends))
+		t.Errorf("expected 1 default backend group, got %d", len(loaded.Default.Backends))
 	}
 }
 
@@ -243,14 +254,18 @@ func TestConfigJSONRoundTrip(t *testing.T) {
 		Routes: []RouteBackends{
 			{
 				PathMatch: &PathMatch{Type: PathMatchExact, Value: "/health"},
-				Backends: []Backend{
-					{Address: "10.0.0.1", Port: 8080, Weight: 100},
+				BackendGroups: []BackendGroup{
+					{Weight: 100, Backends: []Backend{
+						{Address: "10.0.0.1", Port: 8080},
+					}},
 				},
 				Priority: 200,
 			},
 		},
-		DefaultBackends: []Backend{
-			{Address: "10.0.0.2", Port: 80, Weight: 100},
+		DefaultBackends: []BackendGroup{
+			{Weight: 100, Backends: []Backend{
+				{Address: "10.0.0.2", Port: 80},
+			}},
 		},
 	}
 

@@ -47,8 +47,10 @@ shell {
                         "type": "Exact",
                         "value": "/api/v2/users"
                     },
-                    "backends": [
-                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
                     ],
                     "priority": 10000
                 },
@@ -57,14 +59,18 @@ shell {
                         "type": "PathPrefix",
                         "value": "/api"
                     },
-                    "backends": [
-                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s2_addr}", "port": ${s2_port}}
+                        ]}
                     ],
                     "priority": 1040
                 }
             ],
             "default_backends": [
-                {"address": "${s4_addr}", "port": ${s4_port}, "weight": 100}
+                {"weight": 100, "backends": [
+                    {"address": "${s4_addr}", "port": ${s4_port}}
+                ]}
             ]
         },
         "files.example.com": {
@@ -74,8 +80,10 @@ shell {
                         "type": "RegularExpression",
                         "value": "^/files/[0-9]+$"
                     },
-                    "backends": [
-                        {"address": "${s3_addr}", "port": ${s3_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s3_addr}", "port": ${s3_port}}
+                        ]}
                     ],
                     "priority": 100
                 }

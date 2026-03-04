@@ -5,7 +5,7 @@ import (
 )
 
 // TestMergeRoutesByMatchCriteria verifies that routes with identical match criteria
-// are merged into a single RouteBackends entry with all backends combined.
+// are merged into a single RouteBackends entry with separate backend groups per service.
 func TestMergeRoutesByMatchCriteria(t *testing.T) {
 	// Create two routes with identical match criteria but different services/weights
 	// This simulates what the operator generates for traffic splitting
@@ -58,32 +58,37 @@ func TestMergeRoutesByMatchCriteria(t *testing.T) {
 
 	route := merged[0]
 
-	// Should have 4 backends total (2 stable + 2 canary)
-	if len(route.Backends) != 4 {
-		t.Fatalf("expected 4 backends, got %d", len(route.Backends))
+	// Should have 2 backend groups (one per service)
+	if len(route.BackendGroups) != 2 {
+		t.Fatalf("expected 2 backend groups, got %d", len(route.BackendGroups))
 	}
 
-	// Count backends by weight
-	var weight90Count, weight10Count int
-	for _, backend := range route.Backends {
-		switch backend.Weight {
+	// Find groups by weight
+	var group90, group10 *BackendGroup
+	for i := range route.BackendGroups {
+		switch route.BackendGroups[i].Weight {
 		case 90:
-			weight90Count++
+			group90 = &route.BackendGroups[i]
 		case 10:
-			weight10Count++
+			group10 = &route.BackendGroups[i]
 		default:
-			t.Errorf("unexpected weight: %d", backend.Weight)
+			t.Errorf("unexpected group weight: %d", route.BackendGroups[i].Weight)
 		}
 	}
 
-	// Should have 2 backends with weight 90 (stable pods)
-	if weight90Count != 2 {
-		t.Errorf("expected 2 backends with weight 90, got %d", weight90Count)
+	if group90 == nil {
+		t.Fatal("expected group with weight 90")
+	}
+	if group10 == nil {
+		t.Fatal("expected group with weight 10")
 	}
 
-	// Should have 2 backends with weight 10 (canary pods)
-	if weight10Count != 2 {
-		t.Errorf("expected 2 backends with weight 10, got %d", weight10Count)
+	// Each group should have 2 backends (pods)
+	if len(group90.Backends) != 2 {
+		t.Errorf("expected 2 backends in weight-90 group, got %d", len(group90.Backends))
+	}
+	if len(group10.Backends) != 2 {
+		t.Errorf("expected 2 backends in weight-10 group, got %d", len(group10.Backends))
 	}
 
 	// Check priority is preserved
@@ -145,10 +150,13 @@ func TestMergeRoutesByMatchCriteriaDifferentPaths(t *testing.T) {
 		t.Fatalf("expected 2 routes, got %d", len(merged))
 	}
 
-	// Each should have 1 backend
+	// Each should have 1 backend group with 1 backend
 	for _, route := range merged {
-		if len(route.Backends) != 1 {
-			t.Errorf("expected 1 backend per route, got %d", len(route.Backends))
+		if len(route.BackendGroups) != 1 {
+			t.Errorf("expected 1 backend group per route, got %d", len(route.BackendGroups))
+		}
+		if len(route.BackendGroups) > 0 && len(route.BackendGroups[0].Backends) != 1 {
+			t.Errorf("expected 1 backend per group, got %d", len(route.BackendGroups[0].Backends))
 		}
 	}
 }

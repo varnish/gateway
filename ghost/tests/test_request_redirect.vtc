@@ -9,7 +9,7 @@ shell {
     "api.example.com": {
       "routes": [
         {
-          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 1}]}],
           "priority": 100,
           "filters": {
             "request_redirect": {
@@ -74,7 +74,7 @@ shell {
     "old.example.com": {
       "routes": [
         {
-          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 1}]}],
           "priority": 100,
           "filters": {
             "request_redirect": {
@@ -112,7 +112,7 @@ shell {
     "api.example.com": {
       "routes": [
         {
-          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 1}]}],
           "priority": 100,
           "filters": {
             "request_redirect": {
@@ -151,7 +151,7 @@ shell {
     "api.example.com": {
       "routes": [
         {
-          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 1}]}],
           "priority": 100,
           "filters": {
             "request_redirect": {
@@ -189,7 +189,7 @@ shell {
     "old.example.com": {
       "routes": [
         {
-          "backends": [{"address": "127.0.0.1", "port": 1, "weight": 100}],
+          "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 1}]}],
           "priority": 100,
           "filters": {
             "request_redirect": {

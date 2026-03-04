@@ -33,8 +33,10 @@ shell {
                         "type": "PathPrefix",
                         "value": "/api/v1"
                     },
-                    "backends": [
-                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
                     ],
                     "filters": {
                         "url_rewrite": {

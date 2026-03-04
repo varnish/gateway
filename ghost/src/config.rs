@@ -15,12 +15,19 @@ use std::path::Path;
 pub struct Backend {
     pub address: String,
     pub port: u16,
-    #[serde(default = "default_weight")]
-    pub weight: u32,
 }
 
 fn default_weight() -> u32 {
     100
+}
+
+/// A group of backends sharing a weight for correct weighted traffic distribution.
+/// Selection is two-level: (1) pick a group by weight, (2) pick a random pod within the group.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackendGroup {
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+    pub backends: Vec<Backend>,
 }
 
 /// Mirrors Gateway API's HTTPPathMatch types for URL routing decisions.
@@ -138,7 +145,7 @@ pub struct Route {
     pub query_params: Vec<QueryParamMatch>,
     #[serde(default)]
     pub filters: Option<RouteFilters>,
-    pub backends: Vec<Backend>,
+    pub backend_groups: Vec<BackendGroup>,
     /// Listener names this route applies to (e.g., ["http"], ["https"]).
     /// Empty means match all listeners (backwards compatible).
     #[serde(default)]
@@ -154,7 +161,7 @@ pub struct Route {
 pub struct VHost {
     pub routes: Vec<Route>,
     #[serde(default)]
-    pub default_backends: Vec<Backend>,
+    pub default_backends: Vec<BackendGroup>,
 }
 
 /// Root configuration loaded from ghost.json.
@@ -211,7 +218,11 @@ fn validate(config: &Config) -> Result<(), String> {
 
         for (i, route) in vhost.routes.iter().enumerate() {
             let route_ctx = format!("{} route {}", hostname, i);
-            validate_backends(&route_ctx, &route.backends)?;
+
+            for (g, group) in route.backend_groups.iter().enumerate() {
+                let group_ctx = format!("{} group {}", route_ctx, g);
+                validate_backends(&group_ctx, &group.backends)?;
+            }
 
             if let Some(ref path_match) = route.path_match {
                 validate_path_match(path_match, &route_ctx)?;
@@ -232,10 +243,10 @@ fn validate(config: &Config) -> Result<(), String> {
             }
         }
 
-        if !vhost.default_backends.is_empty() {
+        for (g, group) in vhost.default_backends.iter().enumerate() {
             validate_backends(
-                &format!("{} default_backends", hostname),
-                &vhost.default_backends,
+                &format!("{} default_backends group {}", hostname, g),
+                &group.backends,
             )?;
         }
     }
@@ -437,9 +448,13 @@ mod tests {
                     "routes": [
                         {
                             "path_match": {"type": "PathPrefix", "value": "/api"},
-                            "backends": [
-                                {"address": "10.0.0.1", "port": 8080, "weight": 100},
-                                {"address": "10.0.0.2", "port": 8080, "weight": 50}
+                            "backend_groups": [
+                                {"weight": 100, "backends": [
+                                    {"address": "10.0.0.1", "port": 8080}
+                                ]},
+                                {"weight": 50, "backends": [
+                                    {"address": "10.0.0.2", "port": 8080}
+                                ]}
                             ],
                             "priority": 100
                         }
@@ -448,8 +463,10 @@ mod tests {
                 "*.staging.example.com": {
                     "routes": [
                         {
-                            "backends": [
-                                {"address": "10.0.1.1", "port": 80}
+                            "backend_groups": [
+                                {"backends": [
+                                    {"address": "10.0.1.1", "port": 80}
+                                ]}
                             ],
                             "priority": 100
                         }
@@ -467,14 +484,15 @@ mod tests {
 
         let api = &config.vhosts["api.example.com"];
         assert_eq!(api.routes.len(), 1);
-        assert_eq!(api.routes[0].backends.len(), 2);
-        assert_eq!(api.routes[0].backends[0].weight, 100);
-        assert_eq!(api.routes[0].backends[1].weight, 50);
+        assert_eq!(api.routes[0].backend_groups.len(), 2);
+        assert_eq!(api.routes[0].backend_groups[0].weight, 100);
+        assert_eq!(api.routes[0].backend_groups[0].backends.len(), 1);
+        assert_eq!(api.routes[0].backend_groups[1].weight, 50);
 
         let staging = &config.vhosts["*.staging.example.com"];
         assert_eq!(staging.routes.len(), 1);
-        assert_eq!(staging.routes[0].backends.len(), 1);
-        assert_eq!(staging.routes[0].backends[0].weight, 100); // default weight
+        assert_eq!(staging.routes[0].backend_groups.len(), 1);
+        assert_eq!(staging.routes[0].backend_groups[0].weight, 100); // default weight
     }
 
     #[test]
@@ -505,7 +523,7 @@ mod tests {
     #[test]
     fn test_invalid_backend_empty_address() {
         let file = write_config(
-            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backends": [{"address": "", "port": 80}], "priority": 100}]}}}"#,
+            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backend_groups": [{"weight": 100, "backends": [{"address": "", "port": 80}]}], "priority": 100}]}}}"#,
         );
         let result = load(file.path());
         assert!(result.is_err());
@@ -515,7 +533,7 @@ mod tests {
     #[test]
     fn test_invalid_backend_zero_port() {
         let file = write_config(
-            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backends": [{"address": "1.2.3.4", "port": 0}], "priority": 100}]}}}"#,
+            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backend_groups": [{"weight": 100, "backends": [{"address": "1.2.3.4", "port": 0}]}], "priority": 100}]}}}"#,
         );
         let result = load(file.path());
         assert!(result.is_err());
@@ -523,10 +541,10 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_backend_zero_weight() {
+    fn test_valid_backend_group_zero_weight() {
         // weight=0 is valid per Gateway API spec (means "no traffic")
         let file = write_config(
-            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backends": [{"address": "1.2.3.4", "port": 80, "weight": 0}], "priority": 100}]}}}"#,
+            r#"{"version": 2, "vhosts": {"foo.com": {"routes": [{"backend_groups": [{"weight": 0, "backends": [{"address": "1.2.3.4", "port": 80}]}], "priority": 100}]}}}"#,
         );
         let result = load(file.path());
         assert!(result.is_ok());
@@ -578,8 +596,10 @@ mod tests {
                                     "type": "PathPrefix",
                                     "value": "/api/v1"
                                 },
-                                "backends": [
-                                    {"address": "127.0.0.1", "port": 8080, "weight": 100}
+                                "backend_groups": [
+                                    {"weight": 100, "backends": [
+                                        {"address": "127.0.0.1", "port": 8080}
+                                    ]}
                                 ],
                                 "filters": {
                                     "url_rewrite": {

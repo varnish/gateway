@@ -25,13 +25,13 @@ func ServiceKey(namespace, name string) string {
 	return namespace + "/" + name
 }
 
-// endpointsToBackends converts discovered endpoints to ghost backends using the routing rule.
+// endpointsToBackendGroup converts discovered endpoints to a BackendGroup using the routing rule.
 // For multi-port services, only endpoints matching the rule's port are included.
-func endpointsToBackends(rule RoutingRule, endpoints ServiceEndpoints) []Backend {
+func endpointsToBackendGroup(rule RoutingRule, endpoints ServiceEndpoints) BackendGroup {
 	key := ServiceKey(rule.Namespace, rule.Service)
 	eps, ok := endpoints[key]
 	if !ok {
-		return []Backend{}
+		return BackendGroup{Weight: rule.Weight, Backends: []Backend{}}
 	}
 
 	backends := make([]Backend, 0, len(eps))
@@ -42,14 +42,12 @@ func endpointsToBackends(rule RoutingRule, endpoints ServiceEndpoints) []Backend
 		} else if rule.Port != 0 && port != rule.Port {
 			continue
 		}
-		weight := rule.Weight
 		backends = append(backends, Backend{
 			Address: ep.IP,
 			Port:    port,
-			Weight:  weight,
 		})
 	}
-	return backends
+	return BackendGroup{Weight: rule.Weight, Backends: backends}
 }
 
 // GenerateRoutingConfig creates a RoutingConfig from a map of hostname to routes.
@@ -118,27 +116,27 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 	// Convert grouped routes to RouteBackends
 	result := make([]RouteBackends, 0, len(grouped))
 	for key, routeGroup := range grouped {
-		// Collect all backends from all routes in this group
+		// Create one BackendGroup per route (i.e., per service/backendRef)
 		// Initialize to empty slice, not nil - nil marshals to null in JSON
-		allBackends := make([]Backend, 0)
+		groups := make([]BackendGroup, 0, len(routeGroup))
 		for _, route := range routeGroup {
-			backends := routeToBackends(route, endpoints)
-			allBackends = append(allBackends, backends...)
+			group := routeToBackendGroup(route, endpoints)
+			groups = append(groups, group)
 		}
 
-		// Always include routes — routes with empty backends will get 500 from ghost VMOD.
+		// Always include routes — routes with empty backend groups will get 500 from ghost VMOD.
 		// Use the first route's match criteria (all routes in group have identical criteria)
 		firstRoute := routeGroup[0]
 		result = append(result, RouteBackends{
-			PathMatch:   firstRoute.PathMatch,
-			Method:      firstRoute.Method,
-			Headers:     firstRoute.Headers,
-			QueryParams: firstRoute.QueryParams,
-			Filters:     firstRoute.Filters,
-			Backends:    allBackends,
-			Listeners:   firstRoute.Listeners,
-			Priority:    key.priority,
-			RuleIndex:   key.ruleIndex,
+			PathMatch:     firstRoute.PathMatch,
+			Method:        firstRoute.Method,
+			Headers:       firstRoute.Headers,
+			QueryParams:   firstRoute.QueryParams,
+			Filters:       firstRoute.Filters,
+			BackendGroups: groups,
+			Listeners:     firstRoute.Listeners,
+			Priority:      key.priority,
+			RuleIndex:     key.ruleIndex,
 		})
 	}
 
@@ -219,9 +217,10 @@ func Generate(routingConfig *RoutingConfig, endpoints ServiceEndpoints) *Config 
 
 		// Process default route if present
 		// Initialize to empty slice, not nil - nil marshals to null in JSON
-		defaultBackends := make([]Backend, 0)
+		defaultBackends := make([]BackendGroup, 0)
 		if vhostRouting.DefaultRoute != nil {
-			defaultBackends = endpointsToBackends(*vhostRouting.DefaultRoute, endpoints)
+			group := endpointsToBackendGroup(*vhostRouting.DefaultRoute, endpoints)
+			defaultBackends = append(defaultBackends, group)
 		}
 
 		config.VHosts[hostname] = VHostConfig{
@@ -232,22 +231,22 @@ func Generate(routingConfig *RoutingConfig, endpoints ServiceEndpoints) *Config 
 
 	// Process global default if present
 	if routingConfig.Default != nil {
-		backends := endpointsToBackends(*routingConfig.Default, endpoints)
-		config.Default = &VHost{Backends: backends}
+		group := endpointsToBackendGroup(*routingConfig.Default, endpoints)
+		config.Default = &VHost{Backends: []BackendGroup{group}}
 	}
 
 	return config
 }
 
-// routeToBackends converts a route with endpoints to backend list.
+// routeToBackendGroup converts a route with endpoints to a BackendGroup.
 // For multi-port services, only endpoints matching the route's target port are included.
 // After service-port-to-target-port resolution in the operator, route.Port contains the
 // target port that matches what EndpointSlice reports.
-func routeToBackends(route Route, endpoints ServiceEndpoints) []Backend {
+func routeToBackendGroup(route Route, endpoints ServiceEndpoints) BackendGroup {
 	key := ServiceKey(route.Namespace, route.Service)
 	eps, ok := endpoints[key]
 	if !ok {
-		return []Backend{}
+		return BackendGroup{Weight: route.Weight, Backends: []Backend{}}
 	}
 
 	backends := make([]Backend, 0, len(eps))
@@ -260,12 +259,10 @@ func routeToBackends(route Route, endpoints ServiceEndpoints) []Backend {
 			// This filters out irrelevant ports for multi-port services.
 			continue
 		}
-		weight := route.Weight
 		backends = append(backends, Backend{
 			Address: ep.IP,
 			Port:    port,
-			Weight:  weight,
 		})
 	}
-	return backends
+	return BackendGroup{Weight: route.Weight, Backends: backends}
 }

@@ -29,16 +29,20 @@ shell {
                         "type": "PathPrefix",
                         "value": "/path5"
                     },
-                    "backends": [
-                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
                     ],
                     "priority": 10600,
                     "rule_index": 6
                 },
                 {
                     "method": "PATCH",
-                    "backends": [
-                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s2_addr}", "port": ${s2_port}}
+                        ]}
                     ],
                     "priority": 5000,
                     "rule_index": 7

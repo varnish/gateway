@@ -648,8 +648,8 @@ func TestMethodMatchingConformanceFullPipeline(t *testing.T) {
 		if r.Method != nil {
 			methodStr = *r.Method
 		}
-		t.Logf("  [%d] path=%s method=%s priority=%d ruleIndex=%d backends=%d",
-			i, pathStr, methodStr, r.Priority, r.RuleIndex, len(r.Backends))
+		t.Logf("  [%d] path=%s method=%s priority=%d ruleIndex=%d backendGroups=%d",
+			i, pathStr, methodStr, r.Priority, r.RuleIndex, len(r.BackendGroups))
 	}
 
 	// Find the critical routes in the parsed output
@@ -678,17 +678,17 @@ func TestMethodMatchingConformanceFullPipeline(t *testing.T) {
 			parsedMethodRoute.Priority, parsedMethodRoute.RuleIndex)
 	}
 
-	// Verify backends resolve correctly
-	if len(parsedPathRoute.Backends) == 0 {
+	// Verify backend groups resolve correctly
+	if len(parsedPathRoute.BackendGroups) == 0 || len(parsedPathRoute.BackendGroups[0].Backends) == 0 {
 		t.Error("PathPrefix /path5 route has no backends - ghost would return 500")
-	} else if parsedPathRoute.Backends[0].Address != "10.0.0.1" {
-		t.Errorf("PathPrefix /path5 should route to v1 (10.0.0.1), got %s", parsedPathRoute.Backends[0].Address)
+	} else if parsedPathRoute.BackendGroups[0].Backends[0].Address != "10.0.0.1" {
+		t.Errorf("PathPrefix /path5 should route to v1 (10.0.0.1), got %s", parsedPathRoute.BackendGroups[0].Backends[0].Address)
 	}
 
-	if len(parsedMethodRoute.Backends) == 0 {
+	if len(parsedMethodRoute.BackendGroups) == 0 || len(parsedMethodRoute.BackendGroups[0].Backends) == 0 {
 		t.Error("method PATCH route has no backends")
-	} else if parsedMethodRoute.Backends[0].Address != "10.0.0.2" {
-		t.Errorf("method PATCH should route to v2 (10.0.0.2), got %s", parsedMethodRoute.Backends[0].Address)
+	} else if parsedMethodRoute.BackendGroups[0].Backends[0].Address != "10.0.0.2" {
+		t.Errorf("method PATCH should route to v2 (10.0.0.2), got %s", parsedMethodRoute.BackendGroups[0].Backends[0].Address)
 	}
 
 	// Run the pipeline 100 times to check for non-determinism from Go map iteration
@@ -714,7 +714,7 @@ func TestMethodMatchingConformanceFullPipeline(t *testing.T) {
 		if pr.Priority <= mr.Priority {
 			t.Fatalf("iteration %d: priority inversion! path=%d method=%d", iter, pr.Priority, mr.Priority)
 		}
-		if len(pr.Backends) == 0 {
+		if len(pr.BackendGroups) == 0 || len(pr.BackendGroups[0].Backends) == 0 {
 			t.Fatalf("iteration %d: PathPrefix /path5 has no backends", iter)
 		}
 	}

@@ -24,8 +24,10 @@ shell {
         "api.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s1_addr}", "port": ${s1_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
                     ],
                     "priority": 100
                 }
@@ -34,8 +36,10 @@ shell {
         "*.example.com": {
             "routes": [
                 {
-                    "backends": [
-                        {"address": "${s2_addr}", "port": ${s2_port}, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s2_addr}", "port": ${s2_port}}
+                        ]}
                     ],
                     "priority": 100
                 }

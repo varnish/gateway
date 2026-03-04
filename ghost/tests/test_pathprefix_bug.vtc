@@ -60,8 +60,10 @@ shell {
                         "type": "Exact",
                         "value": "/api/v1/health"
                     },
-                    "backends": [
-                        {"address": "${s_alpha_addr}", "port": ${s_alpha_port}, "weight": 1}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_alpha_addr}", "port": ${s_alpha_port}}
+                        ]}
                     ],
                     "priority": 10000
                 },
@@ -70,8 +72,10 @@ shell {
                         "type": "PathPrefix",
                         "value": "/api/v2/"
                     },
-                    "backends": [
-                        {"address": "${s_beta_addr}", "port": ${s_beta_port}, "weight": 1}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_beta_addr}", "port": ${s_beta_port}}
+                        ]}
                     ],
                     "priority": 1080
                 },
@@ -80,8 +84,10 @@ shell {
                         "type": "PathPrefix",
                         "value": "/api/v1/"
                     },
-                    "backends": [
-                        {"address": "${s_gamma_addr}", "port": ${s_gamma_port}, "weight": 1}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_gamma_addr}", "port": ${s_gamma_port}}
+                        ]}
                     ],
                     "priority": 1080
                 },
@@ -90,8 +96,10 @@ shell {
                         "type": "PathPrefix",
                         "value": "/api/"
                     },
-                    "backends": [
-                        {"address": "${s_delta_addr}", "port": ${s_delta_port}, "weight": 1}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_delta_addr}", "port": ${s_delta_port}}
+                        ]}
                     ],
                     "priority": 1050
                 },
@@ -100,8 +108,10 @@ shell {
                         "type": "PathPrefix",
                         "value": "/"
                     },
-                    "backends": [
-                        {"address": "${s_epsilon_addr}", "port": ${s_epsilon_port}, "weight": 1}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_epsilon_addr}", "port": ${s_epsilon_port}}
+                        ]}
                     ],
                     "priority": 1010
                 }

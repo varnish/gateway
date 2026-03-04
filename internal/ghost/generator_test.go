@@ -70,8 +70,11 @@ func TestGenerate(t *testing.T) {
 	if len(apiVhost.Routes) != 1 {
 		t.Fatalf("expected 1 route for api.example.com, got %d", len(apiVhost.Routes))
 	}
-	if len(apiVhost.Routes[0].Backends) != 2 {
-		t.Errorf("expected 2 backends for api.example.com, got %d", len(apiVhost.Routes[0].Backends))
+	if len(apiVhost.Routes[0].BackendGroups) != 1 {
+		t.Fatalf("expected 1 backend group for api.example.com, got %d", len(apiVhost.Routes[0].BackendGroups))
+	}
+	if len(apiVhost.Routes[0].BackendGroups[0].Backends) != 2 {
+		t.Errorf("expected 2 backends in group for api.example.com, got %d", len(apiVhost.Routes[0].BackendGroups[0].Backends))
 	}
 
 	// Check web.example.com
@@ -82,11 +85,14 @@ func TestGenerate(t *testing.T) {
 	if len(webVhost.Routes) != 1 {
 		t.Fatalf("expected 1 route for web.example.com, got %d", len(webVhost.Routes))
 	}
-	if len(webVhost.Routes[0].Backends) != 1 {
-		t.Errorf("expected 1 backend for web.example.com, got %d", len(webVhost.Routes[0].Backends))
+	if len(webVhost.Routes[0].BackendGroups) != 1 {
+		t.Fatalf("expected 1 backend group for web.example.com, got %d", len(webVhost.Routes[0].BackendGroups))
 	}
-	if webVhost.Routes[0].Backends[0].Weight != 50 {
-		t.Errorf("expected weight 50, got %d", webVhost.Routes[0].Backends[0].Weight)
+	if webVhost.Routes[0].BackendGroups[0].Weight != 50 {
+		t.Errorf("expected weight 50, got %d", webVhost.Routes[0].BackendGroups[0].Weight)
+	}
+	if len(webVhost.Routes[0].BackendGroups[0].Backends) != 1 {
+		t.Errorf("expected 1 backend in group for web.example.com, got %d", len(webVhost.Routes[0].BackendGroups[0].Backends))
 	}
 
 	// Check default
@@ -94,7 +100,10 @@ func TestGenerate(t *testing.T) {
 		t.Fatal("expected default vhost")
 	}
 	if len(config.Default.Backends) != 1 {
-		t.Errorf("expected 1 default backend, got %d", len(config.Default.Backends))
+		t.Fatalf("expected 1 default backend group, got %d", len(config.Default.Backends))
+	}
+	if len(config.Default.Backends[0].Backends) != 1 {
+		t.Errorf("expected 1 backend in default group, got %d", len(config.Default.Backends[0].Backends))
 	}
 }
 
@@ -128,15 +137,18 @@ func TestGenerateNoEndpoints(t *testing.T) {
 		t.Fatal("api.example.com vhost not found")
 	}
 
-	// Routes should be preserved with empty backends (ghost returns 500 for these)
+	// Routes should be preserved with empty backend groups (ghost returns 500 for these)
 	if vhost.Routes == nil {
 		t.Error("Routes should be empty array, not nil")
 	}
 	if len(vhost.Routes) != 1 {
 		t.Errorf("expected 1 route (with empty backends), got %d", len(vhost.Routes))
 	}
-	if len(vhost.Routes) > 0 && len(vhost.Routes[0].Backends) != 0 {
-		t.Errorf("expected 0 backends for route, got %d", len(vhost.Routes[0].Backends))
+	if len(vhost.Routes) > 0 && len(vhost.Routes[0].BackendGroups) != 1 {
+		t.Errorf("expected 1 backend group for route, got %d", len(vhost.Routes[0].BackendGroups))
+	}
+	if len(vhost.Routes) > 0 && len(vhost.Routes[0].BackendGroups) > 0 && len(vhost.Routes[0].BackendGroups[0].Backends) != 0 {
+		t.Errorf("expected 0 backends in group, got %d", len(vhost.Routes[0].BackendGroups[0].Backends))
 	}
 
 	// DefaultBackends should be empty array, not nil
@@ -144,7 +156,7 @@ func TestGenerateNoEndpoints(t *testing.T) {
 		t.Error("DefaultBackends should be empty array, not nil")
 	}
 	if len(vhost.DefaultBackends) != 0 {
-		t.Errorf("expected 0 default backends, got %d", len(vhost.DefaultBackends))
+		t.Errorf("expected 0 default backend groups, got %d", len(vhost.DefaultBackends))
 	}
 
 	// Marshal to JSON and verify it produces [] not null
@@ -209,12 +221,12 @@ func TestGenerateDefaultWeight(t *testing.T) {
 	if len(apiVhost.Routes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(apiVhost.Routes))
 	}
-	if len(apiVhost.Routes[0].Backends) != 1 {
-		t.Fatalf("expected 1 backend, got %d", len(apiVhost.Routes[0].Backends))
+	if len(apiVhost.Routes[0].BackendGroups) != 1 {
+		t.Fatalf("expected 1 backend group, got %d", len(apiVhost.Routes[0].BackendGroups))
 	}
 	// weight=0 should pass through as-is (no conversion)
-	if apiVhost.Routes[0].Backends[0].Weight != 0 {
-		t.Errorf("expected weight 0 (pass-through), got %d", apiVhost.Routes[0].Backends[0].Weight)
+	if apiVhost.Routes[0].BackendGroups[0].Weight != 0 {
+		t.Errorf("expected weight 0 (pass-through), got %d", apiVhost.Routes[0].BackendGroups[0].Weight)
 	}
 }
 
@@ -307,7 +319,7 @@ func TestGenerateRoutingConfigNoDefault(t *testing.T) {
 	}
 }
 
-func TestRouteToBackendsMultiPort(t *testing.T) {
+func TestRouteToBackendGroupMultiPort(t *testing.T) {
 	// Multi-port service: endpoints contain entries for both ports
 	endpoints := ServiceEndpoints{
 		"default/multi-port-svc": {
@@ -326,11 +338,14 @@ func TestRouteToBackendsMultiPort(t *testing.T) {
 		Weight:    100,
 	}
 
-	backends := routeToBackends(route8080, endpoints)
-	if len(backends) != 2 {
-		t.Fatalf("expected 2 backends for port 8080, got %d", len(backends))
+	group := routeToBackendGroup(route8080, endpoints)
+	if len(group.Backends) != 2 {
+		t.Fatalf("expected 2 backends for port 8080, got %d", len(group.Backends))
 	}
-	for _, b := range backends {
+	if group.Weight != 100 {
+		t.Errorf("expected weight 100, got %d", group.Weight)
+	}
+	for _, b := range group.Backends {
 		if b.Port != 8080 {
 			t.Errorf("expected all backends on port 8080, got port %d", b.Port)
 		}
@@ -344,11 +359,14 @@ func TestRouteToBackendsMultiPort(t *testing.T) {
 		Weight:    50,
 	}
 
-	backends = routeToBackends(route9090, endpoints)
-	if len(backends) != 2 {
-		t.Fatalf("expected 2 backends for port 9090, got %d", len(backends))
+	group = routeToBackendGroup(route9090, endpoints)
+	if len(group.Backends) != 2 {
+		t.Fatalf("expected 2 backends for port 9090, got %d", len(group.Backends))
 	}
-	for _, b := range backends {
+	if group.Weight != 50 {
+		t.Errorf("expected weight 50, got %d", group.Weight)
+	}
+	for _, b := range group.Backends {
 		if b.Port != 9090 {
 			t.Errorf("expected all backends on port 9090, got port %d", b.Port)
 		}
@@ -442,17 +460,20 @@ func TestMethodMatchingConformancePipeline(t *testing.T) {
 			pathRoute.Priority, methodRoute.Priority)
 	}
 
-	t.Logf("PathPrefix /path5: priority=%d, ruleIndex=%d, backends=%d",
-		pathRoute.Priority, pathRoute.RuleIndex, len(pathRoute.Backends))
-	t.Logf("method PATCH: priority=%d, ruleIndex=%d, backends=%d",
-		methodRoute.Priority, methodRoute.RuleIndex, len(methodRoute.Backends))
+	t.Logf("PathPrefix /path5: priority=%d, ruleIndex=%d, backendGroups=%d",
+		pathRoute.Priority, pathRoute.RuleIndex, len(pathRoute.BackendGroups))
+	t.Logf("method PATCH: priority=%d, ruleIndex=%d, backendGroups=%d",
+		methodRoute.Priority, methodRoute.RuleIndex, len(methodRoute.BackendGroups))
 
-	// Also verify the route has backends (not empty)
-	if len(pathRoute.Backends) == 0 {
-		t.Error("PathPrefix /path5 route has no backends - ghost would return 500, not route to v1")
+	// Also verify the route has backend groups with backends (not empty)
+	if len(pathRoute.BackendGroups) == 0 {
+		t.Error("PathPrefix /path5 route has no backend groups - ghost would return 500")
 	}
-	if pathRoute.Backends[0].Address != "10.0.0.1" {
-		t.Errorf("PathPrefix /path5 should route to v1 (10.0.0.1), got %s", pathRoute.Backends[0].Address)
+	if len(pathRoute.BackendGroups) > 0 && len(pathRoute.BackendGroups[0].Backends) == 0 {
+		t.Error("PathPrefix /path5 route has empty backend group - ghost would return 500")
+	}
+	if len(pathRoute.BackendGroups) > 0 && len(pathRoute.BackendGroups[0].Backends) > 0 && pathRoute.BackendGroups[0].Backends[0].Address != "10.0.0.1" {
+		t.Errorf("PathPrefix /path5 should route to v1 (10.0.0.1), got %s", pathRoute.BackendGroups[0].Backends[0].Address)
 	}
 
 	// Verify ghost.json serialization round-trip preserves priorities

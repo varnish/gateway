@@ -13,7 +13,7 @@ use varnish::vcl::{
 
 use crate::backend_pool::BackendPool;
 use crate::config::RouteFilters;
-use crate::director::{PathMatchCompiled, RouteEntry, WeightedBackendRef};
+use crate::director::{PathMatchCompiled, RouteEntry, WeightedBackendGroup};
 use crate::redirect_backend::RedirectConfig;
 use crate::stats::VhostStats;
 
@@ -34,10 +34,10 @@ unsafe impl Sync for SendSyncBackendRef {}
 /// Header name for passing matched route filters to vcl_deliver
 const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
 
-/// Result of route matching containing backends, filters, and match context
+/// Result of route matching containing backend groups, filters, and match context
 #[derive(Debug)]
 pub struct RouteMatchResult<'a> {
-    pub backends: &'a [WeightedBackendRef],
+    pub backend_groups: &'a [WeightedBackendGroup],
     pub filters: Option<Arc<RouteFilters>>,
     pub matched_path: Option<&'a PathMatchCompiled>,
 }
@@ -96,17 +96,22 @@ impl VhostDirector {
     /// Check if this director has any routes with backends or filters
     /// Routes with redirect filters but no backends are considered "healthy"
     fn has_backends(&self) -> bool {
-        self.routes
-            .iter()
-            .any(|r| !r.backends.is_empty() || r.filters.is_some())
+        self.routes.iter().any(|r| {
+            r.backend_groups
+                .iter()
+                .any(|g| !g.backends.is_empty())
+                || r.filters.is_some()
+        })
     }
 
     /// Collect all backend keys used by this director
     pub fn backend_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
         for route in &self.routes {
-            for backend_ref in &route.backends {
-                keys.push(backend_ref.key.clone());
+            for group in &route.backend_groups {
+                for key in &group.backends {
+                    keys.push(key.clone());
+                }
             }
         }
         keys
@@ -256,7 +261,7 @@ impl VhostDirector {
             Some(r) => r,
             None => return (None, log_msgs),
         };
-        let backend_refs = match_result.backends;
+        let backend_groups = match_result.backend_groups;
         let matched_filters = match_result.filters.as_ref();
 
         // Apply request filters BEFORE backend selection
@@ -351,9 +356,11 @@ impl VhostDirector {
             }
         }
 
-        // Select backend using weighted random
-        let backend_ref = match select_backend_weighted(backend_refs) {
-            Some(br) => br,
+        // Select backend using two-level weighted random:
+        // Level 1: pick a group by weight
+        // Level 2: pick a random pod within the selected group
+        let backend_key = match select_backend_from_groups(backend_groups) {
+            Some(key) => key,
             None => {
                 return (
                     self.internal_error_backend.as_ref().map(|r| r.0.clone()),
@@ -363,10 +370,10 @@ impl VhostDirector {
         };
 
         // Record stats
-        self.stats.record_request(&backend_ref.key);
+        self.stats.record_request(backend_key);
 
         // Look up in backend pool
-        let backend = match self.backend_pool.get(&backend_ref.key) {
+        let backend = match self.backend_pool.get(backend_key) {
             Some(b) => b,
             None => return (None, log_msgs),
         };
@@ -463,10 +470,10 @@ fn match_routes<'a>(
             continue;
         }
 
-        // All conditions matched - return the route even with empty backends.
+        // All conditions matched - return the route even with empty backend groups.
         // The caller will return 500 for matched routes with no backends.
         return Some(RouteMatchResult {
-            backends: &route.backends,
+            backend_groups: &route.backend_groups,
             filters: route.filters.clone(),
             matched_path: route.path_match.as_ref(),
         });
@@ -475,43 +482,46 @@ fn match_routes<'a>(
     None
 }
 
-/// Select a backend using weighted random selection
-fn select_backend_weighted(refs: &[WeightedBackendRef]) -> Option<&WeightedBackendRef> {
-    if refs.is_empty() {
+/// Select a backend using two-level weighted random selection:
+/// Level 1: pick a group by weight (skip weight-0 groups)
+/// Level 2: uniform random within selected group
+fn select_backend_from_groups<'a>(groups: &'a [WeightedBackendGroup]) -> Option<&'a str> {
+    if groups.is_empty() {
         return None;
     }
 
-    if refs.len() == 1 {
-        return Some(&refs[0]);
-    }
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
 
-    // Calculate total weight
-    let total_weight: u32 = refs.iter().map(|r| r.weight).sum();
+    // Level 1: pick a group by weight
+    let total_weight: u32 = groups.iter().map(|g| g.weight).sum();
 
     if total_weight == 0 {
         return None;
     }
 
-    // Random selection
-    // TODO: Use Varnish's VRND_RandomTestable() when varnish-rs exposes it
-    // This would eliminate thread_rng() TLS overhead (~10-50ns per call).
-    // Varnish provides VRND_RandomTestable() and VRND_RandomTestableDouble()
-    // in lib/libvarnish/vrnd.c, used by vmod_std::random().
-    // See: https://github.com/varnishcache/varnish-cache/blob/master/lib/libvarnish/vrnd.c
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
     let r = rng.gen_range(0..total_weight);
-
     let mut cumulative = 0u32;
-    for backend_ref in refs {
-        cumulative += backend_ref.weight;
+    let mut selected_group = &groups[0];
+    for group in groups {
+        cumulative += group.weight;
         if r < cumulative {
-            return Some(backend_ref);
+            selected_group = group;
+            break;
         }
     }
 
-    // Fallback (shouldn't happen if weights are valid)
-    Some(&refs[0])
+    if selected_group.backends.is_empty() {
+        return None;
+    }
+
+    // Level 2: uniform random within selected group
+    if selected_group.backends.len() == 1 {
+        return Some(&selected_group.backends[0]);
+    }
+
+    let idx = rng.gen_range(0..selected_group.backends.len());
+    Some(&selected_group.backends[idx])
 }
 
 /// Extract path and query string from URL
@@ -540,7 +550,7 @@ fn extract_path_and_query(url: &str) -> (&str, Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::director::{PathMatchCompiled, WeightedBackendRef};
+    use crate::director::{PathMatchCompiled, WeightedBackendGroup};
     use std::collections::HashMap;
 
     #[test]
@@ -563,55 +573,97 @@ mod tests {
     }
 
     #[test]
-    fn test_select_backend_weighted_single() {
-        let refs = vec![WeightedBackendRef {
-            key: "10.0.0.1:8080".to_string(),
+    fn test_select_backend_from_groups_single() {
+        let groups = vec![WeightedBackendGroup {
             weight: 100,
+            backends: vec!["10.0.0.1:8080".to_string()],
         }];
-        let selected = select_backend_weighted(&refs).unwrap();
-        assert_eq!(selected.key, "10.0.0.1:8080");
+        let selected = select_backend_from_groups(&groups).unwrap();
+        assert_eq!(selected, "10.0.0.1:8080");
     }
 
     #[test]
-    fn test_select_backend_weighted_distribution() {
-        let refs = vec![
-            WeightedBackendRef {
-                key: "10.0.0.1:8080".to_string(),
+    fn test_select_backend_from_groups_distribution() {
+        // Two groups: 90% to group1 (2 pods), 10% to group2 (2 pods)
+        let groups = vec![
+            WeightedBackendGroup {
                 weight: 90,
+                backends: vec![
+                    "10.0.0.1:8080".to_string(),
+                    "10.0.0.2:8080".to_string(),
+                ],
             },
-            WeightedBackendRef {
-                key: "10.0.0.2:8080".to_string(),
+            WeightedBackendGroup {
                 weight: 10,
+                backends: vec![
+                    "10.0.0.3:8080".to_string(),
+                    "10.0.0.4:8080".to_string(),
+                ],
             },
         ];
 
         // Run many selections and check distribution
+        let mut group1_count = 0;
+        let mut group2_count = 0;
+        for _ in 0..1000 {
+            let selected = select_backend_from_groups(&groups).unwrap();
+            if selected == "10.0.0.1:8080" || selected == "10.0.0.2:8080" {
+                group1_count += 1;
+            } else {
+                group2_count += 1;
+            }
+        }
+
+        // Allow for statistical variance (should be roughly 900:100)
+        assert!(
+            group1_count > 800,
+            "group1 selected {} times, expected ~900",
+            group1_count
+        );
+        assert!(
+            group2_count < 200,
+            "group2 selected {} times, expected ~100",
+            group2_count
+        );
+    }
+
+    #[test]
+    fn test_select_backend_from_groups_empty() {
+        let groups: Vec<WeightedBackendGroup> = vec![];
+        assert!(select_backend_from_groups(&groups).is_none());
+    }
+
+    #[test]
+    fn test_select_backend_from_groups_uniform_within_group() {
+        // Single group with 2 pods — should distribute ~50/50
+        let groups = vec![WeightedBackendGroup {
+            weight: 100,
+            backends: vec![
+                "10.0.0.1:8080".to_string(),
+                "10.0.0.2:8080".to_string(),
+            ],
+        }];
+
         let mut counts = HashMap::new();
         for _ in 0..1000 {
-            let selected = select_backend_weighted(&refs).unwrap();
-            *counts.entry(selected.key.clone()).or_insert(0) += 1;
+            let selected = select_backend_from_groups(&groups).unwrap();
+            *counts.entry(selected.to_string()).or_insert(0) += 1;
         }
 
         let count_1 = *counts.get("10.0.0.1:8080").unwrap_or(&0);
         let count_2 = *counts.get("10.0.0.2:8080").unwrap_or(&0);
 
-        // Allow for statistical variance (should be roughly 900:100)
+        // Each should get roughly 500 (allow wide margin)
         assert!(
-            count_1 > 800,
-            "10.0.0.1 selected {} times, expected ~900",
+            count_1 > 350 && count_1 < 650,
+            "10.0.0.1 selected {} times, expected ~500",
             count_1
         );
         assert!(
-            count_2 < 200,
-            "10.0.0.2 selected {} times, expected ~100",
+            count_2 > 350 && count_2 < 650,
+            "10.0.0.2 selected {} times, expected ~500",
             count_2
         );
-    }
-
-    #[test]
-    fn test_select_backend_weighted_empty() {
-        let refs: Vec<WeightedBackendRef> = vec![];
-        assert!(select_backend_weighted(&refs).is_none());
     }
 
     #[test]
@@ -623,9 +675,9 @@ mod tests {
             headers: Vec::new(),
             query_params: Vec::new(),
             filters: None,
-            backends: vec![WeightedBackendRef {
-                key: "10.0.0.1:8080".to_string(),
+            backend_groups: vec![WeightedBackendGroup {
                 weight: 100,
+                backends: vec!["10.0.0.1:8080".to_string()],
             }],
             listeners: Vec::new(),
             priority: 100,
@@ -636,7 +688,7 @@ mod tests {
         // But we can verify the route structure is correct
         assert_eq!(routes.len(), 1);
         assert!(routes[0].path_match.is_none());
-        assert_eq!(routes[0].backends.len(), 1);
+        assert_eq!(routes[0].backend_groups.len(), 1);
     }
 
     #[test]
@@ -647,9 +699,9 @@ mod tests {
             headers: Vec::new(),
             query_params: Vec::new(),
             filters: None,
-            backends: vec![WeightedBackendRef {
-                key: "10.0.0.1:8080".to_string(),
+            backend_groups: vec![WeightedBackendGroup {
                 weight: 100,
+                backends: vec!["10.0.0.1:8080".to_string()],
             }],
             listeners: Vec::new(),
             priority: 100,
@@ -674,9 +726,9 @@ mod tests {
                 headers: Vec::new(),
                 query_params: Vec::new(),
                 filters: None,
-                backends: vec![WeightedBackendRef {
-                    key: "10.0.0.1:8080".to_string(),
+                backend_groups: vec![WeightedBackendGroup {
                     weight: 100,
+                    backends: vec!["10.0.0.1:8080".to_string()],
                 }],
                 listeners: Vec::new(),
                 priority: 100,
@@ -751,9 +803,9 @@ mod tests {
     fn test_route_match_result_struct() {
         use crate::config::RouteFilters;
 
-        let backends = vec![WeightedBackendRef {
-            key: "10.0.0.1:8080".to_string(),
+        let groups = vec![WeightedBackendGroup {
             weight: 100,
+            backends: vec!["10.0.0.1:8080".to_string()],
         }];
 
         let path_match = PathMatchCompiled::PathPrefix("/api/v1".to_string());
@@ -765,12 +817,12 @@ mod tests {
         });
 
         let result = RouteMatchResult {
-            backends: &backends,
+            backend_groups: &groups,
             filters: Some(filters.clone()),
             matched_path: Some(&path_match),
         };
 
-        assert_eq!(result.backends.len(), 1);
+        assert_eq!(result.backend_groups.len(), 1);
         assert!(result.filters.is_some());
         assert!(result.matched_path.is_some());
     }

@@ -39,11 +39,15 @@ shell {
             "type": "PathPrefix",
             "value": "/"
           },
-          "backends": [
-            {"address": "${s_stable_1_addr}", "port": ${s_stable_1_port}, "weight": 90},
-            {"address": "${s_stable_2_addr}", "port": ${s_stable_2_port}, "weight": 90},
-            {"address": "${s_canary_1_addr}", "port": ${s_canary_1_port}, "weight": 10},
-            {"address": "${s_canary_2_addr}", "port": ${s_canary_2_port}, "weight": 10}
+          "backend_groups": [
+            {"weight": 90, "backends": [
+              {"address": "${s_stable_1_addr}", "port": ${s_stable_1_port}},
+              {"address": "${s_stable_2_addr}", "port": ${s_stable_2_port}}
+            ]},
+            {"weight": 10, "backends": [
+              {"address": "${s_canary_1_addr}", "port": ${s_canary_1_port}},
+              {"address": "${s_canary_2_addr}", "port": ${s_canary_2_port}}
+            ]}
           ],
           "priority": 100
         }
@@ -84,12 +88,9 @@ client creload {
 } -run
 
 # Make sample requests to verify both stable and canary backends are accessible
-# With 90/10 weight split and 4 backends (2 stable, 2 canary), we expect:
-# - Stable backends (weight 90 each) = total weight 180
-# - Canary backends (weight 10 each) = total weight 20
-# - Total weight = 200
-# - Stable probability = 180/200 = 90%
-# - Canary probability = 20/200 = 10%
+# With backend groups:
+# - Stable group (weight 90, 2 pods) = 90% of traffic, split evenly across 2 pods
+# - Canary group (weight 10, 2 pods) = 10% of traffic, split evenly across 2 pods
 
 client c1 {
     txreq -hdr "Host: app.example.com" -url "/"

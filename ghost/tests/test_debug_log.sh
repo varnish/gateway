@@ -17,8 +17,10 @@ cat > $TMPDIR/ghost.json <<EOF
                         "type": "PathPrefix",
                         "value": "/api/v1"
                     },
-                    "backends": [
-                        {"address": "127.0.0.1", "port": 9999, "weight": 100}
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "127.0.0.1", "port": 9999}
+                        ]}
                     ],
                     "filters": {
                         "url_rewrite": {

@@ -37,13 +37,14 @@ struct SendSyncBackendRef(BackendRef);
 unsafe impl Send for SendSyncBackendRef {}
 unsafe impl Sync for SendSyncBackendRef {}
 
-/// Backend reference with weight for routing
+/// A group of backends sharing a weight for correct weighted traffic distribution.
+/// Selection is two-level: (1) pick a group by weight, (2) pick a random pod within the group.
 #[derive(Debug, Clone)]
-pub struct WeightedBackendRef {
-    /// Backend pool key ("address:port")
-    pub key: String,
-    /// Weight for random selection
+pub struct WeightedBackendGroup {
+    /// Weight for group-level selection
     pub weight: u32,
+    /// Backend pool keys ("address:port") within this group
+    pub backends: Vec<String>,
 }
 
 /// Compiled path match for efficient matching
@@ -190,7 +191,7 @@ pub struct RouteEntry {
     pub headers: Vec<HeaderMatchCompiled>,
     pub query_params: Vec<QueryParamMatchCompiled>,
     pub filters: Option<Arc<crate::config::RouteFilters>>,
-    pub backends: Vec<WeightedBackendRef>,
+    pub backend_groups: Vec<WeightedBackendGroup>,
     /// Listener names this route applies to (e.g., ["http"], ["https"]).
     /// Empty means match all listeners.
     pub listeners: Vec<String>,
@@ -239,14 +240,18 @@ pub fn build_vhost_directors(
 
         // Process each route in the vhost
         for route in &vhost.routes {
-            let mut backend_refs = Vec::new();
+            let mut groups = Vec::new();
 
-            // Create backend refs for each backend in the route
-            for backend in &route.backends {
-                let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
-                backend_refs.push(WeightedBackendRef {
-                    key,
-                    weight: backend.weight,
+            // Create backend groups
+            for group in &route.backend_groups {
+                let mut backend_keys = Vec::new();
+                for backend in &group.backends {
+                    let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
+                    backend_keys.push(key);
+                }
+                groups.push(WeightedBackendGroup {
+                    weight: group.weight,
+                    backends: backend_keys,
                 });
             }
 
@@ -284,7 +289,7 @@ pub fn build_vhost_directors(
                 headers,
                 query_params,
                 filters,
-                backends: backend_refs,
+                backend_groups: groups,
                 listeners: route.listeners.clone(),
                 priority: route.priority,
                 rule_index: route.rule_index,
@@ -300,12 +305,16 @@ pub fn build_vhost_directors(
 
         // Add default_backends as lowest priority route if present
         if !vhost.default_backends.is_empty() {
-            let mut default_refs = Vec::new();
-            for backend in &vhost.default_backends {
-                let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
-                default_refs.push(WeightedBackendRef {
-                    key,
-                    weight: backend.weight,
+            let mut default_groups = Vec::new();
+            for group in &vhost.default_backends {
+                let mut backend_keys = Vec::new();
+                for backend in &group.backends {
+                    let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
+                    backend_keys.push(key);
+                }
+                default_groups.push(WeightedBackendGroup {
+                    weight: group.weight,
+                    backends: backend_keys,
                 });
             }
             route_entries.push(RouteEntry {
@@ -314,7 +323,7 @@ pub fn build_vhost_directors(
                 headers: Vec::new(),
                 query_params: Vec::new(),
                 filters: None,
-                backends: default_refs,
+                backend_groups: default_groups,
                 listeners: Vec::new(),
                 priority: 0,
                 rule_index: i32::MAX,
@@ -778,13 +787,13 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_ref_creation() {
-        let ref1 = WeightedBackendRef {
-            key: "10.0.0.1:8080".to_string(),
+    fn test_backend_group_creation() {
+        let group = WeightedBackendGroup {
             weight: 100,
+            backends: vec!["10.0.0.1:8080".to_string(), "10.0.0.2:8080".to_string()],
         };
-        assert_eq!(ref1.key, "10.0.0.1:8080");
-        assert_eq!(ref1.weight, 100);
+        assert_eq!(group.weight, 100);
+        assert_eq!(group.backends.len(), 2);
     }
 
     #[test]
