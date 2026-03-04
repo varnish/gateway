@@ -17,7 +17,7 @@ type Config struct {
 	VarnishDir string // -n argument, empty for default
 
 	// Generic - user provides raw argument values
-	Listen  []string          // -a values, e.g. "http=:8080", "https=:443,HTTPS"
+	Listen  []string          // -a values, e.g. "http=:8080", "https=:443,https"
 	Storage []string          // -s values, e.g. "malloc,256m", "file,/path,10G"
 	Params  map[string]string // -p parameters as name -> value
 

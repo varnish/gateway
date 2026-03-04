@@ -285,7 +285,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		},
 		{Name: "VARNISH_ADMIN_PORT", Value: "6082"},
 		{Name: "VARNISH_HTTP_ADDR", Value: fmt.Sprintf("localhost:%d", varnishHTTPPort)},
-		{Name: "VARNISH_LISTEN", Value: fmt.Sprintf("http=:%d", varnishHTTPPort)},
+		{Name: "VARNISH_LISTEN", Value: fmt.Sprintf("http=:%d,http", varnishHTTPPort)},
 		{Name: "VARNISH_STORAGE", Value: "malloc,256m"},
 		{Name: "VCL_PATH", Value: "/etc/varnish/main.vcl"},
 		{Name: "CONFIGMAP_NAME", Value: fmt.Sprintf("%s-vcl", gateway.Name)},
@@ -306,7 +306,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 	// Add TLS configuration if HTTPS listeners exist
 	if hasTLS {
 		env = append(env,
-			corev1.EnvVar{Name: "VARNISH_TLS_LISTEN", Value: fmt.Sprintf("https=:%d,HTTPS", varnishHTTPSPort)},
+			corev1.EnvVar{Name: "VARNISH_TLS_LISTEN", Value: fmt.Sprintf("https=:%d,https", varnishHTTPSPort)},
 			corev1.EnvVar{Name: "TLS_CERT_DIR", Value: "/etc/varnish/tls"},
 		)
 	}
