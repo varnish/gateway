@@ -78,7 +78,7 @@ func TestBuildArgs(t *testing.T) {
 	}
 
 	// Check expected arguments
-	expectedArgs := []string{"-n", "/tmp/test/varnish", "-F", "-f", "", "-a", ":8080,http"}
+	expectedArgs := []string{"-n", "/tmp/test/varnish", "-F", "-f", "", "-a", ":8080,http", "-t", "0"}
 	for _, expected := range expectedArgs {
 		found := false
 		for _, arg := range args {
@@ -130,18 +130,34 @@ func TestBuildArgsWithExtraArgs(t *testing.T) {
 		t.Fatalf("BuildArgs failed: %v", err)
 	}
 
-	// Verify extra args are appended at the end
-	// The last 4 elements should be our extra args
-	if len(args) < 4 {
-		t.Fatalf("Expected at least 4 args, got %d", len(args))
+	// Verify extra args are appended at the end (after default -t 0)
+	argsStr := strings.Join(args, " ")
+	if !strings.Contains(argsStr, "-p thread_pools=4") {
+		t.Error("Expected -p thread_pools=4 in args")
+	}
+	if !strings.Contains(argsStr, "-p workspace_client=256k") {
+		t.Error("Expected -p workspace_client=256k in args")
 	}
 
-	tail := args[len(args)-4:]
-	expected := []string{"-p", "thread_pools=4", "-p", "workspace_client=256k"}
-	for i, exp := range expected {
-		if tail[i] != exp {
-			t.Errorf("Expected extra arg[%d] = %s, got %s", i, exp, tail[i])
+	// Verify extra args come after -t 0 (so user overrides work)
+	tIdx := -1
+	extraIdx := -1
+	for i, arg := range args {
+		if arg == "-t" && i+1 < len(args) && args[i+1] == "0" {
+			tIdx = i
 		}
+		if arg == "thread_pools=4" {
+			extraIdx = i
+		}
+	}
+	if tIdx == -1 {
+		t.Error("Default -t 0 not found in args")
+	}
+	if extraIdx == -1 {
+		t.Error("Extra args not found")
+	}
+	if tIdx > extraIdx {
+		t.Error("Default -t 0 should come before extra args")
 	}
 }
 

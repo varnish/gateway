@@ -69,6 +69,11 @@ func BuildArgs(cfg *Config) ([]string, error) {
 		args = append(args, "-p", fmt.Sprintf("%s=%s", k, v))
 	}
 
+	// Default TTL of 0 disables caching unless backends send Cache-Control headers.
+	// This prevents stale content issues with blue/green deployments and similar patterns.
+	// Users can override by passing -t in ExtraArgs (last flag wins in varnishd).
+	args = append(args, "-t", "0")
+
 	// Append user-provided extra arguments
 	args = append(args, cfg.ExtraArgs...)
 
