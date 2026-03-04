@@ -17,6 +17,7 @@ impl VclBackend<NotFoundBody> for NotFoundBackend {
             .ok_or_else(|| VclError::new("Missing beresp in not_found backend".to_string()))?;
         beresp.set_status(404);
         beresp.set_header("Content-Type", "text/plain")?;
+        beresp.set_header("Cache-Control", "no-store")?;
 
         Ok(Some(NotFoundBody::new()))
     }

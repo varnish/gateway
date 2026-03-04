@@ -59,6 +59,7 @@ impl VclBackend<RedirectBody> for RedirectBackend {
 
             beresp.set_status(config.filter.status_code as u16);
             beresp.set_header("Location", &location)?;
+            beresp.set_header("Cache-Control", "no-store")?;
         }
 
         // Remove internal header (mutable borrow)
