@@ -485,7 +485,7 @@ fn match_routes<'a>(
 /// Select a backend using two-level weighted random selection:
 /// Level 1: pick a group by weight (skip weight-0 groups)
 /// Level 2: uniform random within selected group
-fn select_backend_from_groups<'a>(groups: &'a [WeightedBackendGroup]) -> Option<&'a str> {
+fn select_backend_from_groups(groups: &[WeightedBackendGroup]) -> Option<&str> {
     if groups.is_empty() {
         return None;
     }
