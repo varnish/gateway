@@ -306,7 +306,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 	// Add TLS configuration if HTTPS listeners exist
 	if hasTLS {
 		env = append(env,
-			corev1.EnvVar{Name: "VARNISH_TLS_LISTEN", Value: fmt.Sprintf("https=:%d", varnishHTTPSPort)},
+			corev1.EnvVar{Name: "VARNISH_TLS_LISTEN", Value: fmt.Sprintf("https=:%d,HTTPS", varnishHTTPSPort)},
 			corev1.EnvVar{Name: "TLS_CERT_DIR", Value: "/etc/varnish/tls"},
 		)
 	}

@@ -91,7 +91,7 @@ type Config struct {
 
 	// TLS configuration
 	TLSCertDir string   // path to TLS cert directory (empty = no TLS)
-	TLSListen  []string // -a arguments for HTTPS (e.g., "https=:8443")
+	TLSListen  []string // -a arguments for HTTPS (e.g., "https=:8443,HTTPS")
 
 	// Health endpoint
 	HealthAddr string // address for health endpoint
