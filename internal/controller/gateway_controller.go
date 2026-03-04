@@ -388,43 +388,33 @@ func needsSecretUpdate(existing, desired *corev1.Secret) bool {
 	return false
 }
 
-// updateGatewayStatus updates Gateway status using Server-Side Apply.
-// Creates a minimal patch object to avoid conflicts with HTTPRoute controller.
+// updateGatewayStatus updates Gateway status using a merge patch.
 func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *gatewayv1.Gateway, success bool, errMsg string) error {
-	// Create minimal Gateway object for SSA patch - only include fields we own
-	patch := &gatewayv1.Gateway{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: gatewayv1.GroupVersion.String(),
-			Kind:       "Gateway",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       gateway.Name,
-			Namespace:  gateway.Namespace,
-			Generation: gateway.Generation,
-		},
-	}
+	// Work on a deep copy to build the desired status without modifying the original
+	updated := gateway.DeepCopy()
 
 	// Set gateway-level conditions
 	if success {
-		status.SetGatewayAccepted(patch, true,
+		status.SetGatewayAccepted(updated, true,
 			string(gatewayv1.GatewayReasonAccepted),
 			"Gateway accepted by controller")
-		status.SetGatewayProgrammed(patch, true,
+		status.SetGatewayProgrammed(updated, true,
 			string(gatewayv1.GatewayReasonProgrammed),
 			"Gateway configuration programmed")
 	} else {
-		status.SetGatewayAccepted(patch, false,
+		status.SetGatewayAccepted(updated, false,
 			string(gatewayv1.GatewayReasonInvalid),
 			errMsg)
-		status.SetGatewayProgrammed(patch, false,
+		status.SetGatewayProgrammed(updated, false,
 			string(gatewayv1.GatewayReasonInvalid),
 			errMsg)
 	}
 
-	// Set listener statuses (conditions and SupportedKinds only, not AttachedRoutes)
-	r.setListenerStatusesForPatch(ctx, patch, gateway)
+	// Set listener statuses (conditions, SupportedKinds, and AttachedRoutes)
+	r.setListenerStatusesForUpdate(ctx, updated, gateway)
 
 	// Populate addresses from the Service's LoadBalancer status
+	updated.Status.Addresses = nil
 	svc := &corev1.Service{}
 	if err := r.Get(ctx, types.NamespacedName{
 		Name:      gateway.Name,
@@ -432,13 +422,13 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *ga
 	}, svc); err == nil {
 		for _, ingress := range svc.Status.LoadBalancer.Ingress {
 			if ingress.IP != "" {
-				patch.Status.Addresses = append(patch.Status.Addresses, gatewayv1.GatewayStatusAddress{
+				updated.Status.Addresses = append(updated.Status.Addresses, gatewayv1.GatewayStatusAddress{
 					Type:  ptr(gatewayv1.IPAddressType),
 					Value: ingress.IP,
 				})
 			}
 			if ingress.Hostname != "" {
-				patch.Status.Addresses = append(patch.Status.Addresses, gatewayv1.GatewayStatusAddress{
+				updated.Status.Addresses = append(updated.Status.Addresses, gatewayv1.GatewayStatusAddress{
 					Type:  ptr(gatewayv1.HostnameAddressType),
 					Value: ingress.Hostname,
 				})
@@ -446,20 +436,21 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *ga
 		}
 	}
 
-	// Apply the patch
-	if err := r.Status().Patch(ctx, patch, client.Apply,
-		client.FieldOwner("varnish-gateway-controller"),
-		client.ForceOwnership); err != nil {
+	// Use MergeFrom patch to update only the status subresource.
+	// This avoids SSA field ownership issues where zero-value spec fields
+	// (gatewayClassName, listeners) would be included in the patch payload.
+	if err := r.Status().Patch(ctx, updated, client.MergeFrom(gateway)); err != nil {
 		return fmt.Errorf("r.Status().Patch: %w", err)
 	}
 
 	return nil
 }
 
-// setListenerStatusesForPatch sets listener statuses for SSA patch.
+// setListenerStatusesForUpdate sets listener statuses on the updated gateway object.
 // Computes all listener status fields: conditions, SupportedKinds, and AttachedRoutes.
 // AttachedRoutes is computed by listing HTTPRoutes attached to this Gateway.
-func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, patch *gatewayv1.Gateway, original *gatewayv1.Gateway) {
+// The original parameter is the gateway as fetched from the API server (used for existing status times).
+func (r *GatewayReconciler) setListenerStatusesForUpdate(ctx context.Context, updated *gatewayv1.Gateway, original *gatewayv1.Gateway) {
 	// Build map of existing listener statuses to preserve condition times
 	existingStatuses := make(map[gatewayv1.SectionName]gatewayv1.ListenerStatus)
 	for _, ls := range original.Status.Listeners {
@@ -473,9 +464,9 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 		// Continue with empty routes - AttachedRoutes will be 0
 	}
 
-	patch.Status.Listeners = make([]gatewayv1.ListenerStatus, 0, len(original.Spec.Listeners))
+	updated.Status.Listeners = make([]gatewayv1.ListenerStatus, 0, len(updated.Spec.Listeners))
 
-	for _, listener := range original.Spec.Listeners {
+	for _, listener := range updated.Spec.Listeners {
 		existing, hasExisting := existingStatuses[listener.Name]
 
 		// Preserve existing condition times if status unchanged
@@ -496,7 +487,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			{
 				Type:               string(gatewayv1.ListenerConditionAccepted),
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: original.Generation,
+				ObservedGeneration: updated.Generation,
 				LastTransitionTime: acceptedTime,
 				Reason:             string(gatewayv1.ListenerReasonAccepted),
 				Message:            "Listener accepted",
@@ -504,7 +495,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			{
 				Type:               string(gatewayv1.ListenerConditionProgrammed),
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: original.Generation,
+				ObservedGeneration: updated.Generation,
 				LastTransitionTime: programmedTime,
 				Reason:             string(gatewayv1.ListenerReasonProgrammed),
 				Message:            "Listener programmed",
@@ -519,7 +510,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			conditions = append(conditions, metav1.Condition{
 				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
 				Status:             metav1.ConditionFalse,
-				ObservedGeneration: original.Generation,
+				ObservedGeneration: updated.Generation,
 				LastTransitionTime: metav1.Now(),
 				Reason:             string(gatewayv1.ListenerReasonInvalidRouteKinds),
 				Message:            "One or more route kinds are not supported",
@@ -528,7 +519,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 
 		// Add ResolvedRefs condition for HTTPS listeners
 		if listener.Protocol == gatewayv1.HTTPSProtocolType {
-			resolvedRefs := r.validateListenerTLSRefs(ctx, original, &listener)
+			resolvedRefs := r.validateListenerTLSRefs(ctx, updated, &listener)
 			conditions = append(conditions, resolvedRefs)
 		}
 
@@ -546,7 +537,7 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 			conditions = append(conditions, metav1.Condition{
 				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
 				Status:             metav1.ConditionTrue,
-				ObservedGeneration: original.Generation,
+				ObservedGeneration: updated.Generation,
 				LastTransitionTime: resolvedRefsTime,
 				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
 				Message:            "References resolved",
@@ -570,9 +561,9 @@ func (r *GatewayReconciler) setListenerStatusesForPatch(ctx context.Context, pat
 		}
 
 		// Compute AttachedRoutes for this listener
-		attachedRoutes := countRoutesForListener(routes, listener, original)
+		attachedRoutes := countRoutesForListener(routes, listener, updated)
 
-		patch.Status.Listeners = append(patch.Status.Listeners, gatewayv1.ListenerStatus{
+		updated.Status.Listeners = append(updated.Status.Listeners, gatewayv1.ListenerStatus{
 			Name:           listener.Name,
 			SupportedKinds: supportedKinds,
 			AttachedRoutes: attachedRoutes,

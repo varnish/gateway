@@ -2499,16 +2499,13 @@ func TestSetListenerStatusesForPatch(t *testing.T) {
 				},
 			},
 		}
-		patch := &gatewayv1.Gateway{
-			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
-		}
+		updated := original.DeepCopy()
+		r.setListenerStatusesForUpdate(ctx, updated, original)
 
-		r.setListenerStatusesForPatch(ctx, patch, original)
-
-		if len(patch.Status.Listeners) != 1 {
-			t.Fatalf("expected 1 listener status, got %d", len(patch.Status.Listeners))
+		if len(updated.Status.Listeners) != 1 {
+			t.Fatalf("expected 1 listener status, got %d", len(updated.Status.Listeners))
 		}
-		ls := patch.Status.Listeners[0]
+		ls := updated.Status.Listeners[0]
 		if ls.Name != "http" {
 			t.Errorf("expected listener name 'http', got %q", ls.Name)
 		}
@@ -2538,13 +2535,11 @@ func TestSetListenerStatusesForPatch(t *testing.T) {
 				},
 			},
 		}
-		patch := &gatewayv1.Gateway{
-			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
-		}
+		updated := original.DeepCopy()
 
-		r.setListenerStatusesForPatch(ctx, patch, original)
+		r.setListenerStatusesForUpdate(ctx, updated, original)
 
-		ls := patch.Status.Listeners[0]
+		ls := updated.Status.Listeners[0]
 		condMap := conditionsToMap(ls.Conditions)
 		assertConditionTrue(t, condMap, string(gatewayv1.ListenerConditionAccepted))
 		assertConditionTrue(t, condMap, string(gatewayv1.ListenerConditionProgrammed))
@@ -2568,13 +2563,11 @@ func TestSetListenerStatusesForPatch(t *testing.T) {
 				},
 			},
 		}
-		patch := &gatewayv1.Gateway{
-			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
-		}
+		updated := original.DeepCopy()
 
-		r.setListenerStatusesForPatch(ctx, patch, original)
+		r.setListenerStatusesForUpdate(ctx, updated, original)
 
-		ls := patch.Status.Listeners[0]
+		ls := updated.Status.Listeners[0]
 		condMap := conditionsToMap(ls.Conditions)
 		// ResolvedRefs should be False
 		assertConditionFalse(t, condMap, string(gatewayv1.ListenerConditionResolvedRefs))
@@ -2609,13 +2602,11 @@ func TestSetListenerStatusesForPatch(t *testing.T) {
 				},
 			},
 		}
-		patch := &gatewayv1.Gateway{
-			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
-		}
+		updated := original.DeepCopy()
 
-		r.setListenerStatusesForPatch(ctx, patch, original)
+		r.setListenerStatusesForUpdate(ctx, updated, original)
 
-		ls := patch.Status.Listeners[0]
+		ls := updated.Status.Listeners[0]
 		for _, c := range ls.Conditions {
 			if c.Type == string(gatewayv1.ListenerConditionAccepted) {
 				if !c.LastTransitionTime.Equal(&existingTime) {
@@ -2646,17 +2637,15 @@ func TestSetListenerStatusesForPatch(t *testing.T) {
 			},
 		}
 		r := newTestReconciler(scheme, gw, route)
-		patch := &gatewayv1.Gateway{
-			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
-		}
+		updated := gw.DeepCopy()
 
-		r.setListenerStatusesForPatch(ctx, patch, gw)
+		r.setListenerStatusesForUpdate(ctx, updated, gw)
 
-		if len(patch.Status.Listeners) != 1 {
-			t.Fatalf("expected 1 listener status, got %d", len(patch.Status.Listeners))
+		if len(updated.Status.Listeners) != 1 {
+			t.Fatalf("expected 1 listener status, got %d", len(updated.Status.Listeners))
 		}
-		if patch.Status.Listeners[0].AttachedRoutes != 1 {
-			t.Errorf("expected AttachedRoutes=1, got %d", patch.Status.Listeners[0].AttachedRoutes)
+		if updated.Status.Listeners[0].AttachedRoutes != 1 {
+			t.Errorf("expected AttachedRoutes=1, got %d", updated.Status.Listeners[0].AttachedRoutes)
 		}
 	})
 }
