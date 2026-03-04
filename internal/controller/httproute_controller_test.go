@@ -1328,4 +1328,153 @@ func TestBuildServicePortMap_UnmatchedPort(t *testing.T) {
 	}
 }
 
+// TestReconcile_HTTPSListenerMulti reproduces the HTTPRouteHTTPSListener conformance test.
+// Gateway has two HTTPS listeners: one catch-all (no hostname) and one with hostname "second-example.org".
+// Route 1: hostname "example.org", no sectionName → should match via catch-all listener.
+// Route 2: no hostname, sectionName "https-with-hostname" → should inherit "second-example.org" from listener.
+// Both must appear in routing.json so ghost can route to both hostnames.
+func TestReconcile_HTTPSListenerMulti(t *testing.T) {
+	scheme := newTestScheme()
+	ns := "gateway-conformance-infra"
+	secondExampleOrg := gatewayv1.Hostname("second-example.org")
+	sectionName := gatewayv1.SectionName("https-with-hostname")
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "same-namespace-with-https-listener",
+			Namespace: ns,
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: gatewayv1.HTTPSProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{
+							From: func() *gatewayv1.FromNamespaces { f := gatewayv1.NamespacesFromSame; return &f }(),
+						},
+					},
+				},
+				{
+					Name:     "https-with-hostname",
+					Port:     443,
+					Protocol: gatewayv1.HTTPSProtocolType,
+					Hostname: &secondExampleOrg,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{
+							From: func() *gatewayv1.FromNamespaces { f := gatewayv1.NamespacesFromSame; return &f }(),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "same-namespace-with-https-listener-vcl",
+			Namespace: ns,
+		},
+		Data: map[string]string{
+			"main.vcl":     "vcl 4.1;",
+			"routing.json": `{"version": 2, "vhosts": {}}`,
+		},
+	}
+
+	// Route 1: has hostname, no sectionName
+	route1 := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "httproute-https-test",
+			Namespace: ns,
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Hostnames: []gatewayv1.Hostname{"example.org"},
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Name: "same-namespace-with-https-listener"},
+				},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{BackendRef: gatewayv1.BackendRef{
+							BackendObjectReference: gatewayv1.BackendObjectReference{
+								Name: "infra-backend-v1",
+								Port: ptr(gatewayv1.PortNumber(8080)),
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	// Route 2: no hostname, sectionName targets listener with hostname
+	route2 := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "httproute-https-test-no-hostname",
+			Namespace: ns,
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{
+						Name:        "same-namespace-with-https-listener",
+						SectionName: &sectionName,
+					},
+				},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{BackendRef: gatewayv1.BackendRef{
+							BackendObjectReference: gatewayv1.BackendObjectReference{
+								Name: "infra-backend-v2",
+								Port: ptr(gatewayv1.PortNumber(8080)),
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gateway, configMap, route1, route2)
+
+	// Reconcile route-2 (the one that inherits hostname from listener)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "httproute-https-test-no-hostname", Namespace: ns},
+	})
+	if err != nil {
+		t.Fatalf("reconcile route-2 failed: %v", err)
+	}
+
+	// Get the routing.json
+	var cm corev1.ConfigMap
+	if err := r.Get(context.Background(),
+		types.NamespacedName{Name: "same-namespace-with-https-listener-vcl", Namespace: ns}, &cm); err != nil {
+		t.Fatalf("failed to get ConfigMap: %v", err)
+	}
+	routingJSON := cm.Data["routing.json"]
+	t.Logf("routing.json:\n%s", routingJSON)
+
+	// Both hostnames must be in routing.json
+	if !strings.Contains(routingJSON, "example.org") {
+		t.Error("routing.json missing example.org vhost")
+	}
+	if !strings.Contains(routingJSON, "second-example.org") {
+		t.Error("routing.json missing second-example.org vhost (should be inherited from listener hostname)")
+	}
+
+	// Verify the services are correct
+	if !strings.Contains(routingJSON, "infra-backend-v1") {
+		t.Error("routing.json missing infra-backend-v1")
+	}
+	if !strings.Contains(routingJSON, "infra-backend-v2") {
+		t.Error("routing.json missing infra-backend-v2")
+	}
+}
+
 // NOTE: getUserVCL tests removed - functionality moved to Gateway controller
