@@ -76,9 +76,9 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 func TestGenerate_GhostReloadHandler(t *testing.T) {
 	result := Generate(nil, GeneratorConfig{})
 
-	// Check vcl_recv handles both IPv4 and IPv6 localhost
-	if !strings.Contains(result, `client.ip == "127.0.0.1" || client.ip == "::1"`) {
-		t.Error("expected vcl_recv to check both IPv4 and IPv6 localhost")
+	// Check vcl_recv uses localhost ACL for reload endpoint
+	if !strings.Contains(result, "client.ip ~ localhost") {
+		t.Error("expected vcl_recv to use localhost ACL for reload endpoint")
 	}
 
 	// Check that reload is called on the router
