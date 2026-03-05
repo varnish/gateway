@@ -1,6 +1,7 @@
 package vcl
 
 import (
+	_ "embed"
 	"fmt"
 	"slices"
 	"strings"
@@ -8,6 +9,9 @@ import (
 	"github.com/varnish/gateway/internal/ghost"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
+
+//go:embed preamble.vcl
+var preambleVCL string
 
 // GeneratorConfig holds configuration for VCL generation.
 type GeneratorConfig struct {
@@ -19,66 +23,13 @@ const DefaultGhostConfigPath = "/var/run/varnish/ghost.json"
 
 // Generate produces VCL preamble that integrates with the ghost VMOD.
 // The ghost VMOD handles all routing logic internally; VCL just initializes it.
+// The VCL template is embedded from preamble.vcl.
 func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
 	if config.GhostConfigPath == "" {
 		config.GhostConfigPath = DefaultGhostConfigPath
 	}
 
-	var sb strings.Builder
-
-	sb.WriteString("vcl 4.1;\n\n")
-	sb.WriteString("import ghost;\n\n")
-
-	// Dummy backend to satisfy VCL compiler requirement (ghost handles actual routing)
-	sb.WriteString("backend dummy { .host = \"127.0.0.1\"; .port = \"80\"; }\n\n")
-
-	// Generate vcl_init
-	sb.WriteString("sub vcl_init {\n")
-	fmt.Fprintf(&sb, "    ghost.init(%q);\n", config.GhostConfigPath)
-	sb.WriteString("    new router = ghost.ghost_backend();\n")
-	sb.WriteString("}\n\n")
-
-	// Generate vcl_recv - intercept reload requests + route via ghost
-	sb.WriteString("sub vcl_recv {\n")
-	sb.WriteString("    # Handle reload endpoint (localhost only)\n")
-	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\" && (client.ip == \"127.0.0.1\" || client.ip == \"::1\")) {\n")
-	sb.WriteString("        if (router.reload()) {\n")
-	sb.WriteString("            return (synth(200, \"OK\"));\n")
-	sb.WriteString("        } else {\n")
-	sb.WriteString("            set req.http.X-Ghost-Error = router.last_error();\n")
-	sb.WriteString("            return (synth(500, \"Reload failed\"));\n")
-	sb.WriteString("        }\n")
-	sb.WriteString("    }\n")
-	sb.WriteString("    # Route request using ghost (listener-aware)\n")
-	sb.WriteString("    set req.backend_hint = router.recv();\n")
-	sb.WriteString("}\n\n")
-
-	// Generate vcl_synth - surface reload errors
-	sb.WriteString("sub vcl_synth {\n")
-	sb.WriteString("    # Surface ghost reload errors to chaperone via header\n")
-	sb.WriteString("    if (req.url == \"/.varnish-ghost/reload\") {\n")
-	sb.WriteString("        if (req.http.X-Ghost-Error) {\n")
-	sb.WriteString("            set resp.http.x-ghost-error = req.http.X-Ghost-Error;\n")
-	sb.WriteString("        }\n")
-	sb.WriteString("    }\n")
-	sb.WriteString("}\n\n")
-
-	// Generate vcl_backend_response - copy filter context from req to beresp
-	sb.WriteString("sub vcl_backend_response {\n")
-	sb.WriteString("    # Copy filter context from req to beresp for vcl_deliver\n")
-	sb.WriteString("    if (bereq.http.X-Ghost-Filter-Context) {\n")
-	sb.WriteString("        set beresp.http.X-Ghost-Filter-Context = bereq.http.X-Ghost-Filter-Context;\n")
-	sb.WriteString("    }\n")
-	sb.WriteString("}\n\n")
-
-	// Generate vcl_deliver
-	sb.WriteString("sub vcl_deliver {\n")
-	sb.WriteString("    ghost.deliver();\n")
-	sb.WriteString("}\n\n")
-
-	sb.WriteString("# --- User VCL concatenated below ---\n")
-
-	return sb.String()
+	return fmt.Sprintf(preambleVCL, config.GhostConfigPath)
 }
 
 // CalculateRoutePriority calculates the priority for a route based on all match criteria.
@@ -546,15 +497,14 @@ func convertRequestRedirectFilter(f *gatewayv1.HTTPRequestRedirectFilter) *ghost
 	return result
 }
 
-// socketNameForProtocol maps Gateway API protocol types to Varnish listener socket names.
-// These names correspond to the -a flag socket names used when configuring Varnish listeners.
-func socketNameForProtocol(protocol gatewayv1.ProtocolType) string {
-	switch protocol {
-	case gatewayv1.HTTPSProtocolType, gatewayv1.TLSProtocolType:
-		return "https"
-	default:
-		return "http"
+// socketNameForListener returns the Varnish socket name for a Gateway listener.
+// Format: {proto}-{port}, e.g. "http-80", "https-443"
+func socketNameForListener(listener *gatewayv1.Listener) string {
+	proto := "http"
+	if listener.Protocol == gatewayv1.HTTPSProtocolType || listener.Protocol == gatewayv1.TLSProtocolType {
+		proto = "https"
 	}
+	return fmt.Sprintf("%s-%d", proto, listener.Port)
 }
 
 // listenersForRoute computes which Varnish listeners a route applies to based on its
@@ -567,8 +517,15 @@ func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) [
 
 	// Build map: listener name → socket name
 	listenerSockets := make(map[string]string)
-	for _, l := range gateway.Spec.Listeners {
-		listenerSockets[string(l.Name)] = socketNameForProtocol(l.Protocol)
+	for i := range gateway.Spec.Listeners {
+		l := &gateway.Spec.Listeners[i]
+		listenerSockets[string(l.Name)] = socketNameForListener(l)
+	}
+
+	// Build set of all gateway socket names for "covers all listeners" check
+	allSockets := make(map[string]bool)
+	for _, s := range listenerSockets {
+		allSockets[s] = true
 	}
 
 	// Collect socket names from parentRefs targeting this gateway
@@ -606,8 +563,15 @@ func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) [
 		return nil
 	}
 
-	// If the route covers both http and https, that's the same as all listeners
-	if socketSet["http"] && socketSet["https"] {
+	// If the route covers ALL listeners of the gateway, return nil (no filtering needed)
+	coversAll := true
+	for s := range allSockets {
+		if !socketSet[s] {
+			coversAll = false
+			break
+		}
+	}
+	if coversAll {
 		return nil
 	}
 
