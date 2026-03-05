@@ -286,7 +286,7 @@ impl VhostDirector {
 
                     // Determine scheme from listener name (authoritative)
                     // Listeners are named "http-{port}" or "https-{port}"
-                    let scheme = if listener.map_or(false, |l| l.starts_with("https")) {
+                    let scheme = if listener.is_some_and(|l| l.starts_with("https")) {
                         "https"
                     } else {
                         "http"
