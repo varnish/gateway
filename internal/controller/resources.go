@@ -453,7 +453,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		Env:   env,
 		SecurityContext: &corev1.SecurityContext{
 			Capabilities: &corev1.Capabilities{
-				Add: []corev1.Capability{"IPC_LOCK"},
+				Add: []corev1.Capability{"IPC_LOCK", "NET_BIND_SERVICE"},
 			},
 		},
 		Ports:        ports,

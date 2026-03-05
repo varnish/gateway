@@ -4,6 +4,11 @@ import ghost;
 
 backend dummy { .host = "127.0.0.1"; .port = "80"; }
 
+acl localhost {
+    "127.0.0.1";
+    "::1";
+}
+
 sub vcl_init {
     ghost.init("%s");
     new router = ghost.ghost_backend();
@@ -11,7 +16,7 @@ sub vcl_init {
 
 sub vcl_recv {
     # Handle reload endpoint (localhost only)
-    if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
+    if (req.url == "/.varnish-ghost/reload" && client.ip ~ localhost) {
         if (router.reload()) {
             return (synth(200, "OK"));
         } else {
