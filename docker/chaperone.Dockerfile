@@ -40,9 +40,12 @@ FROM ghcr.io/varnish/varnish-base:8.0
 
 USER root
 
-# Install libcap2-bin for setcap, set IPC_LOCK capability on varnishd for mlock()
+# Install libcap2-bin for setcap, set file capabilities on varnishd.
+# Both caps must be file capabilities because any file cap causes the kernel to
+# clear ambient capabilities on execve() — so NET_BIND_SERVICE (from the
+# container security context) would be lost if only IPC_LOCK were set here.
 RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
-    && setcap cap_ipc_lock+ep /usr/sbin/varnishd \
+    && setcap cap_ipc_lock,cap_net_bind_service+ep /usr/sbin/varnishd \
     && apt-get remove -y libcap2-bin && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
