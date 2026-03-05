@@ -40,6 +40,7 @@ pub struct RouteMatchResult<'a> {
     pub backend_groups: &'a [WeightedBackendGroup],
     pub filters: Option<Arc<RouteFilters>>,
     pub matched_path: Option<&'a PathMatchCompiled>,
+    pub route_name: Option<&'a str>,
 }
 
 /// Director for a single virtual host
@@ -215,11 +216,12 @@ impl VhostDirector {
     /// by which Varnish listener received the request.
     /// Log messages are collected and returned so the caller can emit them
     /// (avoids borrow conflicts between HttpHeaders and Ctx).
+    /// Route a request. Returns (backend, route_name, log_messages).
     pub fn route_request(
         &self,
         http: &mut HttpHeaders,
         listener: Option<&str>,
-    ) -> (Option<BackendRef>, Vec<(LogTag, String)>) {
+    ) -> (Option<BackendRef>, Option<String>, Vec<(LogTag, String)>) {
         let mut log_msgs: Vec<(LogTag, String)> = Vec::new();
 
         // Extract request components (owned strings to avoid borrow conflicts)
@@ -259,10 +261,11 @@ impl VhostDirector {
             listener,
         ) {
             Some(r) => r,
-            None => return (None, log_msgs),
+            None => return (None, None, log_msgs),
         };
         let backend_groups = match_result.backend_groups;
         let matched_filters = match_result.filters.as_ref();
+        let route_name = match_result.route_name.map(|s| s.to_string());
 
         // Apply request filters BEFORE backend selection
         if let Some(filters) = matched_filters {
@@ -282,7 +285,8 @@ impl VhostDirector {
                     let (hostname, port_opt) = parse_host_and_port(host_header);
 
                     // Determine scheme from listener name (authoritative)
-                    let scheme = if listener == Some("https") {
+                    // Listeners are named "http-{port}" or "https-{port}"
+                    let scheme = if listener.map_or(false, |l| l.starts_with("https")) {
                         "https"
                     } else {
                         "http"
@@ -318,7 +322,7 @@ impl VhostDirector {
                             LogTag::Error,
                             format!("Failed to serialize redirect config: {}", e),
                         ));
-                        return (None, log_msgs);
+                        return (None, route_name.clone(), log_msgs);
                     }
                 };
 
@@ -327,11 +331,12 @@ impl VhostDirector {
                         LogTag::Error,
                         format!("Failed to set redirect config header: {}", e),
                     ));
-                    return (None, log_msgs);
+                    return (None, route_name.clone(), log_msgs);
                 }
 
                 return (
                     self.redirect_backend.as_ref().map(|r| r.0.clone()),
+                    route_name.clone(),
                     log_msgs,
                 );
             }
@@ -364,6 +369,7 @@ impl VhostDirector {
             None => {
                 return (
                     self.internal_error_backend.as_ref().map(|r| r.0.clone()),
+                    route_name,
                     log_msgs,
                 );
             }
@@ -375,11 +381,12 @@ impl VhostDirector {
         // Look up in backend pool
         let backend = match self.backend_pool.get(backend_key) {
             Some(b) => b,
-            None => return (None, log_msgs),
+            None => return (None, route_name, log_msgs),
         };
 
         (
             Some(AsRef::<BackendRef>::as_ref(&*backend).clone()),
+            route_name,
             log_msgs,
         )
     }
@@ -388,7 +395,7 @@ impl VhostDirector {
 impl VclDirector for VhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         let bereq = ctx.http_bereq.as_mut()?;
-        let (result, log_msgs) = self.route_request(bereq, None);
+        let (result, _route_name, log_msgs) = self.route_request(bereq, None);
         for (tag, msg) in log_msgs {
             ctx.log(tag, &msg);
         }
@@ -476,6 +483,7 @@ fn match_routes<'a>(
             backend_groups: &route.backend_groups,
             filters: route.filters.clone(),
             matched_path: route.path_match.as_ref(),
+            route_name: route.route_name.as_deref(),
         });
     }
 
@@ -680,6 +688,7 @@ mod tests {
                 backends: vec!["10.0.0.1:8080".to_string()],
             }],
             listeners: Vec::new(),
+            route_name: None,
             priority: 100,
             rule_index: 0,
         }];
@@ -704,6 +713,7 @@ mod tests {
                 backends: vec!["10.0.0.1:8080".to_string()],
             }],
             listeners: Vec::new(),
+            route_name: None,
             priority: 100,
             rule_index: 0,
         }];
@@ -731,6 +741,7 @@ mod tests {
                     backends: vec!["10.0.0.1:8080".to_string()],
                 }],
                 listeners: Vec::new(),
+                route_name: None,
                 priority: 100,
                 rule_index: 0,
             }],
@@ -820,6 +831,7 @@ mod tests {
             backend_groups: &groups,
             filters: Some(filters.clone()),
             matched_path: Some(&path_match),
+            route_name: Some("default/my-route"),
         };
 
         assert_eq!(result.backend_groups.len(), 1);

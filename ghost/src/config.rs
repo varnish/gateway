@@ -146,10 +146,13 @@ pub struct Route {
     #[serde(default)]
     pub filters: Option<RouteFilters>,
     pub backend_groups: Vec<BackendGroup>,
-    /// Listener names this route applies to (e.g., ["http"], ["https"]).
+    /// Listener names this route applies to (e.g., ["http-80"], ["https-443"]).
     /// Empty means match all listeners (backwards compatible).
     #[serde(default)]
     pub listeners: Vec<String>,
+    /// HTTPRoute namespace/name for X-Gateway-Route header.
+    #[serde(default)]
+    pub route_name: Option<String>,
     pub priority: i32,
     #[serde(default)]
     pub rule_index: i32,

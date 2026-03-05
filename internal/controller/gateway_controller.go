@@ -190,7 +190,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		VarnishdExtraArgs:   varnishdExtraArgs,
 		Logging:             logging,
 		ImagePullSecrets:    imagePullSecrets,
-		HasTLS:              hasTLS,
+		ListenerSpecs:       listenerSpecs(gateway),
 		ExtraVolumes:        extraVolumes,
 		ExtraVolumeMounts:   extraVolumeMounts,
 		ExtraInitContainers: extraInitContainers,
@@ -210,7 +210,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	resources = append(resources,
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
-		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash, hasTLS, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources),
+		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources),
 		r.buildService(gateway),
 	)
 

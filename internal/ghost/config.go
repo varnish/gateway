@@ -130,7 +130,8 @@ type Route struct {
 	Namespace   string            `json:"namespace"`
 	Port        int               `json:"port"`
 	Weight      int               `json:"weight"`
-	Listeners   []string          `json:"listeners,omitempty"` // Listener names (e.g., ["http"], ["https"])
+	Listeners   []string          `json:"listeners,omitempty"`   // Varnish socket names (e.g., ["http-80"])
+	RouteName   string            `json:"route_name,omitempty"`  // HTTPRoute namespace/name
 	Priority    int               `json:"priority"`
 	RuleIndex   int               `json:"rule_index"` // Original rule ordering for tiebreaking
 }
@@ -156,7 +157,8 @@ type RouteBackends struct {
 	QueryParams   []QueryParamMatch `json:"query_params,omitempty"`
 	Filters       *RouteFilters     `json:"filters,omitempty"`
 	BackendGroups []BackendGroup    `json:"backend_groups"`
-	Listeners     []string          `json:"listeners,omitempty"` // Listener names (e.g., ["http"], ["https"])
+	Listeners     []string          `json:"listeners,omitempty"`   // Varnish socket names (e.g., ["http-80"])
+	RouteName     string            `json:"route_name,omitempty"`  // HTTPRoute namespace/name
 	Priority      int               `json:"priority"`
 	RuleIndex     int               `json:"rule_index"`
 }

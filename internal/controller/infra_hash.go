@@ -33,10 +33,10 @@ type InfrastructureConfig struct {
 	// ImagePullSecrets for pulling the gateway image
 	ImagePullSecrets []string
 
-	// HasTLS indicates whether HTTPS listeners exist. Adding/removing an HTTPS
-	// listener changes the varnishd listen args and requires a pod restart.
-	// Individual cert ref changes are handled by the TLS file watcher without restart.
-	HasTLS bool
+	// ListenerSpecs is a deterministic string representation of all listener ports
+	// and protocols (e.g., "http-80,https-443"). Any listener change (adding, removing,
+	// or changing port/protocol) triggers a pod restart since it affects varnishd listen args.
+	ListenerSpecs string
 
 	// ExtraVolumes are additional volumes to add to the varnish pod
 	ExtraVolumes []corev1.Volume
@@ -87,10 +87,8 @@ func (c *InfrastructureConfig) ComputeHash() string {
 	h.Write([]byte(strings.Join(sortedSecrets, "\x00")))
 	h.Write([]byte{0}) // separator
 
-	// Include TLS flag (adding/removing HTTPS listeners changes listen args)
-	if c.HasTLS {
-		h.Write([]byte("tls"))
-	}
+	// Include listener specs (any listener change affects listen args)
+	h.Write([]byte(c.ListenerSpecs))
 	h.Write([]byte{0}) // separator
 
 	// Include extra volumes, mounts, and init containers via JSON marshal.

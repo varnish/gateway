@@ -32,6 +32,7 @@ func TestConformance(t *testing.T) {
 		features.SupportHTTPRoutePathRedirect,
 		features.SupportHTTPRouteHostRewrite,
 		features.SupportHTTPRoutePathRewrite,
+		features.SupportGatewayHTTPListenerIsolation,
 	)
 
 	version := os.Getenv("GATEWAY_VERSION")

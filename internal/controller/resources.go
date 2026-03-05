@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -23,15 +24,45 @@ const (
 	volumeVarnishRun = "varnish-run"
 	volumeTLSCerts   = "tls-certs"
 
-	// Default port for Varnish HTTP
-	varnishHTTPPort = 8080
-
-	// Default port for Varnish HTTPS
-	varnishHTTPSPort = 8443
-
 	// Chaperone health port
 	chaperoneHealthPort = 8081
 )
+
+// listenerSocketName returns the Varnish socket name for a Gateway listener.
+// Format: {proto}-{port}, e.g. "http-80", "https-443"
+func listenerSocketName(listener *gatewayv1.Listener) string {
+	proto := "http"
+	if listener.Protocol == gatewayv1.HTTPSProtocolType || listener.Protocol == gatewayv1.TLSProtocolType {
+		proto = "https"
+	}
+	return fmt.Sprintf("%s-%d", proto, listener.Port)
+}
+
+// listenerSpecs returns a deterministic string representation of all listener ports and protocols.
+// Format: sorted comma-separated list of socket names, e.g. "http-80,https-443"
+func listenerSpecs(gateway *gatewayv1.Gateway) string {
+	seen := make(map[string]bool)
+	var specs []string
+	for i := range gateway.Spec.Listeners {
+		name := listenerSocketName(&gateway.Spec.Listeners[i])
+		if !seen[name] {
+			seen[name] = true
+			specs = append(specs, name)
+		}
+	}
+	sort.Strings(specs)
+	return strings.Join(specs, ",")
+}
+
+// hasHTTPSListener returns true if any listener uses HTTPS or TLS protocol.
+func hasHTTPSListener(gateway *gatewayv1.Gateway) bool {
+	for _, l := range gateway.Spec.Listeners {
+		if l.Protocol == gatewayv1.HTTPSProtocolType || l.Protocol == gatewayv1.TLSProtocolType {
+			return true
+		}
+	}
+	return false
+}
 
 // mustParseQuantity parses a resource quantity string and panics on error.
 // Used for hardcoded resource values that should never fail.
@@ -157,7 +188,7 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, hasTLS bool, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements) *appsv1.Deployment {
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -212,8 +243,8 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 						"kubernetes.io/arch": "amd64",
 					},
 					InitContainers: extraInitContainers,
-					Containers:     r.buildContainers(gateway, varnishdExtraArgs, logging, hasTLS, extraVolumeMounts, resources),
-					Volumes:        r.buildVolumes(gateway, hasTLS, extraVolumes),
+					Containers:     r.buildContainers(gateway, varnishdExtraArgs, logging, extraVolumeMounts, resources),
+					Volumes:        r.buildVolumes(gateway, extraVolumes),
 				},
 			},
 		},
@@ -221,7 +252,8 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 }
 
 // buildVolumes creates the pod volumes, including TLS cert volume if HTTPS is enabled.
-func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, hasTLS bool, extra []corev1.Volume) []corev1.Volume {
+func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, extra []corev1.Volume) []corev1.Volume {
+	hasTLS := hasHTTPSListener(gateway)
 	volumes := []corev1.Volume{
 		{
 			Name: volumeVCLConfig,
@@ -258,9 +290,9 @@ func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, hasTLS bool
 }
 
 // buildContainers creates the pod containers: main gateway container and optional logging sidecar.
-func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, hasTLS bool, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) []corev1.Container {
+func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) []corev1.Container {
 	containers := []corev1.Container{
-		r.buildGatewayContainer(gateway, varnishdExtraArgs, hasTLS, extraVolumeMounts, resources),
+		r.buildGatewayContainer(gateway, varnishdExtraArgs, extraVolumeMounts, resources),
 	}
 
 	// Add logging sidecar if configured
@@ -273,7 +305,63 @@ func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishd
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
 // This container runs chaperone which manages varnishd internally.
-func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, hasTLS bool, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) corev1.Container {
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) corev1.Container {
+	hasTLS := hasHTTPSListener(gateway)
+
+	// Build VARNISH_LISTEN from all listeners, deduplicating by port.
+	// Format: semicolon-separated list of {proto}-{port}=:{port},{proto} entries.
+	// Example: http-80=:80,http;https-443=:443,https
+	type listenEntry struct {
+		socketName string
+		port       int32
+		proto      string
+	}
+	seenPorts := make(map[int32]bool)
+	var entries []listenEntry
+	for i := range gateway.Spec.Listeners {
+		l := &gateway.Spec.Listeners[i]
+		port := int32(l.Port)
+		if seenPorts[port] {
+			continue
+		}
+		seenPorts[port] = true
+		proto := "http"
+		if l.Protocol == gatewayv1.HTTPSProtocolType || l.Protocol == gatewayv1.TLSProtocolType {
+			proto = "https"
+		}
+		entries = append(entries, listenEntry{
+			socketName: listenerSocketName(l),
+			port:       port,
+			proto:      proto,
+		})
+	}
+
+	// Build VARNISH_LISTEN value
+	var listenParts []string
+	for _, e := range entries {
+		listenParts = append(listenParts, fmt.Sprintf("%s=:%d,%s", e.socketName, e.port, e.proto))
+	}
+	varnishListen := strings.Join(listenParts, ";")
+	if varnishListen == "" {
+		varnishListen = "http-80=:80,http"
+	}
+
+	// VARNISH_HTTP_ADDR: localhost:{first_http_port}
+	// Needed for ghost reload. Use first HTTP listener port, or first listener port if no HTTP.
+	httpAddr := ""
+	for _, e := range entries {
+		if e.proto == "http" {
+			httpAddr = fmt.Sprintf("localhost:%d", e.port)
+			break
+		}
+	}
+	if httpAddr == "" && len(entries) > 0 {
+		httpAddr = fmt.Sprintf("localhost:%d", entries[0].port)
+	}
+	if httpAddr == "" {
+		httpAddr = "localhost:80"
+	}
+
 	env := []corev1.EnvVar{
 		{
 			Name: "NAMESPACE",
@@ -284,8 +372,8 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 			},
 		},
 		{Name: "VARNISH_ADMIN_PORT", Value: "6082"},
-		{Name: "VARNISH_HTTP_ADDR", Value: fmt.Sprintf("localhost:%d", varnishHTTPPort)},
-		{Name: "VARNISH_LISTEN", Value: fmt.Sprintf("http=:%d,http", varnishHTTPPort)},
+		{Name: "VARNISH_HTTP_ADDR", Value: httpAddr},
+		{Name: "VARNISH_LISTEN", Value: varnishListen},
 		{Name: "VARNISH_STORAGE", Value: "malloc,256m"},
 		{Name: "VCL_PATH", Value: "/etc/varnish/main.vcl"},
 		{Name: "CONFIGMAP_NAME", Value: fmt.Sprintf("%s-vcl", gateway.Name)},
@@ -303,30 +391,25 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		})
 	}
 
-	// Add TLS configuration if HTTPS listeners exist
+	// Add TLS cert dir if any HTTPS listener exists
 	if hasTLS {
 		env = append(env,
-			corev1.EnvVar{Name: "VARNISH_TLS_LISTEN", Value: fmt.Sprintf("https=:%d,https", varnishHTTPSPort)},
 			corev1.EnvVar{Name: "TLS_CERT_DIR", Value: "/etc/varnish/tls"},
 		)
 	}
 
+	// Generate container ports dynamically from unique listener ports
 	ports := []corev1.ContainerPort{
-		{
-			Name:          "http",
-			ContainerPort: int32(varnishHTTPPort),
-			Protocol:      corev1.ProtocolTCP,
-		},
 		{
 			Name:          "health",
 			ContainerPort: int32(chaperoneHealthPort),
 			Protocol:      corev1.ProtocolTCP,
 		},
 	}
-	if hasTLS {
+	for _, e := range entries {
 		ports = append(ports, corev1.ContainerPort{
-			Name:          "https",
-			ContainerPort: int32(varnishHTTPSPort),
+			Name:          e.socketName,
+			ContainerPort: e.port,
 			Protocol:      corev1.ProtocolTCP,
 		})
 	}
@@ -400,7 +483,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		LivenessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				TCPSocket: &corev1.TCPSocketAction{
-					Port: intstr.FromInt(varnishHTTPPort),
+					Port: intstr.FromInt(chaperoneHealthPort),
 				},
 			},
 			InitialDelaySeconds: 10,
@@ -416,33 +499,31 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway) *corev1.Ser
 	// Map Gateway listeners to Service ports, deduplicating by port number.
 	// Multiple listeners can share the same port (differentiated by hostname),
 	// but a Service only needs one entry per unique port.
+	// Container ports = listener ports (no translation).
 	var ports []corev1.ServicePort
 	seenPorts := make(map[int32]bool)
-	for _, listener := range gateway.Spec.Listeners {
-		port := int32(listener.Port)
+	for i := range gateway.Spec.Listeners {
+		l := &gateway.Spec.Listeners[i]
+		port := int32(l.Port)
 		if seenPorts[port] {
 			continue
 		}
 		seenPorts[port] = true
-		targetPort := varnishHTTPPort
-		if listener.Protocol == gatewayv1.HTTPSProtocolType {
-			targetPort = varnishHTTPSPort
-		}
 		ports = append(ports, corev1.ServicePort{
-			Name:       string(listener.Name),
+			Name:       listenerSocketName(l),
 			Port:       port,
-			TargetPort: intstr.FromInt(targetPort),
+			TargetPort: intstr.FromInt(int(port)),
 			Protocol:   corev1.ProtocolTCP,
 		})
 	}
 
-	// Default to port 80 if no listeners specified
+	// Default to http-80 on port 80 if no listeners
 	if len(ports) == 0 {
 		ports = []corev1.ServicePort{
 			{
-				Name:       "http",
+				Name:       "http-80",
 				Port:       80,
-				TargetPort: intstr.FromInt(varnishHTTPPort),
+				TargetPort: intstr.FromInt(80),
 				Protocol:   corev1.ProtocolTCP,
 			},
 		}

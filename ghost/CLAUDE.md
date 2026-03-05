@@ -114,6 +114,8 @@ VTC test files include this parameter. See `DEBUG_MODE_LIMITATIONS.md` for detai
 - Request header filters (add, set, remove)
 - Response header filters (add, set, remove)
 - URL rewrite filters (ReplaceFullPath, ReplacePrefixMatch with intelligent fallback)
+- Multi-listener routing via `local.socket()` filtering
+- `X-Gateway-Listener` and `X-Gateway-Route` request headers set on every request
 
 See parent directory's CLAUDE.md for full project roadmap.
 

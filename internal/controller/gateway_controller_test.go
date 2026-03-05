@@ -143,7 +143,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, nil, nil, nil, nil)
+	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", nil, nil, nil, nil)
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -214,7 +214,7 @@ func TestBuildDeployment_WithExtras(t *testing.T) {
 		{Name: "vmod-loader", Image: "busybox:latest", Command: []string{"cp", "/src/libvmod.so", "/dst/"}},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", false, extraVolumes, extraVolumeMounts, extraInitContainers, nil)
+	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil)
 
 	// Verify extra volumes
 	foundVol := false
@@ -912,14 +912,29 @@ func TestBuildLoggingSidecar(t *testing.T) {
 }
 
 func TestBuildGatewayContainer(t *testing.T) {
-	gateway := &gatewayv1.Gateway{
+	httpGateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	httpsGateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+			},
+		},
 	}
 
 	tests := []struct {
 		name              string
+		gateway           *gatewayv1.Gateway
 		varnishdExtraArgs []string
-		hasTLS            bool
 		extraVolumeMounts []corev1.VolumeMount
 		expectPorts       int
 		expectVolMounts   int
@@ -928,27 +943,28 @@ func TestBuildGatewayContainer(t *testing.T) {
 	}{
 		{
 			name:            "no TLS",
-			hasTLS:          false,
-			expectPorts:     2, // http + health
+			gateway:         httpGateway,
+			expectPorts:     2, // health + http-80
 			expectVolMounts: 2, // vcl-config + varnish-run
 		},
 		{
 			name:            "with TLS",
-			hasTLS:          true,
-			expectPorts:     3, // http + health + https
+			gateway:         httpsGateway,
+			expectPorts:     3, // health + http-80 + https-443
 			expectVolMounts: 3, // vcl-config + varnish-run + tls-certs
 			expectTLSEnv:    true,
 		},
 		{
 			name:               "with varnishdExtraArgs",
+			gateway:            httpGateway,
 			varnishdExtraArgs:  []string{"-p", "thread_pools=4"},
 			expectPorts:        2,
 			expectVolMounts:    2,
 			expectExtraArgsEnv: "-p;thread_pools=4",
 		},
 		{
-			name:   "with extra volume mounts",
-			hasTLS: false,
+			name:    "with extra volume mounts",
+			gateway: httpGateway,
 			extraVolumeMounts: []corev1.VolumeMount{
 				{Name: "custom", MountPath: "/custom"},
 			},
@@ -966,7 +982,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 				},
 			}
 
-			container := r.buildGatewayContainer(gateway, tc.varnishdExtraArgs, tc.hasTLS, tc.extraVolumeMounts, nil)
+			container := r.buildGatewayContainer(tc.gateway, tc.varnishdExtraArgs, tc.extraVolumeMounts, nil)
 
 			if len(container.Ports) != tc.expectPorts {
 				t.Errorf("expected %d ports, got %d", tc.expectPorts, len(container.Ports))
@@ -976,13 +992,9 @@ func TestBuildGatewayContainer(t *testing.T) {
 			}
 
 			// Check TLS env vars
-			hasTLSListen := false
 			hasTLSCertDir := false
 			hasExtraArgs := ""
 			for _, env := range container.Env {
-				if env.Name == "VARNISH_TLS_LISTEN" {
-					hasTLSListen = true
-				}
 				if env.Name == "TLS_CERT_DIR" {
 					hasTLSCertDir = true
 				}
@@ -990,11 +1002,11 @@ func TestBuildGatewayContainer(t *testing.T) {
 					hasExtraArgs = env.Value
 				}
 			}
-			if tc.expectTLSEnv && (!hasTLSListen || !hasTLSCertDir) {
-				t.Error("expected TLS env vars when hasTLS is true")
+			if tc.expectTLSEnv && !hasTLSCertDir {
+				t.Error("expected TLS_CERT_DIR env var for HTTPS listeners")
 			}
-			if !tc.expectTLSEnv && (hasTLSListen || hasTLSCertDir) {
-				t.Error("did not expect TLS env vars when hasTLS is false")
+			if !tc.expectTLSEnv && hasTLSCertDir {
+				t.Error("did not expect TLS_CERT_DIR env var without HTTPS listeners")
 			}
 			if tc.expectExtraArgsEnv != "" && hasExtraArgs != tc.expectExtraArgsEnv {
 				t.Errorf("expected VARNISHD_EXTRA_ARGS=%q, got %q", tc.expectExtraArgsEnv, hasExtraArgs)
@@ -1031,48 +1043,65 @@ func TestBuildGatewayContainer(t *testing.T) {
 }
 
 func TestBuildVolumes(t *testing.T) {
-	gateway := &gatewayv1.Gateway{
+	httpGateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+	httpsGateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+			},
+		},
 	}
 
 	tests := []struct {
-		name   string
-		hasTLS bool
-		extra  []corev1.Volume
-		expect int
+		name    string
+		gateway *gatewayv1.Gateway
+		extra   []corev1.Volume
+		expect  int
+		hasTLS  bool
 	}{
 		{
-			name:   "without TLS",
-			hasTLS: false,
-			expect: 2, // vcl-config + varnish-run
+			name:    "without TLS",
+			gateway: httpGateway,
+			expect:  2, // vcl-config + varnish-run
 		},
 		{
-			name:   "with TLS",
-			hasTLS: true,
-			expect: 3, // vcl-config + varnish-run + tls-certs
+			name:    "with TLS",
+			gateway: httpsGateway,
+			expect:  3, // vcl-config + varnish-run + tls-certs
+			hasTLS:  true,
 		},
 		{
-			name:   "with extra volumes",
-			hasTLS: false,
+			name:    "with extra volumes",
+			gateway: httpGateway,
 			extra: []corev1.Volume{
 				{Name: "extra-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			},
 			expect: 3, // 2 standard + 1 extra
 		},
 		{
-			name:   "with TLS and extra volumes",
-			hasTLS: true,
+			name:    "with TLS and extra volumes",
+			gateway: httpsGateway,
 			extra: []corev1.Volume{
 				{Name: "extra-vol", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			},
 			expect: 4, // 3 TLS + 1 extra
+			hasTLS: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &GatewayReconciler{Config: Config{GatewayClassName: "varnish"}}
-			volumes := r.buildVolumes(gateway, tc.hasTLS, tc.extra)
+			volumes := r.buildVolumes(tc.gateway, tc.extra)
 			if len(volumes) != tc.expect {
 				t.Errorf("expected %d volumes, got %d", tc.expect, len(volumes))
 			}
@@ -1103,10 +1132,15 @@ func TestBuildContainers(t *testing.T) {
 	}
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
 	}
 
 	t.Run("without logging", func(t *testing.T) {
-		containers := r.buildContainers(gateway, nil, nil, false, nil, nil)
+		containers := r.buildContainers(gateway, nil, nil, nil, nil)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container, got %d", len(containers))
 		}
@@ -1117,7 +1151,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("with logging", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishlog"}
-		containers := r.buildContainers(gateway, nil, logging, false, nil, nil)
+		containers := r.buildContainers(gateway, nil, logging, nil, nil)
 		if len(containers) != 2 {
 			t.Errorf("expected 2 containers, got %d", len(containers))
 		}
@@ -1128,7 +1162,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("logging with empty mode is not added", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: ""}
-		containers := r.buildContainers(gateway, nil, logging, false, nil, nil)
+		containers := r.buildContainers(gateway, nil, logging, nil, nil)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container when logging mode is empty, got %d", len(containers))
 		}

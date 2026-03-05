@@ -109,6 +109,9 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 		// Compute which listeners this route applies to
 		listeners := listenersForRoute(&route, gateway)
 
+		// Route name for X-Gateway-Route header (namespace/name)
+		routeName := routeNS + "/" + route.Name
+
 		// When no hostnames are specified, the route matches all hostnames.
 		// Use "*" as a sentinel that ghost VMOD treats as a catch-all.
 		hostnames := make([]string, len(route.Spec.Hostnames))
@@ -145,6 +148,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							Port:      0,
 							Weight:    0,
 							Listeners: listeners,
+							RouteName: routeName,
 							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
 							RuleIndex: ruleIndex,
 						})
@@ -192,6 +196,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							Port:      port,
 							Weight:    weight,
 							Listeners: listeners,
+							RouteName: routeName,
 							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
 							RuleIndex: ruleIndex,
 						})
@@ -305,6 +310,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 									Port:        0,
 									Weight:      0,
 									Listeners:   listeners,
+									RouteName:   routeName,
 									Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
 									RuleIndex:   ruleIndex,
 								})
@@ -351,6 +357,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 								Port:        port,
 								Weight:      weight,
 								Listeners:   listeners,
+								RouteName:   routeName,
 								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
 								RuleIndex:   ruleIndex,
 							})

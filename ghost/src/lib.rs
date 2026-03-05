@@ -327,11 +327,22 @@ mod ghost {
                 None => return fallback,
             };
 
-            let (result, log_msgs) =
+            let (result, route_name, log_msgs) =
                 self.ghost_director
                     .route_request(req, listener_owned.as_deref());
             for (tag, msg) in log_msgs {
                 ctx.log(tag, &msg);
+            }
+
+            // Set X-Gateway-Listener and X-Gateway-Route headers for user VCL
+            // Re-borrow req from ctx since the previous borrow ended after route_request
+            if let Some(req) = ctx.http_req.as_mut() {
+                if let Some(ref listener) = listener_owned {
+                    let _ = req.set_header("X-Gateway-Listener", listener);
+                }
+                if let Some(ref name) = route_name {
+                    let _ = req.set_header("X-Gateway-Route", name);
+                }
             }
 
             match result {

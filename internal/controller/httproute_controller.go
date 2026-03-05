@@ -510,6 +510,10 @@ func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gatew
 				isCatchAll = true
 				break
 			}
+			// Apply listener isolation: remove hostnames claimed by more specific listeners
+			if parentRef.SectionName != nil {
+				effective = filterForListenerIsolation(effective, *parentRef.SectionName, gateway)
+			}
 			for _, h := range effective {
 				hs := string(h)
 				if !seen[hs] {
@@ -842,6 +846,79 @@ func hostnameMatches(routeHostname, listenerHostname string) bool {
 		}
 	}
 
+	return false
+}
+
+// filterForListenerIsolation removes effective hostnames that are "claimed" by a
+// more specific listener on the same Gateway. Per Gateway API spec, when multiple
+// listeners could match a hostname, the most specific listener wins and routes
+// attached to less-specific listeners should not be accessible for those hostnames.
+func filterForListenerIsolation(hostnames []gatewayv1.Hostname, sectionName gatewayv1.SectionName, gateway *gatewayv1.Gateway) []gatewayv1.Hostname {
+	var targetListener *gatewayv1.Listener
+	for i := range gateway.Spec.Listeners {
+		if string(gateway.Spec.Listeners[i].Name) == string(sectionName) {
+			targetListener = &gateway.Spec.Listeners[i]
+			break
+		}
+	}
+	if targetListener == nil {
+		return hostnames
+	}
+
+	targetSpec := listenerHostnameSpecificity(targetListener)
+
+	var filtered []gatewayv1.Hostname
+	for _, h := range hostnames {
+		claimed := false
+		hs := string(h)
+		for i := range gateway.Spec.Listeners {
+			l := &gateway.Spec.Listeners[i]
+			if string(l.Name) == string(sectionName) {
+				continue
+			}
+			if listenerHostnameSpecificity(l) <= targetSpec {
+				continue
+			}
+			if listenerCoversHostname(l, hs) {
+				claimed = true
+				break
+			}
+		}
+		if !claimed {
+			filtered = append(filtered, h)
+		}
+	}
+	return filtered
+}
+
+// listenerHostnameSpecificity returns a numeric specificity for a listener's hostname.
+// Exact hostnames > wildcards > no hostname.
+func listenerHostnameSpecificity(l *gatewayv1.Listener) int {
+	if l.Hostname == nil {
+		return 0
+	}
+	h := string(*l.Hostname)
+	if strings.HasPrefix(h, "*.") {
+		return len(h)
+	}
+	return len(h) + 10000
+}
+
+// listenerCoversHostname checks if a listener's hostname space fully covers the given hostname.
+func listenerCoversHostname(l *gatewayv1.Listener, hostname string) bool {
+	if l.Hostname == nil {
+		return true
+	}
+	lh := string(*l.Hostname)
+	if lh == hostname {
+		return true
+	}
+	if strings.HasPrefix(lh, "*.") {
+		suffix := lh[1:]
+		if strings.HasSuffix(hostname, suffix) {
+			return true
+		}
+	}
 	return false
 }
 

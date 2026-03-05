@@ -201,19 +201,27 @@ func TestInfrastructureConfig_ArgOrderDoesNotAffectHash(t *testing.T) {
 	}
 }
 
-func TestInfrastructureConfig_HasTLSChangesHash(t *testing.T) {
-	noTLS := InfrastructureConfig{
-		GatewayImage: "ghcr.io/varnish/gateway:v1.0.0",
-		HasTLS:       false,
+func TestInfrastructureConfig_ListenerSpecsChangesHash(t *testing.T) {
+	httpOnly := InfrastructureConfig{
+		GatewayImage:  "ghcr.io/varnish/gateway:v1.0.0",
+		ListenerSpecs: "http-80",
 	}
 
-	withTLS := InfrastructureConfig{
-		GatewayImage: "ghcr.io/varnish/gateway:v1.0.0",
-		HasTLS:       true,
+	httpAndHTTPS := InfrastructureConfig{
+		GatewayImage:  "ghcr.io/varnish/gateway:v1.0.0",
+		ListenerSpecs: "http-80,https-443",
 	}
 
-	if noTLS.ComputeHash() == withTLS.ComputeHash() {
-		t.Error("HasTLS=true should produce different hash from HasTLS=false")
+	differentPort := InfrastructureConfig{
+		GatewayImage:  "ghcr.io/varnish/gateway:v1.0.0",
+		ListenerSpecs: "http-3000",
+	}
+
+	if httpOnly.ComputeHash() == httpAndHTTPS.ComputeHash() {
+		t.Error("different listener specs should produce different hashes")
+	}
+	if httpOnly.ComputeHash() == differentPort.ComputeHash() {
+		t.Error("different listener ports should produce different hashes")
 	}
 }
 
