@@ -107,7 +107,7 @@ func loadConfig() (*Config, error) {
 		WorkDir:           getEnvOrDefault("WORK_DIR", "/var/run/varnish"),
 		VarnishDir:        getEnvOrDefault("VARNISH_DIR", ""), // empty means use varnish default
 		AdminPort:         adminPort,
-		VarnishHTTPAddr:   getEnvOrDefault("VARNISH_HTTP_ADDR", "localhost:80"),
+		VarnishHTTPAddr:   getEnvOrDefault("VARNISH_HTTP_ADDR", "localhost:1969"),
 		VarnishListen:     parseList(getEnvOrDefault("VARNISH_LISTEN", "http=:80")),
 		VarnishStorage:    parseList(getEnvOrDefault("VARNISH_STORAGE", "malloc,256m")),
 		VarnishdExtraArgs: parseList(os.Getenv("VARNISHD_EXTRA_ARGS")), // no default, optional

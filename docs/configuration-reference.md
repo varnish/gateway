@@ -90,7 +90,7 @@ Chaperone reads these environment variables. The operator sets most of them auto
 |----------|---------|-------------|
 | `NAMESPACE` | `default` | Kubernetes namespace for EndpointSlice watching |
 | `HEALTH_ADDR` | `:8080` | Health/readiness endpoint address |
-| `VARNISH_HTTP_ADDR` | `localhost:80` | Varnish HTTP address for ghost reload requests |
+| `VARNISH_HTTP_ADDR` | `localhost:1969` | Varnish HTTP address for ghost reload requests (dedicated loopback listener) |
 
 ### Semicolon-separated values
 

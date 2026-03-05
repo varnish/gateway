@@ -337,30 +337,18 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 	}
 
 	// Build VARNISH_LISTEN value
+	// Always include a loopback-only HTTP listener for ghost reload.
+	// This avoids sending plain HTTP reload requests to HTTPS listeners.
+	const ghostReloadPort = 1969
 	var listenParts []string
+	listenParts = append(listenParts, fmt.Sprintf("ghost-reload=127.0.0.1:%d,http", ghostReloadPort))
 	for _, e := range entries {
 		listenParts = append(listenParts, fmt.Sprintf("%s=:%d,%s", e.socketName, e.port, e.proto))
 	}
 	varnishListen := strings.Join(listenParts, ";")
-	if varnishListen == "" {
-		varnishListen = "http-80=:80,http"
-	}
 
-	// VARNISH_HTTP_ADDR: localhost:{first_http_port}
-	// Needed for ghost reload. Use first HTTP listener port, or first listener port if no HTTP.
-	httpAddr := ""
-	for _, e := range entries {
-		if e.proto == "http" {
-			httpAddr = fmt.Sprintf("localhost:%d", e.port)
-			break
-		}
-	}
-	if httpAddr == "" && len(entries) > 0 {
-		httpAddr = fmt.Sprintf("localhost:%d", entries[0].port)
-	}
-	if httpAddr == "" {
-		httpAddr = "localhost:80"
-	}
+	// VARNISH_HTTP_ADDR: always use the dedicated ghost reload listener
+	httpAddr := fmt.Sprintf("localhost:%d", ghostReloadPort)
 
 	env := []corev1.EnvVar{
 		{
