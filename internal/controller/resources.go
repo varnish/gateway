@@ -26,6 +26,9 @@ const (
 
 	// Chaperone health port
 	chaperoneHealthPort = 8081
+
+	// Chaperone dashboard port (always enabled, access via port-forward)
+	chaperoneDashboardPort = 9000
 )
 
 // listenerSocketName returns the Varnish socket name for a Gateway listener.
@@ -369,6 +372,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		{Name: "WORK_DIR", Value: "/var/run/varnish"},
 		{Name: "VARNISH_DIR", Value: "/var/run/varnish/vsm"}, // VSM subdirectory on shared volume
 		{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
+		{Name: "DASHBOARD_ADDR", Value: fmt.Sprintf(":%d", chaperoneDashboardPort)},
 	}
 
 	// Add varnishd extra args if specified (semicolon-separated)
@@ -391,6 +395,11 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		{
 			Name:          "health",
 			ContainerPort: int32(chaperoneHealthPort),
+			Protocol:      corev1.ProtocolTCP,
+		},
+		{
+			Name:          "dashboard",
+			ContainerPort: int32(chaperoneDashboardPort),
 			Protocol:      corev1.ProtocolTCP,
 		},
 	}

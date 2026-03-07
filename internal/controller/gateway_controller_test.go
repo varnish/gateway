@@ -166,9 +166,9 @@ func TestBuildDeployment(t *testing.T) {
 		t.Errorf("expected image %q, got %q", "ghcr.io/varnish/varnish-gateway:latest", container.Image)
 	}
 
-	// Verify ports (HTTP and health)
-	if len(container.Ports) != 2 {
-		t.Errorf("expected 2 ports, got %d", len(container.Ports))
+	// Verify ports (HTTP, health, dashboard)
+	if len(container.Ports) != 3 {
+		t.Errorf("expected 3 ports, got %d", len(container.Ports))
 	}
 
 	// Verify volumes
@@ -944,13 +944,13 @@ func TestBuildGatewayContainer(t *testing.T) {
 		{
 			name:            "no TLS",
 			gateway:         httpGateway,
-			expectPorts:     2, // health + http-80
+			expectPorts:     3, // health + dashboard + http-80
 			expectVolMounts: 2, // vcl-config + varnish-run
 		},
 		{
 			name:            "with TLS",
 			gateway:         httpsGateway,
-			expectPorts:     3, // health + http-80 + https-443
+			expectPorts:     4, // health + dashboard + http-80 + https-443
 			expectVolMounts: 3, // vcl-config + varnish-run + tls-certs
 			expectTLSEnv:    true,
 		},
@@ -958,7 +958,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 			name:               "with varnishdExtraArgs",
 			gateway:            httpGateway,
 			varnishdExtraArgs:  []string{"-p", "thread_pools=4"},
-			expectPorts:        2,
+			expectPorts:        3,
 			expectVolMounts:    2,
 			expectExtraArgsEnv: "-p;thread_pools=4",
 		},
@@ -968,7 +968,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 			extraVolumeMounts: []corev1.VolumeMount{
 				{Name: "custom", MountPath: "/custom"},
 			},
-			expectPorts:     2,
+			expectPorts:     3,
 			expectVolMounts: 3, // 2 standard + 1 extra
 		},
 	}
