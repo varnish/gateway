@@ -74,21 +74,19 @@ Two separate reload paths:
 
 ## Real-Time Dashboard
 
-Chaperone includes an optional web dashboard that shows live gateway state via Server-Sent Events (SSE). Enable it by setting the `DASHBOARD_ADDR` environment variable:
+Chaperone includes a real-time web dashboard that shows live gateway state via Server-Sent Events (SSE). It is always enabled on port 9000 inside the chaperone pod. Access it via port-forward:
 
-```yaml
-env:
-  - name: DASHBOARD_ADDR
-    value: ":9000"
+```bash
+kubectl port-forward deploy/<gateway-name> 9000:9000
 ```
 
-When set, chaperone serves a web UI on that address showing:
+Then open `http://localhost:9000`. The dashboard shows:
 - Gateway status (ready/starting/draining) with a live heartbeat trace
 - Virtual hosts and their routes
 - Services with individual backend endpoints
 - Live event stream (ghost reloads, VCL reloads, endpoint changes, TLS updates)
 
-The dashboard updates every second and highlights changes as they happen. If `DASHBOARD_ADDR` is unset, no dashboard server is started and there is no overhead.
+The dashboard updates every second and highlights changes as they happen. It is not exposed outside the cluster unless you explicitly create a Service for it.
 
 ## Configuration Files
 
