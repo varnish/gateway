@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -118,11 +119,20 @@ func (s *StateTracker) Snapshot() Snapshot {
 	for _, svc := range s.services {
 		services = append(services, svc)
 	}
+	sort.Slice(services, func(i, j int) bool {
+		if services[i].Namespace != services[j].Namespace {
+			return services[i].Namespace < services[j].Namespace
+		}
+		return services[i].Name < services[j].Name
+	})
 
 	vhosts := make([]VHostState, 0, len(s.vhosts))
 	for _, vh := range s.vhosts {
 		vhosts = append(vhosts, vh)
 	}
+	sort.Slice(vhosts, func(i, j int) bool {
+		return vhosts[i].Hostname < vhosts[j].Hostname
+	})
 
 	return Snapshot{
 		Ready:    s.ready,
