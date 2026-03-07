@@ -72,6 +72,24 @@ Two separate reload paths:
 - **VCL changes** (user VCL updates): varnishadm hot-reload
 - **Backend/routing changes**: ghost HTTP reload
 
+## Real-Time Dashboard
+
+Chaperone includes an optional web dashboard that shows live gateway state via Server-Sent Events (SSE). Enable it by setting the `DASHBOARD_ADDR` environment variable:
+
+```yaml
+env:
+  - name: DASHBOARD_ADDR
+    value: ":9000"
+```
+
+When set, chaperone serves a web UI on that address showing:
+- Gateway status (ready/starting/draining) with a live heartbeat trace
+- Virtual hosts and their routes
+- Services with individual backend endpoints
+- Live event stream (ghost reloads, VCL reloads, endpoint changes, TLS updates)
+
+The dashboard updates every second and highlights changes as they happen. If `DASHBOARD_ADDR` is unset, no dashboard server is started and there is no overhead.
+
 ## Configuration Files
 
 **routing.json** (operator → ConfigMap):
