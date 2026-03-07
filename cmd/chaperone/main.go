@@ -11,11 +11,11 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/ghost"
 	vtls "github.com/varnish/gateway/internal/tls"
 	"github.com/varnish/gateway/internal/varnishadm"
@@ -30,41 +30,6 @@ import (
 
 //go:embed .version
 var version string
-
-// healthState tracks the health/readiness/draining state of the chaperone.
-type healthState struct {
-	mu       sync.RWMutex
-	ready    bool
-	draining bool
-}
-
-func (s *healthState) setReady() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ready = true
-	slog.Info("health endpoint now returning healthy")
-}
-
-func (s *healthState) isReady() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.ready
-}
-
-func (s *healthState) setDraining() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.draining = true
-}
-
-func (s *healthState) isDraining() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.draining
-}
-
-// Global health state for graceful shutdown
-var state = &healthState{}
 
 // Config holds the chaperone configuration from environment variables
 type Config struct {
@@ -95,6 +60,9 @@ type Config struct {
 
 	// Health endpoint
 	HealthAddr string // address for health endpoint
+
+	// Dashboard (optional, empty = disabled)
+	DashboardAddr string // address for dashboard UI
 }
 
 func loadConfig() (*Config, error) {
@@ -118,6 +86,7 @@ func loadConfig() (*Config, error) {
 		TLSCertDir:        os.Getenv("TLS_CERT_DIR"),                  // empty by default
 		TLSListen:         parseList(os.Getenv("VARNISH_TLS_LISTEN")), // empty by default
 		HealthAddr:        getEnvOrDefault("HEALTH_ADDR", ":8080"),
+		DashboardAddr:     os.Getenv("DASHBOARD_ADDR"), // empty = disabled
 	}
 
 	return cfg, nil
@@ -210,6 +179,10 @@ func run() error {
 		return fmt.Errorf("kubernetes.NewForConfig: %w", err)
 	}
 
+	// Dashboard event bus (always created, used for state tracking even without UI)
+	dashBus := dashboard.NewEventBus(256)
+	dashState := dashboard.NewStateTracker(dashBus, strings.TrimSpace(version))
+
 	// Set up context with signal handling for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -225,7 +198,7 @@ func run() error {
 		slog.Info("received signal, initiating graceful shutdown", "signal", sig)
 
 		// Set draining state - health endpoint will return 503
-		state.setDraining()
+		dashState.SetDraining()
 
 		// Wait for drain period to allow load balancer to stop sending traffic
 		// and existing requests to complete
@@ -261,6 +234,7 @@ func run() error {
 		cfg.ConfigMapName,
 		logger.With("component", "ghost"),
 	)
+	ghostWatcher.SetDashboard(dashBus, dashState)
 
 	// 3. VCL reloader - watches main.vcl and hot-reloads via varnishadm
 	vclReloader := vcl.New(
@@ -272,11 +246,13 @@ func run() error {
 		cfg.Namespace,
 		logger.With("component", "vcl"),
 	)
+	vclReloader.SetDashboard(dashBus)
 
 	// 4. TLS reloader - watches TLS cert directory and hot-reloads certs (if TLS enabled)
 	var tlsReloader *vtls.Reloader
 	if cfg.TLSCertDir != "" {
 		tlsReloader = vtls.New(vadm, cfg.TLSCertDir, logger.With("component", "tls"))
+		tlsReloader.SetDashboard(dashBus)
 	}
 
 	// Build varnishd arguments
@@ -307,8 +283,8 @@ func run() error {
 
 	// Start health server with drain endpoint for graceful shutdown
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/drain", drainHandler)
+	mux.HandleFunc("/health", makeHealthHandler(dashState))
+	mux.HandleFunc("/drain", makeDrainHandler(dashState))
 	mux.HandleFunc("/debug/backends", makeBackendsHandler(vadm))
 
 	healthServer := &http.Server{
@@ -399,6 +375,7 @@ func run() error {
 		select {
 		case <-vadm.Connected():
 			slog.Debug("varnishadm connected")
+			dashboard.PublishVarnishConnected(dashBus)
 		case <-gctx.Done():
 			return nil
 		}
@@ -437,11 +414,25 @@ func run() error {
 		// Step 5: Wait for ghost watcher to complete first backend reload
 		select {
 		case <-ghostWatcher.Ready():
-			state.setReady()
+			dashState.SetReady()
 		case <-gctx.Done():
 		}
 		return nil
 	})
+
+	// Start dashboard server (if configured)
+	if cfg.DashboardAddr != "" {
+		dashServer := dashboard.NewServer(
+			cfg.DashboardAddr, dashState, dashBus,
+			logger.With("component", "dashboard"),
+		)
+		g.Go(func() error {
+			if err := dashServer.Run(gctx); err != nil {
+				return fmt.Errorf("dashServer.Run: %w", err)
+			}
+			return nil
+		})
+	}
 
 	slog.Info("all components started, waiting for shutdown")
 	if err := g.Wait(); err != nil {
@@ -451,26 +442,30 @@ func run() error {
 	return nil
 }
 
-func healthHandler(w http.ResponseWriter, r *http.Request) {
-	if !state.isReady() {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("not ready"))
-		return
+func makeHealthHandler(state *dashboard.StateTracker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !state.IsReady() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready"))
+			return
+		}
+		if state.IsDraining() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("draining"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
 	}
-	if state.isDraining() {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("draining"))
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok"))
 }
 
-func drainHandler(w http.ResponseWriter, r *http.Request) {
-	state.setDraining()
-	slog.Info("drain requested via endpoint, health will now return 503")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("draining"))
+func makeDrainHandler(state *dashboard.StateTracker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		state.SetDraining()
+		slog.Info("drain requested via endpoint, health will now return 503")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("draining"))
+	}
 }
 
 // makeBackendsHandler creates a handler that exposes varnishadm backend.list output

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/varnishadm"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/informers"
@@ -42,6 +43,9 @@ type Reloader struct {
 	lastVCL            string
 	lastVCLMux         sync.RWMutex
 	lastConfigMapRV    string
+
+	// Dashboard integration (optional)
+	dashBus *dashboard.EventBus
 }
 
 // New creates a new VCL reloader
@@ -69,6 +73,11 @@ func New(
 		configMapNamespace: configMapNamespace,
 		logger:             logger,
 	}
+}
+
+// SetDashboard connects the reloader to the dashboard event bus.
+func (r *Reloader) SetDashboard(bus *dashboard.EventBus) {
+	r.dashBus = bus
 }
 
 // Run starts watching the VCL file and reloading on changes
@@ -162,6 +171,7 @@ func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigM
 	// On failure Varnish keeps the previously active VCL, so we log and continue.
 	if err := r.ReloadInline(newVCL); err != nil {
 		r.logger.Error("VCL reload failed - keeping previous VCL", "error", err)
+		dashboard.PublishVCLReloadFail(r.dashBus, err)
 	}
 }
 
@@ -203,6 +213,7 @@ func (r *Reloader) loadAndActivate(name string, loadFn func(string) (varnishadm.
 	}
 
 	r.logger.Debug("VCL reload complete", "name", name)
+	dashboard.PublishVCLReload(r.dashBus, name)
 
 	if err := r.garbageCollect(); err != nil {
 		r.logger.Warn("VCL garbage collection failed", "error", err)

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/varnishadm"
 )
 
@@ -25,6 +26,9 @@ type Reloader struct {
 	fatalErrOnce  sync.Once
 	debounceDelay time.Duration
 	reloadMu      sync.Mutex // protects reloadAllCerts from concurrent execution
+
+	// Dashboard integration (optional)
+	dashBus *dashboard.EventBus
 }
 
 // New creates a new TLS Reloader.
@@ -39,6 +43,11 @@ func New(vadm varnishadm.VarnishadmInterface, certDir string, logger *slog.Logge
 		fatalErrCh:    make(chan error, 1),
 		debounceDelay: 200 * time.Millisecond,
 	}
+}
+
+// SetDashboard connects the reloader to the dashboard event bus.
+func (r *Reloader) SetDashboard(bus *dashboard.EventBus) {
+	r.dashBus = bus
 }
 
 // FatalError returns a channel that receives fatal errors from TLS reload failures.
@@ -187,6 +196,7 @@ func (r *Reloader) reloadAllCerts() error {
 	}
 
 	r.logger.Info("TLS certificates reloaded via load/commit cycle", "count", loaded)
+	dashboard.PublishTLSReload(r.dashBus, loaded)
 	return nil
 }
 
@@ -233,6 +243,7 @@ func (r *Reloader) Run(ctx context.Context) error {
 				r.logger.Info("reloading TLS certificates")
 				if err := r.reloadAllCerts(); err != nil {
 					r.logger.Error("TLS cert reload failed", "error", err)
+					dashboard.PublishTLSReloadFail(r.dashBus, err)
 					r.fatalErrOnce.Do(func() {
 						r.fatalErrCh <- fmt.Errorf("TLS cert reload failed: %w", err)
 					})

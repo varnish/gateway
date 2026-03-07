@@ -1,0 +1,1058 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Varnish Gateway</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;600;700&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #08090d;
+    --bg2: #0d0f15;
+    --surface: #12151e;
+    --surface2: #181c28;
+    --surface3: #1e2233;
+    --border: #252a3a;
+    --border-light: #2f3650;
+    --text: #d8dce8;
+    --text-dim: #6b7394;
+    --text-muted: #404862;
+    --amber: #d4a254;
+    --amber-dim: #a67c3a;
+    --amber-glow: rgba(212, 162, 84, 0.12);
+    --amber-glow2: rgba(212, 162, 84, 0.06);
+    --teal: #4ecdc4;
+    --teal-dim: #2a8f89;
+    --teal-glow: rgba(78, 205, 196, 0.10);
+    --rose: #c45b5b;
+    --rose-glow: rgba(196, 91, 91, 0.12);
+    --warn: #d4a254;
+    --font-display: 'Familjen Grotesk', system-ui, sans-serif;
+    --font-mono: 'DM Mono', 'Menlo', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: var(--font-mono);
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.6;
+    font-size: 12px;
+    font-weight: 300;
+    overflow-x: hidden;
+  }
+
+  /* Subtle grain overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    background-size: 256px;
+  }
+
+  /* ─── HEADER ─── */
+  .header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 28px;
+    height: 56px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    z-index: 10;
+  }
+
+  .header::after {
+    content: '';
+    position: absolute;
+    bottom: -1px;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--amber-glow), var(--amber) 50%, var(--amber-glow), transparent);
+    opacity: 0.4;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .brand-mark {
+    width: 28px;
+    height: 28px;
+    position: relative;
+  }
+
+  .brand-mark svg {
+    width: 100%;
+    height: 100%;
+  }
+
+  .brand h1 {
+    font-family: var(--font-display);
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--text);
+  }
+
+  .brand h1 em {
+    font-style: normal;
+    color: var(--amber);
+  }
+
+  .header-meta {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .meta-item {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.02em;
+  }
+
+  .meta-item span { color: var(--text-dim); }
+
+  /* Status beacon */
+  .beacon {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 14px 5px 10px;
+    border-radius: 6px;
+    font-family: var(--font-display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .beacon-dot {
+    position: relative;
+    width: 10px;
+    height: 10px;
+  }
+
+  .beacon-dot::before,
+  .beacon-dot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+  }
+
+  .beacon-dot::before {
+    background: currentColor;
+  }
+
+  .beacon-dot::after {
+    animation: beacon-ring 2s ease-out infinite;
+    border: 1.5px solid currentColor;
+  }
+
+  @keyframes beacon-ring {
+    0% { transform: scale(1); opacity: 0.6; }
+    100% { transform: scale(2.8); opacity: 0; }
+  }
+
+  .beacon.ready {
+    color: var(--teal);
+    background: var(--teal-glow);
+  }
+
+  .beacon.not-ready {
+    color: var(--amber);
+    background: var(--amber-glow);
+  }
+
+  .beacon.draining {
+    color: var(--rose);
+    background: var(--rose-glow);
+  }
+
+  /* ─── HEARTBEAT STRIP ─── */
+  .heartbeat-strip {
+    height: 32px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+  }
+
+  .heartbeat-strip::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 59px,
+      var(--border) 59px,
+      var(--border) 60px
+    );
+    opacity: 0.3;
+  }
+
+  #heartbeatCanvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  .heartbeat-label {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: var(--bg2);
+    padding: 0 6px;
+    z-index: 2;
+  }
+
+  /* SSE indicator */
+  .sse-dot {
+    display: inline-block;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--teal);
+    margin-right: 5px;
+    vertical-align: middle;
+    transition: background 0.3s;
+  }
+
+  .sse-dot.disconnected {
+    background: var(--rose);
+    animation: blink 0.8s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.2; }
+  }
+
+  /* ─── MAIN LAYOUT ─── */
+  .main {
+    max-width: 1480px;
+    margin: 0 auto;
+    padding: 24px 28px;
+  }
+
+  /* Metrics row */
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .metric {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.3s;
+  }
+
+  .metric:hover {
+    border-color: var(--border-light);
+  }
+
+  .metric::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--amber);
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+
+  .metric:hover::before { opacity: 0.5; }
+
+  .metric-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+
+  .metric-value {
+    font-family: var(--font-display);
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1;
+    color: var(--amber);
+  }
+
+  .metric-value.teal { color: var(--teal); }
+
+  .metric-sub {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+
+  /* ─── PANELS ─── */
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    animation: panelIn 0.5s ease-out both;
+  }
+
+  .panel:nth-child(2) { animation-delay: 0.05s; }
+  .panel:nth-child(3) { animation-delay: 0.1s; }
+
+  @keyframes panelIn {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .panel-full { grid-column: 1 / -1; }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .panel-title {
+    font-family: var(--font-display);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-dim);
+    letter-spacing: -0.01em;
+  }
+
+  .panel-badge {
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--amber);
+    background: var(--amber-glow);
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .panel-body {
+    padding: 16px 18px;
+  }
+
+  /* ─── VHOSTS ─── */
+  .vhost-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .vh {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border-radius: 8px;
+    border-left: 3px solid var(--amber-dim);
+    transition: all 0.2s;
+  }
+
+  .vh:hover {
+    background: var(--surface3);
+    border-left-color: var(--amber);
+  }
+
+  .vh-name {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--text);
+  }
+
+  .vh-stats {
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .vh-stats b {
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+
+  /* ─── EVENT LOG ─── */
+  .event-log {
+    max-height: 320px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .ev {
+    display: grid;
+    grid-template-columns: 64px 110px 1fr;
+    gap: 14px;
+    padding: 7px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    transition: background 0.15s;
+  }
+
+  .ev:hover { background: var(--surface2); }
+
+  .ev.entering {
+    animation: evIn 0.35s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  @keyframes evIn {
+    from { opacity: 0; transform: translateX(-12px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .ev-time {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ev-tag {
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .ev-tag::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .ev-tag.ok { color: var(--teal); }
+  .ev-tag.ok::before { background: var(--teal); }
+  .ev-tag.err { color: var(--rose); }
+  .ev-tag.err::before { background: var(--rose); }
+  .ev-tag.inf { color: var(--amber); }
+  .ev-tag.inf::before { background: var(--amber); }
+  .ev-tag.wrn { color: var(--warn); }
+  .ev-tag.wrn::before { background: var(--warn); }
+
+  .ev-msg {
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ─── SERVICES ─── */
+  .svc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+  }
+
+  .svc {
+    background: var(--surface2);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    padding: 16px;
+    transition: all 0.3s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .svc::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--teal-dim), transparent);
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+
+  .svc:hover::before { opacity: 1; }
+  .svc:hover { border-color: var(--border-light); }
+
+  .svc.flash {
+    animation: svcFlash 1.5s ease-out;
+  }
+
+  @keyframes svcFlash {
+    0% { border-color: var(--teal); box-shadow: 0 0 30px var(--teal-glow); }
+    100% { border-color: var(--border); box-shadow: none; }
+  }
+
+  .svc-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 14px;
+  }
+
+  .svc-name {
+    font-family: var(--font-display);
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text);
+    line-height: 1.2;
+  }
+
+  .svc-ns {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    letter-spacing: 0.03em;
+  }
+
+  .svc-count {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1;
+  }
+
+  .svc-count.up { color: var(--teal); }
+  .svc-count.down { color: var(--rose); }
+
+  .svc-count-label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    text-align: right;
+  }
+
+  /* Backend nodes visualization */
+  .nodes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .node {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: var(--bg2);
+    border-radius: 6px;
+    font-size: 10px;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    transition: all 0.3s;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .node-indicator {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--teal);
+    box-shadow: 0 0 6px var(--teal-glow);
+    flex-shrink: 0;
+  }
+
+  .node.fresh {
+    border-color: var(--teal-dim);
+    animation: nodeFresh 2.5s ease-out forwards;
+  }
+
+  @keyframes nodeFresh {
+    0% { border-color: var(--teal); background: rgba(78, 205, 196, 0.08); }
+    100% { border-color: transparent; background: var(--bg2); }
+  }
+
+  .no-backends {
+    font-size: 11px;
+    color: var(--text-muted);
+    font-style: italic;
+    padding: 4px 0;
+  }
+
+  /* ─── EMPTY STATES ─── */
+  .empty {
+    text-align: center;
+    padding: 36px 20px;
+    color: var(--text-muted);
+    font-size: 12px;
+    letter-spacing: 0.02em;
+  }
+
+  .empty::before {
+    content: '';
+    display: block;
+    width: 32px;
+    height: 1px;
+    background: var(--border);
+    margin: 0 auto 12px;
+  }
+
+  /* ─── RESPONSIVE ─── */
+  @media (max-width: 900px) {
+    .panels { grid-template-columns: 1fr; }
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+    .main { padding: 16px; }
+  }
+
+  @media (max-width: 600px) {
+    .metrics { grid-template-columns: 1fr 1fr; }
+    .header { padding: 0 16px; }
+    .header-meta { gap: 10px; }
+    .meta-item { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 32 32" fill="none">
+        <rect x="2" y="2" width="28" height="28" rx="6" stroke="var(--amber)" stroke-width="1.5" opacity="0.4"/>
+        <path d="M8 22V10l5 8 5-8v12" stroke="var(--amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="24" cy="10" r="2" fill="var(--teal)" opacity="0.8"/>
+      </svg>
+    </div>
+    <h1><em>Varnish</em> Gateway</h1>
+  </div>
+  <div class="header-meta">
+    <span class="meta-item" id="metaVersion"></span>
+    <span class="meta-item"><span class="sse-dot" id="sseDot"></span>SSE</span>
+    <div class="beacon not-ready" id="beacon">
+      <span class="beacon-dot"></span>
+      <span id="beaconText">Starting</span>
+    </div>
+  </div>
+</div>
+
+<!-- HEARTBEAT STRIP -->
+<div class="heartbeat-strip">
+  <canvas id="heartbeatCanvas"></canvas>
+  <span class="heartbeat-label">Heartbeat</span>
+</div>
+
+<!-- MAIN -->
+<div class="main">
+
+  <!-- METRICS -->
+  <div class="metrics">
+    <div class="metric">
+      <div class="metric-label">Virtual Hosts</div>
+      <div class="metric-value" id="mVhosts">--</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Services</div>
+      <div class="metric-value" id="mServices">--</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Backends</div>
+      <div class="metric-value teal" id="mBackends">--</div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Uptime</div>
+      <div class="metric-value" id="mUptime" style="font-size:22px;margin-top:4px">--</div>
+    </div>
+  </div>
+
+  <!-- VHOSTS + EVENTS -->
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">Virtual Hosts</span>
+        <span class="panel-badge" id="vhostCount">0</span>
+      </div>
+      <div class="panel-body">
+        <div class="vhost-list" id="vhostList">
+          <div class="empty">Waiting for configuration</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <span class="panel-title">Event Log</span>
+        <span class="panel-badge" id="eventCount">0</span>
+      </div>
+      <div class="panel-body">
+        <div class="event-log" id="eventLog">
+          <div class="empty">No events yet</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SERVICES -->
+    <div class="panel panel-full">
+      <div class="panel-head">
+        <span class="panel-title">Services &amp; Backends</span>
+        <span class="panel-badge" id="serviceCount">0</span>
+      </div>
+      <div class="panel-body">
+        <div class="svc-grid" id="serviceGrid">
+          <div class="empty">Waiting for endpoint discovery</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ─── Heartbeat Canvas ───
+  const canvas = document.getElementById('heartbeatCanvas');
+  const ctx = canvas.getContext('2d');
+  let heartbeatPoints = [];
+  let lastBeat = 0;
+
+  function resizeCanvas() {
+    const rect = canvas.parentElement.getBoundingClientRect();
+    canvas.width = rect.width * devicePixelRatio;
+    canvas.height = rect.height * devicePixelRatio;
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  function tickHeartbeat() {
+    const w = canvas.width / devicePixelRatio;
+    const h = canvas.height / devicePixelRatio;
+    const now = performance.now();
+
+    // Add resting points
+    if (heartbeatPoints.length === 0 || now - heartbeatPoints[heartbeatPoints.length - 1].t > 16) {
+      heartbeatPoints.push({ t: now, y: 0 });
+    }
+
+    // Trim old points (keep ~6 seconds visible)
+    const cutoff = now - 6000;
+    while (heartbeatPoints.length > 0 && heartbeatPoints[0].t < cutoff) {
+      heartbeatPoints.shift();
+    }
+
+    ctx.clearRect(0, 0, w, h);
+
+    if (heartbeatPoints.length < 2) {
+      requestAnimationFrame(tickHeartbeat);
+      return;
+    }
+
+    const mid = h / 2;
+    const amplitude = h * 0.35;
+    const span = 6000;
+
+    // Draw gridline
+    ctx.strokeStyle = 'rgba(107, 115, 148, 0.08)';
+    ctx.lineWidth = 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, mid);
+    ctx.lineTo(w, mid);
+    ctx.stroke();
+
+    // Draw trace
+    ctx.beginPath();
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--amber').trim();
+    ctx.lineWidth = 1.5;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    for (let i = 0; i < heartbeatPoints.length; i++) {
+      const p = heartbeatPoints[i];
+      const x = ((p.t - (now - span)) / span) * w;
+      const y = mid - p.y * amplitude;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // Glow on tip
+    const last = heartbeatPoints[heartbeatPoints.length - 1];
+    const tipX = ((last.t - (now - span)) / span) * w;
+    const tipY = mid - last.y * amplitude;
+    const grad = ctx.createRadialGradient(tipX, tipY, 0, tipX, tipY, 8);
+    grad.addColorStop(0, 'rgba(212, 162, 84, 0.6)');
+    grad.addColorStop(1, 'rgba(212, 162, 84, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(tipX, tipY, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    requestAnimationFrame(tickHeartbeat);
+  }
+  requestAnimationFrame(tickHeartbeat);
+
+  function triggerBeat() {
+    const now = performance.now();
+    if (now - lastBeat < 200) return;
+    lastBeat = now;
+    // Inject a spike pattern (mini EKG blip)
+    const steps = [0, 0.15, -0.1, 0.85, -0.4, 0.1, 0];
+    const stepMs = 18;
+    steps.forEach((v, i) => {
+      heartbeatPoints.push({ t: now + i * stepMs, y: v });
+    });
+  }
+
+  // ─── State ───
+  let prevServices = {};
+  let eventCounter = 0;
+  const MAX_EVENTS = 200;
+
+  const evTypes = {
+    ghost_reload:      { label: 'Ghost Reload',  c: 'ok' },
+    ghost_reload_fail: { label: 'Ghost Fail',    c: 'err' },
+    vcl_reload:        { label: 'VCL Reload',    c: 'ok' },
+    vcl_reload_fail:   { label: 'VCL Fail',      c: 'err' },
+    tls_reload:        { label: 'TLS Reload',    c: 'ok' },
+    tls_reload_fail:   { label: 'TLS Fail',      c: 'err' },
+    endpoints_changed: { label: 'Endpoints',     c: 'inf' },
+    configmap_update:  { label: 'Config Update', c: 'inf' },
+    ready:             { label: 'Ready',         c: 'ok' },
+    draining:          { label: 'Draining',      c: 'wrn' },
+    varnish_connected: { label: 'Connected',     c: 'ok' },
+  };
+
+  function fmt(ts) {
+    return new Date(ts).toLocaleTimeString('en-GB', { hour12: false });
+  }
+
+  function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  function updateStatus(snap) {
+    const b = document.getElementById('beacon');
+    const t = document.getElementById('beaconText');
+    b.className = 'beacon';
+    if (snap.draining) { b.classList.add('draining'); t.textContent = 'Draining'; }
+    else if (snap.ready) { b.classList.add('ready'); t.textContent = 'Ready'; }
+    else { b.classList.add('not-ready'); t.textContent = 'Starting'; }
+
+    const ver = document.getElementById('metaVersion');
+    ver.textContent = snap.version ? snap.version : '';
+    document.getElementById('mUptime').textContent = snap.uptime || '--';
+  }
+
+  function updateMetrics(snap) {
+    const total = (snap.services || []).reduce((s, v) => s + (v.backends ? v.backends.length : 0), 0);
+    document.getElementById('mVhosts').textContent = (snap.vhosts || []).length;
+    document.getElementById('mServices').textContent = (snap.services || []).length;
+    document.getElementById('mBackends').textContent = total;
+  }
+
+  function updateVHosts(vhosts) {
+    const el = document.getElementById('vhostList');
+    const badge = document.getElementById('vhostCount');
+    if (!vhosts || !vhosts.length) {
+      el.innerHTML = '<div class="empty">No virtual hosts configured</div>';
+      badge.textContent = '0';
+      return;
+    }
+    badge.textContent = vhosts.length;
+    el.innerHTML = vhosts.map(vh => `
+      <div class="vh">
+        <span class="vh-name">${esc(vh.hostname)}</span>
+        <div class="vh-stats">
+          <span><b>${vh.routes}</b> route${vh.routes !== 1 ? 's' : ''}</span>
+          <span><b>${(vh.services||[]).length}</b> svc</span>
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function updateServices(services) {
+    const el = document.getElementById('serviceGrid');
+    const badge = document.getElementById('serviceCount');
+    if (!services || !services.length) {
+      el.innerHTML = '<div class="empty">No services discovered</div>';
+      badge.textContent = '0';
+      prevServices = {};
+      return;
+    }
+    badge.textContent = services.length;
+
+    const newSvcs = {};
+    services.forEach(s => {
+      const k = s.namespace + '/' + s.name;
+      newSvcs[k] = new Set((s.backends||[]).map(b => b.address+':'+b.port));
+    });
+
+    el.innerHTML = services.map(svc => {
+      const k = svc.namespace + '/' + svc.name;
+      const bs = svc.backends || [];
+      const prev = prevServices[k] || new Set();
+      const isNewSvc = !prevServices[k];
+      const cCls = bs.length > 0 ? 'up' : 'down';
+
+      return `
+        <div class="svc${isNewSvc ? ' flash' : ''}">
+          <div class="svc-head">
+            <div>
+              <div class="svc-name">${esc(svc.name)}</div>
+              <div class="svc-ns">${esc(svc.namespace)}</div>
+            </div>
+            <div style="text-align:right">
+              <div class="svc-count ${cCls}">${bs.length}</div>
+              <div class="svc-count-label">backends</div>
+            </div>
+          </div>
+          <div class="nodes">
+            ${bs.length === 0 ? '<span class="no-backends">No ready endpoints</span>' : ''}
+            ${bs.map(b => {
+              const addr = b.address + ':' + b.port;
+              const fresh = !prev.has(addr);
+              return `<span class="node${fresh ? ' fresh' : ''}"><span class="node-indicator"></span>${esc(addr)}</span>`;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    prevServices = newSvcs;
+  }
+
+  function addEvent(event) {
+    const log = document.getElementById('eventLog');
+    if (eventCounter === 0) log.innerHTML = '';
+    eventCounter++;
+    document.getElementById('eventCount').textContent = eventCounter;
+
+    const info = evTypes[event.type] || { label: event.type, c: 'inf' };
+    const row = document.createElement('div');
+    row.className = 'ev entering';
+    row.innerHTML = `
+      <span class="ev-time">${fmt(event.time)}</span>
+      <span class="ev-tag ${info.c}">${esc(info.label)}</span>
+      <span class="ev-msg" title="${esc(event.message)}">${esc(event.message)}</span>
+    `;
+    log.prepend(row);
+    // Remove animation class after it plays
+    setTimeout(() => row.classList.remove('entering'), 400);
+
+    while (log.children.length > MAX_EVENTS) log.removeChild(log.lastChild);
+  }
+
+  function loadEvents(events) {
+    if (!events || !events.length) return;
+    const log = document.getElementById('eventLog');
+    log.innerHTML = '';
+    eventCounter = events.length;
+    document.getElementById('eventCount').textContent = eventCounter;
+    events.slice().reverse().forEach(ev => {
+      const info = evTypes[ev.type] || { label: ev.type, c: 'inf' };
+      const row = document.createElement('div');
+      row.className = 'ev';
+      row.innerHTML = `
+        <span class="ev-time">${fmt(ev.time)}</span>
+        <span class="ev-tag ${info.c}">${esc(info.label)}</span>
+        <span class="ev-msg" title="${esc(ev.message)}">${esc(ev.message)}</span>
+      `;
+      log.appendChild(row);
+    });
+  }
+
+  // ─── SSE ───
+  let evtSource = null;
+  let reconnectDelay = 1000;
+
+  function connect() {
+    const dot = document.getElementById('sseDot');
+    evtSource = new EventSource('/api/events');
+
+    evtSource.onopen = function() {
+      dot.classList.remove('disconnected');
+      reconnectDelay = 1000;
+    };
+
+    evtSource.onerror = function() {
+      dot.classList.add('disconnected');
+      evtSource.close();
+      setTimeout(connect, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+    };
+
+    evtSource.addEventListener('heartbeat', function(e) {
+      const snap = JSON.parse(e.data);
+      triggerBeat();
+      updateStatus(snap);
+      updateMetrics(snap);
+      updateVHosts(snap.vhosts);
+      updateServices(snap.services);
+    });
+
+    Object.keys(evTypes).forEach(function(type) {
+      evtSource.addEventListener(type, function(e) {
+        addEvent(JSON.parse(e.data));
+        triggerBeat();
+      });
+    });
+  }
+
+  // Initial load
+  fetch('/api/state')
+    .then(r => r.json())
+    .then(snap => {
+      updateStatus(snap);
+      updateMetrics(snap);
+      updateVHosts(snap.vhosts);
+      updateServices(snap.services);
+      loadEvents(snap.events);
+      connect();
+    })
+    .catch(() => connect());
+})();
+</script>
+</body>
+</html>

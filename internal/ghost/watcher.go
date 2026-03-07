@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/reload"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -57,6 +58,10 @@ type Watcher struct {
 
 	// EndpointSlice lister for backfilling endpoints on new service watches
 	endpointSliceLister discoveryv1listers.EndpointSliceLister
+
+	// Dashboard integration (optional)
+	dashBus   *dashboard.EventBus
+	dashState *dashboard.StateTracker
 }
 
 // NewWatcher creates a new ghost configuration watcher.
@@ -84,6 +89,12 @@ func NewWatcher(
 		endpoints:       make(map[string][]Endpoint),
 		serviceWatch:    make(map[string]struct{}),
 	}
+}
+
+// SetDashboard connects the watcher to the dashboard event bus and state tracker.
+func (w *Watcher) SetDashboard(bus *dashboard.EventBus, state *dashboard.StateTracker) {
+	w.dashBus = bus
+	w.dashState = state
 }
 
 // notifyFatal sends err on the fatal error channel without blocking.
@@ -314,6 +325,7 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 		"removed", len(removed),
 		"total", len(newEndpoints),
 	)
+	dashboard.PublishEndpointsChanged(w.dashBus, key, len(added), len(removed), len(newEndpoints))
 	for _, ep := range added {
 		w.logger.Debug("backend added", "service", key, "address", ep.IP, "port", ep.Port)
 	}
@@ -456,6 +468,11 @@ func (w *Watcher) regenerateConfig(ctx context.Context) error {
 	}
 
 	w.logger.Info("ghost reload triggered successfully")
+
+	// Update dashboard state
+	dashboard.PublishGhostReload(w.dashBus, len(config.VHosts), serviceCount, backendCount)
+	w.updateDashboardState(routingConfig, endpoints)
+
 	return nil
 }
 
@@ -612,6 +629,7 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 	w.mu.Unlock()
 
 	w.logger.Info("routing config loaded from ConfigMap")
+	dashboard.PublishConfigMapUpdate(w.dashBus, cm.Name)
 
 	// Skip reload during initial sync
 	if !shouldReload {
@@ -658,6 +676,49 @@ func (w *Watcher) backfillEndpoints(oldServiceWatch map[string]struct{}) {
 				"endpoints", len(allEndpoints))
 		}
 	}
+}
+
+// updateDashboardState pushes current service/vhost state to the dashboard tracker.
+func (w *Watcher) updateDashboardState(routingConfig *RoutingConfig, endpoints ServiceEndpoints) {
+	if w.dashState == nil {
+		return
+	}
+
+	// Build service states
+	services := make(map[string]dashboard.ServiceState)
+	for key, eps := range endpoints {
+		parts := strings.SplitN(key, "/", 2)
+		ns, name := parts[0], parts[1]
+		backends := make([]dashboard.BackendState, len(eps))
+		for i, ep := range eps {
+			backends[i] = dashboard.BackendState{Address: ep.IP, Port: ep.Port}
+		}
+		services[key] = dashboard.ServiceState{
+			Name:      name,
+			Namespace: ns,
+			Backends:  backends,
+		}
+	}
+	w.dashState.UpdateServices(services)
+
+	// Build vhost states
+	vhosts := make(map[string]dashboard.VHostState)
+	for hostname, vr := range routingConfig.VHosts {
+		svcSet := make(map[string]struct{})
+		for _, r := range vr.Routes {
+			svcSet[ServiceKey(r.Namespace, r.Service)] = struct{}{}
+		}
+		svcList := make([]string, 0, len(svcSet))
+		for s := range svcSet {
+			svcList = append(svcList, s)
+		}
+		vhosts[hostname] = dashboard.VHostState{
+			Hostname: hostname,
+			Routes:   len(vr.Routes),
+			Services: svcList,
+		}
+	}
+	w.dashState.UpdateVHosts(vhosts)
 }
 
 // handleConfigMapDelete processes ConfigMap delete events.
