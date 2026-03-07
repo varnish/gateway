@@ -634,6 +634,70 @@
     margin: 0 auto 12px;
   }
 
+  /* ─── DISCONNECT OVERLAY ─── */
+  .disconnect-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(8, 9, 13, 0.7);
+    backdrop-filter: blur(2px);
+    align-items: center;
+    justify-content: center;
+  }
+
+  body.disconnected .disconnect-overlay {
+    display: flex;
+  }
+
+  body.disconnected .main,
+  body.disconnected .heartbeat-strip {
+    opacity: 0.3;
+    pointer-events: none;
+    transition: opacity 0.5s;
+  }
+
+  body.disconnected .header {
+    opacity: 0.6;
+    transition: opacity 0.5s;
+  }
+
+  .disconnect-box {
+    text-align: center;
+    padding: 32px 48px;
+    background: var(--surface);
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    animation: disconnectIn 0.4s ease-out;
+  }
+
+  @keyframes disconnectIn {
+    from { opacity: 0; transform: scale(0.95) translateY(8px); }
+    to { opacity: 1; transform: scale(1) translateY(0); }
+  }
+
+  .disconnect-box .disc-icon {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--rose);
+    margin: 0 auto 14px;
+    animation: blink 1s ease-in-out infinite;
+  }
+
+  .disconnect-box h2 {
+    font-family: var(--font-display);
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  .disconnect-box p {
+    color: var(--text-muted);
+    font-size: 12px;
+  }
+
   /* ─── RESPONSIVE ─── */
   @media (max-width: 900px) {
     .panels { grid-template-columns: 1fr; }
@@ -650,6 +714,14 @@
 </style>
 </head>
 <body>
+
+<div class="disconnect-overlay">
+  <div class="disconnect-box">
+    <div class="disc-icon"></div>
+    <h2>Connection Lost</h2>
+    <p>Reconnecting to chaperone...</p>
+  </div>
+</div>
 
 <!-- HEADER -->
 <div class="header">
@@ -1013,11 +1085,13 @@
 
     evtSource.onopen = function() {
       dot.classList.remove('disconnected');
+      document.body.classList.remove('disconnected');
       reconnectDelay = 1000;
     };
 
     evtSource.onerror = function() {
       dot.classList.add('disconnected');
+      document.body.classList.add('disconnected');
       evtSource.close();
       setTimeout(connect, reconnectDelay);
       reconnectDelay = Math.min(reconnectDelay * 2, 10000);
