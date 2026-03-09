@@ -780,7 +780,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         </div>
         <h3>Zero VCL Generation</h3>
-        <p>Route and backend changes require no VCL templating or regeneration. Ghost reads JSON directly, making updates fast and operationally safe.</p>
+        <p>HTTP routing is not driven by VCL. Instead, the Varnish Gateway routes based on live, in-memory routing tables derived from Gateway API HTTPRoutes and Kubernetes EndpointSlices. Route and backend changes require no VCL regeneration, making updates fast and operationally safe.</p>
       </div>
 
       <div class="feature">
