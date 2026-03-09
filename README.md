@@ -77,7 +77,7 @@ Two separate reload paths:
 Chaperone includes a real-time web dashboard that shows live gateway state via Server-Sent Events (SSE). It is always enabled on port 9000 inside the chaperone pod. Access it via port-forward:
 
 ```bash
-kubectl port-forward deploy/<gateway-name> 9000:9000
+kubectl port-forward -n namespace deploy/demo-gateway 9000:9000
 ```
 
 Then open `http://localhost:9000`. The dashboard shows:
