@@ -1,7 +1,11 @@
-# Varnish Gateway Operator
+<p align="center">
+  <img src="assets/varnish-gateway-logo.svg" alt="Varnish Gateway" width="360">
+</p>
 
-[![CI](https://github.com/varnish/gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/varnish/gateway/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/github/varnish/gateway/graph/badge.svg)](https://codecov.io/github/varnish/gateway)
+<p align="center">
+  <a href="https://github.com/varnish/gateway/actions/workflows/ci.yml"><img src="https://github.com/varnish/gateway/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://codecov.io/github/varnish/gateway"><img src="https://codecov.io/github/varnish/gateway/graph/badge.svg" alt="codecov"></a>
+</p>
 
 Kubernetes Gateway API implementation using Varnish.
 
