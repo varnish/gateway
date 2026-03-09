@@ -124,6 +124,12 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 
 		for _, hostname := range hostnames {
 			for _, rule := range route.Spec.Rules {
+				// Extract rule name (from GEP-995 Named Route Rules)
+				var ruleName string
+				if rule.Name != nil {
+					ruleName = string(*rule.Name)
+				}
+
 				// Process each match in the rule
 				if len(rule.Matches) == 0 {
 					// No matches specified - create default route with PathPrefix "/"
@@ -149,6 +155,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							Weight:    0,
 							Listeners: listeners,
 							RouteName: routeName,
+							RuleName:  ruleName,
 							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
 							RuleIndex: ruleIndex,
 						})
@@ -197,6 +204,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							Weight:    weight,
 							Listeners: listeners,
 							RouteName: routeName,
+							RuleName:  ruleName,
 							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
 							RuleIndex: ruleIndex,
 						})
@@ -311,6 +319,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 									Weight:      0,
 									Listeners:   listeners,
 									RouteName:   routeName,
+									RuleName:    ruleName,
 									Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
 									RuleIndex:   ruleIndex,
 								})
@@ -358,6 +367,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 								Weight:      weight,
 								Listeners:   listeners,
 								RouteName:   routeName,
+								RuleName:    ruleName,
 								Priority:    CalculateRoutePriority(pathMatch, method, headers, queryParams),
 								RuleIndex:   ruleIndex,
 							})

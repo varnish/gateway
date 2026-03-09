@@ -123,6 +123,46 @@ pub struct RequestRedirectFilter {
     pub status_code: u16,
 }
 
+/// Cache key configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheKeyConfig {
+    #[serde(default)]
+    pub headers: Vec<String>,
+    #[serde(default)]
+    pub query_params_include: Vec<String>,
+    #[serde(default)]
+    pub query_params_exclude: Vec<String>,
+}
+
+/// Header-based cache bypass rule
+#[derive(Debug, Clone, Deserialize)]
+pub struct BypassHeaderConfig {
+    pub name: String,
+    #[serde(default)]
+    pub value_regex: Option<String>,
+}
+
+/// Cache policy for a route, derived from VarnishCachePolicy.
+/// Routes without a cache_policy operate in pass-through mode (no caching).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CachePolicy {
+    pub default_ttl_seconds: Option<u32>,
+    pub forced_ttl_seconds: Option<u32>,
+    #[serde(default)]
+    pub grace_seconds: u32,
+    #[serde(default)]
+    pub keep_seconds: u32,
+    #[serde(default = "default_request_coalescing")]
+    pub request_coalescing: bool,
+    pub cache_key: Option<CacheKeyConfig>,
+    #[serde(default)]
+    pub bypass_headers: Vec<BypassHeaderConfig>,
+}
+
+fn default_request_coalescing() -> bool {
+    true
+}
+
 /// Route filters container
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub struct RouteFilters {
@@ -156,6 +196,9 @@ pub struct Route {
     pub priority: i32,
     #[serde(default)]
     pub rule_index: i32,
+    /// Cache policy from VarnishCachePolicy. None means pass-through (no caching).
+    #[serde(default)]
+    pub cache_policy: Option<CachePolicy>,
 }
 
 /// All routing rules for a single hostname (e.g., "api.example.com").

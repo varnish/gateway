@@ -2,6 +2,7 @@ package v1alpha1
 
 import (
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -143,6 +144,265 @@ func (in *GatewayClassParametersList) DeepCopy() *GatewayClassParametersList {
 
 // DeepCopyObject implements runtime.Object.
 func (in *GatewayClassParametersList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *HeaderBypassCondition) DeepCopyInto(out *HeaderBypassCondition) {
+	*out = *in
+}
+
+// DeepCopy creates a deep copy of HeaderBypassCondition.
+func (in *HeaderBypassCondition) DeepCopy() *HeaderBypassCondition {
+	if in == nil {
+		return nil
+	}
+	out := new(HeaderBypassCondition)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *BypassSpec) DeepCopyInto(out *BypassSpec) {
+	*out = *in
+	if in.Headers != nil {
+		in, out := &in.Headers, &out.Headers
+		*out = make([]HeaderBypassCondition, len(*in))
+		copy(*out, *in)
+	}
+}
+
+// DeepCopy creates a deep copy of BypassSpec.
+func (in *BypassSpec) DeepCopy() *BypassSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(BypassSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *QueryParameterKeySpec) DeepCopyInto(out *QueryParameterKeySpec) {
+	*out = *in
+	if in.Include != nil {
+		in, out := &in.Include, &out.Include
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.Exclude != nil {
+		in, out := &in.Exclude, &out.Exclude
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+}
+
+// DeepCopy creates a deep copy of QueryParameterKeySpec.
+func (in *QueryParameterKeySpec) DeepCopy() *QueryParameterKeySpec {
+	if in == nil {
+		return nil
+	}
+	out := new(QueryParameterKeySpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *CacheKeySpec) DeepCopyInto(out *CacheKeySpec) {
+	*out = *in
+	if in.Headers != nil {
+		in, out := &in.Headers, &out.Headers
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.QueryParameters != nil {
+		in, out := &in.QueryParameters, &out.QueryParameters
+		*out = new(QueryParameterKeySpec)
+		(*in).DeepCopyInto(*out)
+	}
+}
+
+// DeepCopy creates a deep copy of CacheKeySpec.
+func (in *CacheKeySpec) DeepCopy() *CacheKeySpec {
+	if in == nil {
+		return nil
+	}
+	out := new(CacheKeySpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *PolicyTargetReference) DeepCopyInto(out *PolicyTargetReference) {
+	*out = *in
+	if in.SectionName != nil {
+		in, out := &in.SectionName, &out.SectionName
+		*out = new(string)
+		**out = **in
+	}
+}
+
+// DeepCopy creates a deep copy of PolicyTargetReference.
+func (in *PolicyTargetReference) DeepCopy() *PolicyTargetReference {
+	if in == nil {
+		return nil
+	}
+	out := new(PolicyTargetReference)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *VarnishCachePolicyAncestorStatus) DeepCopyInto(out *VarnishCachePolicyAncestorStatus) {
+	*out = *in
+	if in.Conditions != nil {
+		in, out := &in.Conditions, &out.Conditions
+		*out = make([]metav1.Condition, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy creates a deep copy of VarnishCachePolicyAncestorStatus.
+func (in *VarnishCachePolicyAncestorStatus) DeepCopy() *VarnishCachePolicyAncestorStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(VarnishCachePolicyAncestorStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *VarnishCachePolicySpec) DeepCopyInto(out *VarnishCachePolicySpec) {
+	*out = *in
+	in.TargetRef.DeepCopyInto(&out.TargetRef)
+	if in.DefaultTTL != nil {
+		in, out := &in.DefaultTTL, &out.DefaultTTL
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.ForcedTTL != nil {
+		in, out := &in.ForcedTTL, &out.ForcedTTL
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.Grace != nil {
+		in, out := &in.Grace, &out.Grace
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.Keep != nil {
+		in, out := &in.Keep, &out.Keep
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.RequestCoalescing != nil {
+		in, out := &in.RequestCoalescing, &out.RequestCoalescing
+		*out = new(bool)
+		**out = **in
+	}
+	if in.CacheKey != nil {
+		in, out := &in.CacheKey, &out.CacheKey
+		*out = new(CacheKeySpec)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.Bypass != nil {
+		in, out := &in.Bypass, &out.Bypass
+		*out = new(BypassSpec)
+		(*in).DeepCopyInto(*out)
+	}
+}
+
+// DeepCopy creates a deep copy of VarnishCachePolicySpec.
+func (in *VarnishCachePolicySpec) DeepCopy() *VarnishCachePolicySpec {
+	if in == nil {
+		return nil
+	}
+	out := new(VarnishCachePolicySpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *VarnishCachePolicyStatus) DeepCopyInto(out *VarnishCachePolicyStatus) {
+	*out = *in
+	if in.Ancestors != nil {
+		in, out := &in.Ancestors, &out.Ancestors
+		*out = make([]VarnishCachePolicyAncestorStatus, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy creates a deep copy of VarnishCachePolicyStatus.
+func (in *VarnishCachePolicyStatus) DeepCopy() *VarnishCachePolicyStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(VarnishCachePolicyStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *VarnishCachePolicy) DeepCopyInto(out *VarnishCachePolicy) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+// DeepCopy creates a deep copy of VarnishCachePolicy.
+func (in *VarnishCachePolicy) DeepCopy() *VarnishCachePolicy {
+	if in == nil {
+		return nil
+	}
+	out := new(VarnishCachePolicy)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject implements runtime.Object.
+func (in *VarnishCachePolicy) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *VarnishCachePolicyList) DeepCopyInto(out *VarnishCachePolicyList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]VarnishCachePolicy, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy creates a deep copy of VarnishCachePolicyList.
+func (in *VarnishCachePolicyList) DeepCopy() *VarnishCachePolicyList {
+	if in == nil {
+		return nil
+	}
+	out := new(VarnishCachePolicyList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject implements runtime.Object.
+func (in *VarnishCachePolicyList) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}

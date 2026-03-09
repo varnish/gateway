@@ -327,11 +327,16 @@ mod ghost {
                 None => return fallback,
             };
 
-            let (result, route_name, log_msgs) =
-                self.ghost_director
+            let result = self.ghost_director
                     .route_request(req, listener_owned.as_deref());
-            for (tag, msg) in log_msgs {
+            for (tag, msg) in result.log_msgs {
                 ctx.log(tag, &msg);
+            }
+
+            // Apply cache directives via C API (not headers)
+            let _ = ctx.set_hash_ignore_busy(result.hash_ignore_busy);
+            if result.pass {
+                ctx.set_pass();
             }
 
             // Set X-Gateway-Listener and X-Gateway-Route headers for user VCL
@@ -340,12 +345,12 @@ mod ghost {
                 if let Some(ref listener) = listener_owned {
                     let _ = req.set_header("X-Gateway-Listener", listener);
                 }
-                if let Some(ref name) = route_name {
+                if let Some(ref name) = result.route_name {
                     let _ = req.set_header("X-Gateway-Route", name);
                 }
             }
 
-            match result {
+            match result.backend {
                 Some(backend_ref) => backend_ref.vcl_ptr(),
                 None => fallback,
             }

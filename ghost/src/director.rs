@@ -22,6 +22,7 @@ use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, Qu
 use crate::internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
+use crate::vhost_director;
 use crate::vhost_director::VhostDirector;
 
 /// Wrapper for BackendRef that implements Send + Sync
@@ -199,6 +200,8 @@ pub struct RouteEntry {
     pub route_name: Option<String>,
     pub priority: i32,
     pub rule_index: i32,
+    /// Cache policy from VarnishCachePolicy. None means pass-through (no caching).
+    pub cache_policy: Option<crate::config::CachePolicy>,
 }
 
 /// Map of vhost directors for two-tier routing
@@ -296,6 +299,7 @@ pub fn build_vhost_directors(
                 route_name: route.route_name.clone(),
                 priority: route.priority,
                 rule_index: route.rule_index,
+                cache_policy: route.cache_policy.clone(),
             });
         }
 
@@ -331,6 +335,7 @@ pub fn build_vhost_directors(
                 route_name: None,
                 priority: 0,
                 rule_index: i32::MAX,
+                cache_policy: None,
             });
         }
 
@@ -504,7 +509,6 @@ impl GhostDirector {
     }
 
     /// Full routing in client context: hostname match → vhost → route → backend.
-    /// Returns (Option<BackendRef>, Option<route_name>, log_messages).
     ///
     /// Used by the recv() VMOD method to route requests in vcl_recv using
     /// req headers and local_socket() for listener-aware routing.
@@ -512,23 +516,35 @@ impl GhostDirector {
         &self,
         http: &mut HttpHeaders,
         listener: Option<&str>,
-    ) -> (Option<BackendRef>, Option<String>, Vec<(LogTag, String)>) {
+    ) -> vhost_director::RouteRequestResult {
         let host = match get_host_header(http) {
             Some(h) => h,
-            None => return (None, None, Vec::new()),
+            None => return vhost_director::RouteRequestResult {
+                backend: None,
+                route_name: None,
+                log_msgs: Vec::new(),
+                pass: true,
+                hash_ignore_busy: true,
+            },
         };
 
         let directors = self.vhost_directors.load();
         let vhost = match match_hostname(&directors, &host) {
             Some(dir) => dir,
-            None => return (Some(self.not_found_backend.0.clone()), None, Vec::new()),
+            None => return vhost_director::RouteRequestResult {
+                backend: Some(self.not_found_backend.0.clone()),
+                route_name: None,
+                log_msgs: Vec::new(),
+                pass: true,
+                hash_ignore_busy: true,
+            },
         };
 
-        let (result, route_name, log_msgs) = vhost.route_request(http, listener);
-        match result {
-            Some(backend) => (Some(backend), route_name, log_msgs),
-            None => (Some(self.not_found_backend.0.clone()), route_name, log_msgs),
+        let mut result = vhost.route_request(http, listener);
+        if result.backend.is_none() {
+            result.backend = Some(self.not_found_backend.0.clone());
         }
+        result
     }
 
     /// JSON output format for backend.list -j
@@ -574,11 +590,11 @@ impl GhostDirector {
 impl VclDirector for GhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         let bereq = ctx.http_bereq.as_mut()?;
-        let (result, _route_name, log_msgs) = self.route_request(bereq, None);
-        for (tag, msg) in log_msgs {
+        let result = self.route_request(bereq, None);
+        for (tag, msg) in result.log_msgs {
             ctx.log(tag, &msg);
         }
-        result
+        result.backend
     }
 
     fn probe(&self, ctx: &mut Ctx) -> ProbeResult {

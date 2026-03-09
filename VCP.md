@@ -79,15 +79,15 @@ spec:
   # When targeting a specific rule within an HTTPRoute:
   # sectionName: static-assets
 
-  # TTL mode — choose ONE of defaultTTL or ttl (mutually exclusive).
+  # TTL mode — choose ONE of defaultTTL or forcedTTL (mutually exclusive).
   #
   # defaultTTL: used when the origin does NOT send Cache-Control headers.
   # Origin Cache-Control takes precedence. This is the safe, HTTP-compliant option.
   defaultTTL: 5m
   #
-  # ttl: forced TTL, ignoring origin Cache-Control entirely.
+  # forcedTTL: forced TTL, ignoring origin Cache-Control entirely.
   # Use when the origin misbehaves or you need operator-level control.
-  # ttl: 1h
+  # forcedTTL: 1h
 
   # Serve stale content while asynchronously revalidating in the background.
   # Equivalent to stale-while-revalidate in HTTP semantics.
@@ -140,17 +140,25 @@ spec:
 |-------|------|---------|-------------|
 | `targetRef` | PolicyTargetReference | required | Gateway, HTTPRoute, or HTTPRoute rule to attach to |
 | `targetRef.sectionName` | string | optional | Name of a specific rule within the targeted HTTPRoute |
-| `defaultTTL` | Duration | required* | TTL when origin sends no Cache-Control. Mutually exclusive with `ttl` |
-| `ttl` | Duration | required* | Forced TTL, ignores origin Cache-Control. Mutually exclusive with `defaultTTL` |
-| `grace` | Duration | `0` | Serve stale while revalidating |
-| `keep` | Duration | `0` | Serve stale when backend is down |
+| `defaultTTL` | Duration | required* | TTL when origin sends no Cache-Control. Mutually exclusive with `forcedTTL` |
+| `forcedTTL` | Duration | required* | Forced TTL, ignores origin Cache-Control. Mutually exclusive with `defaultTTL` |
+| `grace` | Duration | `0` | Serve stale while revalidating (see note on grace/keep semantics below) |
+| `keep` | Duration | `0` | Serve stale when backend is down (see note on grace/keep semantics below) |
 | `requestCoalescing` | bool | `true` | Collapsed forwarding for concurrent requests |
 | `cacheKey.headers` | []string | `[]` | Request headers to include in cache key |
-| `cacheKey.queryParameters.include` | []string | all | Allowlist of query params in cache key |
-| `cacheKey.queryParameters.exclude` | []string | none | Denylist of query params from cache key |
+| `cacheKey.queryParameters.include` | []string | all | Allowlist of query params in cache key (exact match) |
+| `cacheKey.queryParameters.exclude` | []string | none | Denylist of query params from cache key (exact match) |
 | `bypass.headers` | []HeaderCondition | `[]` | Headers that trigger cache bypass |
 
-*Exactly one of `defaultTTL` or `ttl` must be set. Validation rejects specs with both or neither.
+*Exactly one of `defaultTTL` or `forcedTTL` must be set. Validation rejects specs with both or neither.
+
+**Note on grace/keep semantics:** `grace` and `keep` are always operator-set values. Varnish
+does not natively parse `stale-while-revalidate` or `stale-if-error` from Cache-Control
+headers, so these fields are not "defaults" — they are the authoritative values. We use the
+Varnish names (`grace`/`keep`) rather than `defaultGrace`/`defaultKeep` because there is no
+origin-wins path for these fields. If a future version adds parsing of `stale-while-revalidate`
+and `stale-if-error` from origin headers, the naming should be revisited to match the
+`defaultTTL`/`forcedTTL` symmetry.
 
 ## Examples
 
@@ -376,7 +384,7 @@ The two TTL modes have fundamentally different relationships with origin headers
 Safe to attach broadly. Origin stays in control; `defaultTTL` is just a safety net for
 responses that forgot to set headers.
 
-### `ttl` — Authoritative (operator wins)
+### `forcedTTL` — Authoritative (operator wins)
 
 | Origin sends | Result |
 |---|---|
@@ -456,7 +464,7 @@ a VCP is attached:
   "rule_index": 0,
   "rule_name": "static-assets",
   "cache_policy": {
-    "ttl_seconds": 86400,
+    "forced_ttl_seconds": 86400,
     "grace_seconds": 0,
     "keep_seconds": 0,
     "request_coalescing": true
@@ -485,7 +493,7 @@ A route using `defaultTTL` instead:
 }
 ```
 
-`ttl_seconds` and `default_ttl_seconds` are mutually exclusive in the JSON — exactly one is
+`forced_ttl_seconds` and `default_ttl_seconds` are mutually exclusive in the JSON — exactly one is
 present. Routes without a VCP have no `cache_policy` field (null/absent). The ghost VMOD
 treats this as "pass mode."
 
@@ -496,6 +504,9 @@ In `vcl_recv` (the `recv()` method):
   `req.hash_always_miss = true` or signal pass mode.
 - If it has a `cache_policy`, apply bypass rules (check request headers against bypass
   conditions). If bypass matches, signal pass.
+- If `!request_coalescing`, the ghost VMOD sets `req.hash_ignore_busy` directly via
+  the Varnish context so concurrent requests for the same uncached object each do
+  their own backend fetch instead of waiting on the first one.
 
 In `vcl_hash` (or via a new `hash()` method):
 - If the route has `cache_key.headers`, add those request header values to the hash.
@@ -505,7 +516,6 @@ In `vcl_hash` (or via a new `hash()` method):
 In `vcl_backend_response`:
 - If `beresp.ttl == 0` and the route has `default_ttl_seconds > 0`, set `beresp.ttl`.
 - Set `beresp.grace` and `beresp.keep` from the policy.
-- If `!request_coalescing`, mark the object appropriately.
 
 ## Design Decisions
 
@@ -590,7 +600,7 @@ spec:
     kind: HTTPRoute
     name: my-app
     sectionName: static-assets
-  ttl: 24h
+  forcedTTL: 24h
 ---
 # Short caching for pages
 apiVersion: gateway.varnish.org/v1alpha1
@@ -612,7 +622,7 @@ spec:
 ```
 
 **Result:**
-- `/static/*` → forced 24h TTL (origin headers ignored)
+- `/static/*` → forced 24h TTL via `forcedTTL` (origin headers ignored)
 - `/api/*` → no VCP, pass mode (no caching)
 - `/*` → 5m default TTL, respects origin Cache-Control, bypasses for session cookies
 
@@ -629,14 +639,14 @@ inheritance. Reasons:
 3. **Debugging**: "which fields came from where?" is never a question
 4. Merging can be added later as an opt-in if there's demand
 
-### Why Exactly One of `defaultTTL` or `ttl`?
+### Why Exactly One of `defaultTTL` or `forcedTTL`?
 
 Making the user specify a TTL forces conscious decision-making. There's no safe universal
 default — 60s might be too long for a stock ticker, too short for a product image.
 
 The two fields encode different trust relationships:
 - `defaultTTL`: "I trust my origins to set Cache-Control, but want a fallback."
-- `ttl`: "I don't trust my origins, or I need operator-level control."
+- `forcedTTL`: "I don't trust my origins, or I need operator-level control."
 
 They're mutually exclusive because the intent is unambiguous either way. There's no scenario
 where you'd want both — if you're overriding, you're overriding.
@@ -686,10 +696,12 @@ hashing. This is the safer default — new cookies don't pollute the cache.
 **Denylist** (`exclude`): strip only these cookies; everything else is kept. Useful when
 most cookies are relevant but a few known-harmless ones fragment the cache.
 
-Stripped cookies are removed from the request before cache lookup but are **not** removed
-from the request sent to the backend — the origin still sees the full Cookie header on a
-miss. This matches standard Varnish practice: stripping is a cache-identity optimization,
-not a privacy mechanism.
+Stripped cookies are removed from `req.http.Cookie` before the cache lookup **and** remain
+stripped in the request sent to the backend. This is essential for correctness: if a cookie
+is not part of the cache key, the backend must not see it either, because the backend might
+return personalized content based on that cookie. That personalized response would then be
+cached and served to other users — a classic cache poisoning scenario. The rule is simple:
+if a cookie doesn't affect cache identity, it shouldn't affect the response either.
 
 Glob patterns (e.g., `wordpress_logged_in_*`) would be useful here since WordPress appends
 a hash to cookie names. Whether to support globs or regex is an open question.
@@ -726,6 +738,17 @@ combination is well-defined and useful.
 ## Future Considerations
 
 These are explicitly **not** in v1, but the design accommodates them:
+
+- **Glob/regex patterns for query parameters**: The `queryParameters.include`/`exclude`
+  fields currently use exact match. Supporting glob patterns (e.g., `utm_*`) or regex
+  would reduce verbosity for common cases like stripping all UTM parameters. The same
+  applies to cookie stripping if/when that feature is added.
+
+- **Response Set-Cookie stripping**: The `defaultTTL` mode follows Varnish's default
+  behavior of not caching responses with `Set-Cookie`. For sites where the origin sends
+  harmless `Set-Cookie` headers (analytics, consent) on otherwise cacheable responses,
+  a mechanism to strip specific `Set-Cookie` headers by name would allow caching without
+  leaking session cookies.
 
 - **Cache purge API**: A mechanism to invalidate cached objects. Could be a separate CRD
   (`VarnishCachePurge`) or an annotation-based trigger. Varnish supports purge natively.

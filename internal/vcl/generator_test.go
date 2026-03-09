@@ -62,9 +62,9 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 		t.Error("expected router.recv() call in vcl_recv")
 	}
 
-	// vcl_backend_fetch should NOT contain ghost routing (routing is in vcl_recv now)
-	if strings.Contains(result, "sub vcl_backend_fetch {") {
-		t.Error("vcl_backend_fetch should not be generated (routing moved to vcl_recv)")
+	// vcl_backend_fetch should clean up internal cache policy headers
+	if !strings.Contains(result, "sub vcl_backend_fetch {") {
+		t.Error("expected vcl_backend_fetch for cache policy header cleanup")
 	}
 
 	// Check user VCL marker

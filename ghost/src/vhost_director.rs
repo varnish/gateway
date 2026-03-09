@@ -41,6 +41,21 @@ pub struct RouteMatchResult<'a> {
     pub filters: Option<Arc<RouteFilters>>,
     pub matched_path: Option<&'a PathMatchCompiled>,
     pub route_name: Option<&'a str>,
+    pub cache_policy: Option<&'a crate::config::CachePolicy>,
+}
+
+/// Result returned by route_request to the caller (recv/resolve).
+/// Contains the resolved backend plus directives that must be applied
+/// via the Varnish C API (not headers).
+pub struct RouteRequestResult {
+    pub backend: Option<BackendRef>,
+    pub route_name: Option<String>,
+    pub log_msgs: Vec<(LogTag, String)>,
+    /// Whether to bypass the cache entirely (return(pass) in VCL terms).
+    pub pass: bool,
+    /// Whether to disable request coalescing (hash_ignore_busy).
+    /// Default true (no coalescing) — only false when a VCP explicitly enables it.
+    pub hash_ignore_busy: bool,
 }
 
 /// Director for a single virtual host
@@ -208,7 +223,6 @@ impl VhostDirector {
     }
 
     /// Route a request using the given HTTP headers.
-    /// Returns (Option<BackendRef>, log_messages).
     ///
     /// This is the core routing logic extracted from resolve() so it can work
     /// with either req (vcl_recv) or bereq (vcl_backend_fetch) headers.
@@ -216,12 +230,11 @@ impl VhostDirector {
     /// by which Varnish listener received the request.
     /// Log messages are collected and returned so the caller can emit them
     /// (avoids borrow conflicts between HttpHeaders and Ctx).
-    /// Route a request. Returns (backend, route_name, log_messages).
     pub fn route_request(
         &self,
         http: &mut HttpHeaders,
         listener: Option<&str>,
-    ) -> (Option<BackendRef>, Option<String>, Vec<(LogTag, String)>) {
+    ) -> RouteRequestResult {
         let mut log_msgs: Vec<(LogTag, String)> = Vec::new();
 
         // Extract request components (owned strings to avoid borrow conflicts)
@@ -261,7 +274,13 @@ impl VhostDirector {
             listener,
         ) {
             Some(r) => r,
-            None => return (None, None, log_msgs),
+            None => return RouteRequestResult {
+                backend: None,
+                route_name: None,
+                log_msgs,
+                pass: true,
+                hash_ignore_busy: true,
+            },
         };
         let backend_groups = match_result.backend_groups;
         let matched_filters = match_result.filters.as_ref();
@@ -322,7 +341,13 @@ impl VhostDirector {
                             LogTag::Error,
                             format!("Failed to serialize redirect config: {}", e),
                         ));
-                        return (None, route_name.clone(), log_msgs);
+                        return RouteRequestResult {
+                            backend: None,
+                            route_name: route_name.clone(),
+                            log_msgs,
+                            pass: true,
+                            hash_ignore_busy: true,
+                        };
                     }
                 };
 
@@ -331,14 +356,22 @@ impl VhostDirector {
                         LogTag::Error,
                         format!("Failed to set redirect config header: {}", e),
                     ));
-                    return (None, route_name.clone(), log_msgs);
+                    return RouteRequestResult {
+                        backend: None,
+                        route_name: route_name.clone(),
+                        log_msgs,
+                        pass: true,
+                        hash_ignore_busy: true,
+                    };
                 }
 
-                return (
-                    self.redirect_backend.as_ref().map(|r| r.0.clone()),
-                    route_name.clone(),
+                return RouteRequestResult {
+                    backend: self.redirect_backend.as_ref().map(|r| r.0.clone()),
+                    route_name: route_name.clone(),
                     log_msgs,
-                );
+                    pass: true,
+                    hash_ignore_busy: true,
+                };
             }
 
             // Apply other filters only if NOT redirecting
@@ -361,17 +394,23 @@ impl VhostDirector {
             }
         }
 
+        // Determine cache behavior from policy
+        let (pass, hash_ignore_busy) =
+            apply_cache_policy_headers(http, &match_result, &query_string_owned);
+
         // Select backend using two-level weighted random:
         // Level 1: pick a group by weight
         // Level 2: pick a random pod within the selected group
         let backend_key = match select_backend_from_groups(backend_groups) {
             Some(key) => key,
             None => {
-                return (
-                    self.internal_error_backend.as_ref().map(|r| r.0.clone()),
+                return RouteRequestResult {
+                    backend: self.internal_error_backend.as_ref().map(|r| r.0.clone()),
                     route_name,
                     log_msgs,
-                );
+                    pass,
+                    hash_ignore_busy,
+                };
             }
         };
 
@@ -381,25 +420,33 @@ impl VhostDirector {
         // Look up in backend pool
         let backend = match self.backend_pool.get(backend_key) {
             Some(b) => b,
-            None => return (None, route_name, log_msgs),
+            None => return RouteRequestResult {
+                backend: None,
+                route_name,
+                log_msgs,
+                pass,
+                hash_ignore_busy,
+            },
         };
 
-        (
-            Some(AsRef::<BackendRef>::as_ref(&*backend).clone()),
+        RouteRequestResult {
+            backend: Some(AsRef::<BackendRef>::as_ref(&*backend).clone()),
             route_name,
             log_msgs,
-        )
+            pass,
+            hash_ignore_busy,
+        }
     }
 }
 
 impl VclDirector for VhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         let bereq = ctx.http_bereq.as_mut()?;
-        let (result, _route_name, log_msgs) = self.route_request(bereq, None);
-        for (tag, msg) in log_msgs {
+        let result = self.route_request(bereq, None);
+        for (tag, msg) in result.log_msgs {
             ctx.log(tag, &msg);
         }
-        result
+        result.backend
     }
 
     fn probe(&self, _ctx: &mut Ctx) -> ProbeResult {
@@ -484,10 +531,165 @@ fn match_routes<'a>(
             filters: route.filters.clone(),
             matched_path: route.path_match.as_ref(),
             route_name: route.route_name.as_deref(),
+            cache_policy: route.cache_policy.as_ref(),
         });
     }
 
     None
+}
+
+/// Apply cache policy to the request. Returns (pass, hash_ignore_busy).
+///
+/// Sets bereq-bridging headers for values that need to reach vcl_backend_response:
+/// - `X-Ghost-Default-TTL: <N>s` → set beresp.ttl when origin has no Cache-Control
+/// - `X-Ghost-Forced-TTL: <N>s` → override beresp.ttl unconditionally
+/// - `X-Ghost-Grace: <N>s` → set beresp.grace
+/// - `X-Ghost-Keep: <N>s` → set beresp.keep
+/// - `X-Ghost-Cache-Key-Extra: <data>` → additional hash_data() input
+///
+/// Pass and hash_ignore_busy are returned to the caller for direct C API use
+/// (ctx.set_pass() and ctx.set_hash_ignore_busy()) instead of using headers.
+fn apply_cache_policy_headers(
+    http: &mut HttpHeaders,
+    match_result: &RouteMatchResult,
+    query_string: &Option<String>,
+) -> (bool, bool) {
+    let cache_policy = match match_result.cache_policy {
+        Some(cp) => cp,
+        None => {
+            // No cache policy → pass-through mode (no caching, no coalescing)
+            return (true, true);
+        }
+    };
+
+    // Check bypass rules: if any bypass header condition matches, pass
+    if !cache_policy.bypass_headers.is_empty() {
+        for bypass in &cache_policy.bypass_headers {
+            let header_val = http.header(&bypass.name);
+            if let Some(val) = header_val {
+                let val_str = match val {
+                    StrOrBytes::Utf8(s) => s,
+                    StrOrBytes::Bytes(b) => match std::str::from_utf8(b) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    },
+                };
+
+                let should_bypass = match &bypass.value_regex {
+                    Some(pattern) => {
+                        // Match regex against header value
+                        regex::Regex::new(pattern)
+                            .map(|re| re.is_match(val_str))
+                            .unwrap_or(false)
+                    }
+                    None => true, // No regex = any value triggers bypass
+                };
+
+                if should_bypass {
+                    return (true, true);
+                }
+            }
+        }
+    }
+
+    // Set TTL headers (bridge to vcl_backend_response via bereq)
+    if let Some(ttl) = cache_policy.default_ttl_seconds {
+        let _ = http.set_header("X-Ghost-Default-TTL", &format!("{}s", ttl));
+    }
+    if let Some(ttl) = cache_policy.forced_ttl_seconds {
+        let _ = http.set_header("X-Ghost-Forced-TTL", &format!("{}s", ttl));
+    }
+
+    // Set grace and keep (bridge to vcl_backend_response via bereq)
+    if cache_policy.grace_seconds > 0 {
+        let _ = http.set_header("X-Ghost-Grace", &format!("{}s", cache_policy.grace_seconds));
+    }
+    if cache_policy.keep_seconds > 0 {
+        let _ = http.set_header("X-Ghost-Keep", &format!("{}s", cache_policy.keep_seconds));
+    }
+
+    // Cache key customization
+    if let Some(cache_key) = &cache_policy.cache_key {
+        // Build extra hash data from cache key headers
+        let mut extra_parts: Vec<String> = Vec::new();
+
+        for header_name in &cache_key.headers {
+            if let Some(val) = http.header(header_name) {
+                let val_str = match val {
+                    StrOrBytes::Utf8(s) => s.to_string(),
+                    StrOrBytes::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+                };
+                extra_parts.push(format!("{}:{}", header_name, val_str));
+            }
+        }
+
+        // Query parameter filtering: rewrite URL to include/exclude params
+        if !cache_key.query_params_include.is_empty() || !cache_key.query_params_exclude.is_empty()
+        {
+            if let Some(qs) = query_string {
+                let filtered = filter_query_params(
+                    qs,
+                    &cache_key.query_params_include,
+                    &cache_key.query_params_exclude,
+                );
+                // Add filtered query string to hash
+                extra_parts.push(format!("qs:{}", filtered));
+            }
+        }
+
+        if !extra_parts.is_empty() {
+            let _ = http.set_header("X-Ghost-Cache-Key-Extra", &extra_parts.join("|"));
+        }
+    }
+
+    // Return: not pass, hash_ignore_busy = !coalescing
+    (false, !cache_policy.request_coalescing)
+}
+
+/// Filter query parameters based on include/exclude lists.
+/// Returns the filtered query string.
+fn filter_query_params(query_string: &str, include: &[String], exclude: &[String]) -> String {
+    let params: Vec<(&str, &str)> = query_string
+        .split('&')
+        .filter_map(|part| {
+            let mut split = part.splitn(2, '=');
+            let key = split.next()?;
+            let val = split.next().unwrap_or("");
+            Some((key, val))
+        })
+        .collect();
+
+    let filtered: Vec<String> = if !include.is_empty() {
+        // Allowlist mode: only keep params in include list
+        params
+            .iter()
+            .filter(|(k, _)| include.iter().any(|i| i == k))
+            .map(|(k, v)| {
+                if v.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{}={}", k, v)
+                }
+            })
+            .collect()
+    } else if !exclude.is_empty() {
+        // Denylist mode: remove params in exclude list
+        params
+            .iter()
+            .filter(|(k, _)| !exclude.iter().any(|e| e == k))
+            .map(|(k, v)| {
+                if v.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{}={}", k, v)
+                }
+            })
+            .collect()
+    } else {
+        return query_string.to_string();
+    };
+
+    filtered.join("&")
 }
 
 /// Select a backend using two-level weighted random selection:
@@ -691,6 +893,7 @@ mod tests {
             route_name: None,
             priority: 100,
             rule_index: 0,
+            cache_policy: None,
         }];
 
         // This test doesn't use HttpHeaders, so we can't fully test it here
@@ -716,6 +919,7 @@ mod tests {
             route_name: None,
             priority: 100,
             rule_index: 0,
+            cache_policy: None,
         }];
 
         // Verify route structure
@@ -744,6 +948,7 @@ mod tests {
                 route_name: None,
                 priority: 100,
                 rule_index: 0,
+                cache_policy: None,
             }],
             backend_pool.clone(),
             None,
@@ -832,6 +1037,7 @@ mod tests {
             filters: Some(filters.clone()),
             matched_path: Some(&path_match),
             route_name: Some("default/my-route"),
+            cache_policy: None,
         };
 
         assert_eq!(result.backend_groups.len(), 1);

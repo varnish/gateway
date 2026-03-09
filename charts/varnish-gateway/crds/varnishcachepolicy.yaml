@@ -1,0 +1,177 @@
+# VarnishCachePolicy CRD for caching configuration
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: varnishcachepolicies.gateway.varnish-software.com
+spec:
+  group: gateway.varnish-software.com
+  names:
+    kind: VarnishCachePolicy
+    listKind: VarnishCachePolicyList
+    plural: varnishcachepolicies
+    singular: varnishcachepolicy
+    shortNames:
+      - vcp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: VarnishCachePolicy configures caching behavior for routes through a Varnish Gateway.
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: Defines the desired caching behavior.
+              required:
+                - targetRef
+              properties:
+                targetRef:
+                  type: object
+                  description: Identifies the Gateway or HTTPRoute this policy applies to.
+                  required:
+                    - group
+                    - kind
+                    - name
+                  properties:
+                    group:
+                      type: string
+                      description: Group of the target resource.
+                      minLength: 1
+                    kind:
+                      type: string
+                      description: Kind of the target resource (Gateway or HTTPRoute).
+                      enum:
+                        - Gateway
+                        - HTTPRoute
+                    name:
+                      type: string
+                      description: Name of the target resource.
+                      minLength: 1
+                    sectionName:
+                      type: string
+                      description: |
+                        Name of a specific rule within the targeted HTTPRoute.
+                        When set, targets only that rule. When unset, targets the entire resource.
+                      minLength: 1
+                defaultTTL:
+                  type: string
+                  description: |
+                    TTL when origin sends no Cache-Control headers. Origin Cache-Control takes precedence.
+                    Mutually exclusive with forcedTTL. Format: Go duration (e.g., "5m", "1h", "30s").
+                forcedTTL:
+                  type: string
+                  description: |
+                    Forced TTL, ignoring origin Cache-Control entirely.
+                    Mutually exclusive with defaultTTL. Format: Go duration (e.g., "1h", "24h").
+                grace:
+                  type: string
+                  description: |
+                    How long to serve stale content while asynchronously revalidating.
+                    Equivalent to stale-while-revalidate. Default: 0 (disabled).
+                    Format: Go duration (e.g., "30s", "5m").
+                keep:
+                  type: string
+                  description: |
+                    How long to keep stale objects for serving when all backends are sick.
+                    Equivalent to stale-if-error. Default: 0 (disabled).
+                    Format: Go duration (e.g., "24h", "6h").
+                requestCoalescing:
+                  type: boolean
+                  description: |
+                    Enable collapsed forwarding for concurrent requests to the same uncached object.
+                    Default: true.
+                cacheKey:
+                  type: object
+                  description: Customize what makes a cache entry unique.
+                  properties:
+                    headers:
+                      type: array
+                      description: |
+                        Request headers to include in the cache key.
+                        Similar to Vary, but controlled by the operator, not the origin.
+                      items:
+                        type: string
+                    queryParameters:
+                      type: object
+                      description: Control which query parameters are part of the cache key.
+                      properties:
+                        include:
+                          type: array
+                          description: |
+                            Allowlist mode: only these params matter for caching.
+                            Mutually exclusive with exclude.
+                          items:
+                            type: string
+                        exclude:
+                          type: array
+                          description: |
+                            Denylist mode: these params are excluded from the cache key.
+                            Mutually exclusive with include.
+                          items:
+                            type: string
+                bypass:
+                  type: object
+                  description: Conditions under which caching is bypassed.
+                  properties:
+                    headers:
+                      type: array
+                      description: Header conditions that trigger cache bypass.
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            description: Header name to check.
+                            minLength: 1
+                          valueRegex:
+                            type: string
+                            description: |
+                              Optional regex pattern to match against the header value.
+                              If omitted, any value (or presence) of the header triggers bypass.
+            status:
+              type: object
+              description: Observed state of the VarnishCachePolicy.
+              properties:
+                ancestors:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - ancestorRef
+                      - controllerName
+                    properties:
+                      ancestorRef:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      controllerName:
+                        type: string
+                      conditions:
+                        type: array
+                        items:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Target Kind
+          type: string
+          jsonPath: .spec.targetRef.kind
+        - name: Target Name
+          type: string
+          jsonPath: .spec.targetRef.name
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

@@ -245,6 +245,26 @@ HTTPRoute reconcile
 - **VCL changes** (user VCL updates): varnishadm hot-reload
 - **Backend/routing changes**: ghost HTTP reload (`/.varnish-ghost/reload`)
 
+### Ghost ↔ VCL Communication
+
+Ghost should use the Varnish C API directly whenever possible instead of setting internal
+request headers for VCL to interpret. Headers are a last resort for values that must cross
+VCL subroutine boundaries (e.g., `vcl_recv` → `vcl_backend_response`).
+
+**Use C API directly** (ghost has `ctx` access in `vcl_recv`):
+- `ctx.set_hash_ignore_busy()` — disable request coalescing
+- `ctx.set_pass()` — bypass cache (replaces `return(pass)` in VCL)
+
+**Use headers only for cross-subroutine bridging** (values set in `vcl_recv` that must
+reach `vcl_backend_response` via `bereq`):
+- `X-Ghost-Default-TTL` / `X-Ghost-Forced-TTL` — TTL control
+- `X-Ghost-Grace` / `X-Ghost-Keep` — stale serving parameters
+- `X-Ghost-Cache-Key-Extra` — additional hash data
+
+**Default cache behavior**: Without a VarnishCachePolicy, ghost sets `pass` and
+`hash_ignore_busy = true` on all routes — behaving as a plain reverse proxy with no
+caching, consistent with Gateway API expectations.
+
 ## Key Dependencies
 
 ```

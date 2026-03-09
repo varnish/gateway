@@ -28,6 +28,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&GatewayClassParameters{},
 		&GatewayClassParametersList{},
+		&VarnishCachePolicy{},
+		&VarnishCachePolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

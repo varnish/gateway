@@ -108,6 +108,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup VarnishCachePolicy controller
+	if err := (&controller.VarnishCachePolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: cfg,
+		Logger: logger.With("controller", "VarnishCachePolicy"),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create controller", "controller", "VarnishCachePolicy", "error", err)
+		os.Exit(1)
+	}
+
 	// Setup health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error("unable to setup health check", "error", err)

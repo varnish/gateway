@@ -6,6 +6,9 @@ server s1 {
     rxreq
     expect req.http.host == "api.example.com"
     txresp -status 200 -body "API response"
+    rxreq
+    expect req.http.host == "api.example.com"
+    txresp -status 200 -body "API response"
 } -start
 
 server s2 {

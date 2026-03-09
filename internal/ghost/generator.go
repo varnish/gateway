@@ -138,6 +138,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			RouteName:     firstRoute.RouteName,
 			Priority:      key.priority,
 			RuleIndex:     key.ruleIndex,
+			CachePolicy:   firstRoute.CachePolicy,
 		})
 	}
 

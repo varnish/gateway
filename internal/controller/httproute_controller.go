@@ -550,6 +550,9 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	// Generate routing.json for ghost with path-based routing
 	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace, portMap)
 
+	// Attach VarnishCachePolicy to each route
+	r.attachCachePolicies(ctx, collectedRoutes, filteredRoutes, gateway)
+
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)
 	for _, route := range collectedRoutes {
@@ -600,6 +603,34 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		"backends", len(collectedRoutes))
 
 	return nil
+}
+
+// attachCachePolicies resolves VarnishCachePolicies for each collected route.
+// It looks up VCPs targeting the route's parent HTTPRoute, specific rules within it,
+// and the parent Gateway. Most specific VCP wins (rule > route > gateway).
+func (r *HTTPRouteReconciler) attachCachePolicies(ctx context.Context, collectedRoutes []ghost.Route, httpRoutes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) {
+	// Build lookup: routeName (namespace/name) → HTTPRoute
+	routeMap := make(map[string]*gatewayv1.HTTPRoute)
+	for i := range httpRoutes {
+		rt := &httpRoutes[i]
+		ns := rt.Namespace
+		if ns == "" {
+			ns = gateway.Namespace
+		}
+		routeMap[ns+"/"+rt.Name] = rt
+	}
+
+	for i := range collectedRoutes {
+		cr := &collectedRoutes[i]
+		httpRoute := routeMap[cr.RouteName]
+		if httpRoute == nil {
+			continue
+		}
+		cp := ResolveCachePolicyForRoute(ctx, r.Client, httpRoute, gateway, cr.RuleName)
+		if cp != nil {
+			cr.CachePolicy = cp
+		}
+	}
 }
 
 // buildServicePortMap iterates all BackendRefs across routes, fetches each Service,

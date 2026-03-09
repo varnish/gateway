@@ -29,10 +29,16 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["referencegrants"]
     verbs: ["get", "list", "watch"]
-  # Our custom resource
+  # Our custom resources
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["gatewayclassparameters"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishcachepolicies"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishcachepolicies/status"]
+    verbs: ["get", "update", "patch"]
   # Namespaces (needed for NamespacesFromSelector route checking)
   - apiGroups: [""]
     resources: ["namespaces"]

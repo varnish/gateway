@@ -118,6 +118,46 @@ type RouteFilters struct {
 	RequestRedirect        *RequestRedirectFilter `json:"request_redirect,omitempty"`
 }
 
+// CachePolicy defines caching behavior for a route, derived from VarnishCachePolicy.
+// Routes without a CachePolicy operate in pass-through mode (no caching).
+type CachePolicy struct {
+	// DefaultTTLSeconds is used when the origin does NOT send Cache-Control.
+	// Mutually exclusive with ForcedTTLSeconds.
+	DefaultTTLSeconds *int `json:"default_ttl_seconds,omitempty"`
+
+	// ForcedTTLSeconds overrides origin Cache-Control entirely.
+	// Mutually exclusive with DefaultTTLSeconds.
+	ForcedTTLSeconds *int `json:"forced_ttl_seconds,omitempty"`
+
+	// GraceSeconds is how long to serve stale content while revalidating.
+	GraceSeconds int `json:"grace_seconds"`
+
+	// KeepSeconds is how long to keep stale objects when backends are sick.
+	KeepSeconds int `json:"keep_seconds"`
+
+	// RequestCoalescing enables collapsed forwarding.
+	RequestCoalescing bool `json:"request_coalescing"`
+
+	// CacheKey customizes the cache key composition.
+	CacheKey *CacheKeyConfig `json:"cache_key,omitempty"`
+
+	// BypassHeaders defines header conditions that trigger cache bypass.
+	BypassHeaders []BypassHeaderConfig `json:"bypass_headers,omitempty"`
+}
+
+// CacheKeyConfig controls cache key composition in ghost.json.
+type CacheKeyConfig struct {
+	Headers            []string `json:"headers,omitempty"`
+	QueryParamsInclude []string `json:"query_params_include,omitempty"`
+	QueryParamsExclude []string `json:"query_params_exclude,omitempty"`
+}
+
+// BypassHeaderConfig defines a header-based cache bypass rule.
+type BypassHeaderConfig struct {
+	Name       string `json:"name"`
+	ValueRegex string `json:"value_regex,omitempty"`
+}
+
 // Route represents a path-based routing rule.
 type Route struct {
 	Hostname    string            `json:"hostname,omitempty"` // Used when collecting from HTTPRoutes
@@ -130,10 +170,12 @@ type Route struct {
 	Namespace   string            `json:"namespace"`
 	Port        int               `json:"port"`
 	Weight      int               `json:"weight"`
-	Listeners   []string          `json:"listeners,omitempty"`   // Varnish socket names (e.g., ["http-80"])
-	RouteName   string            `json:"route_name,omitempty"`  // HTTPRoute namespace/name
+	Listeners   []string          `json:"listeners,omitempty"`    // Varnish socket names (e.g., ["http-80"])
+	RouteName   string            `json:"route_name,omitempty"`   // HTTPRoute namespace/name
+	RuleName    string            `json:"rule_name,omitempty"`    // HTTPRouteRule name for per-rule VCP targeting
 	Priority    int               `json:"priority"`
-	RuleIndex   int               `json:"rule_index"` // Original rule ordering for tiebreaking
+	RuleIndex   int               `json:"rule_index"`             // Original rule ordering for tiebreaking
+	CachePolicy *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
 }
 
 // VHostRouting represents routing configuration for a vhost with path-based rules.
@@ -157,10 +199,11 @@ type RouteBackends struct {
 	QueryParams   []QueryParamMatch `json:"query_params,omitempty"`
 	Filters       *RouteFilters     `json:"filters,omitempty"`
 	BackendGroups []BackendGroup    `json:"backend_groups"`
-	Listeners     []string          `json:"listeners,omitempty"`   // Varnish socket names (e.g., ["http-80"])
-	RouteName     string            `json:"route_name,omitempty"`  // HTTPRoute namespace/name
+	Listeners     []string          `json:"listeners,omitempty"`    // Varnish socket names (e.g., ["http-80"])
+	RouteName     string            `json:"route_name,omitempty"`   // HTTPRoute namespace/name
 	Priority      int               `json:"priority"`
 	RuleIndex     int               `json:"rule_index"`
+	CachePolicy   *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
 }
 
 // VHostConfig represents a virtual host with path-based routing in ghost.json.

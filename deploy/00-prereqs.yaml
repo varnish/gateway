@@ -138,3 +138,140 @@ spec:
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
+---
+# VarnishCachePolicy CRD for caching configuration
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: varnishcachepolicies.gateway.varnish-software.com
+spec:
+  group: gateway.varnish-software.com
+  names:
+    kind: VarnishCachePolicy
+    listKind: VarnishCachePolicyList
+    plural: varnishcachepolicies
+    singular: varnishcachepolicy
+    shortNames:
+      - vcp
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: VarnishCachePolicy configures caching behavior for routes through a Varnish Gateway.
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: Defines the desired caching behavior.
+              required:
+                - targetRef
+              properties:
+                targetRef:
+                  type: object
+                  description: Identifies the Gateway or HTTPRoute this policy applies to.
+                  required:
+                    - group
+                    - kind
+                    - name
+                  properties:
+                    group:
+                      type: string
+                      minLength: 1
+                    kind:
+                      type: string
+                      enum:
+                        - Gateway
+                        - HTTPRoute
+                    name:
+                      type: string
+                      minLength: 1
+                    sectionName:
+                      type: string
+                      minLength: 1
+                defaultTTL:
+                  type: string
+                forcedTTL:
+                  type: string
+                grace:
+                  type: string
+                keep:
+                  type: string
+                requestCoalescing:
+                  type: boolean
+                cacheKey:
+                  type: object
+                  properties:
+                    headers:
+                      type: array
+                      items:
+                        type: string
+                    queryParameters:
+                      type: object
+                      properties:
+                        include:
+                          type: array
+                          items:
+                            type: string
+                        exclude:
+                          type: array
+                          items:
+                            type: string
+                bypass:
+                  type: object
+                  properties:
+                    headers:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            minLength: 1
+                          valueRegex:
+                            type: string
+            status:
+              type: object
+              properties:
+                ancestors:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - ancestorRef
+                      - controllerName
+                    properties:
+                      ancestorRef:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                      controllerName:
+                        type: string
+                      conditions:
+                        type: array
+                        items:
+                          type: object
+                          x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Target Kind
+          type: string
+          jsonPath: .spec.targetRef.kind
+        - name: Target Name
+          type: string
+          jsonPath: .spec.targetRef.name
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
