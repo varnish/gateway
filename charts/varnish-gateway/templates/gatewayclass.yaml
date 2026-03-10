@@ -56,6 +56,24 @@ spec:
   varnishdExtraArgs:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+
+  {{- with .Values.gatewayClass.defaultParams.extraInitContainers }}
+  # Extra init containers (e.g., for downloading VMODs)
+  extraInitContainers:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.gatewayClass.defaultParams.extraVolumes }}
+  # Extra volumes
+  extraVolumes:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+
+  {{- with .Values.gatewayClass.defaultParams.extraVolumeMounts }}
+  # Extra volume mounts for the varnish container
+  extraVolumeMounts:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 {{- end }}
 ---
 # GatewayClass for Varnish Gateway

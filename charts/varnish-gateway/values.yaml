@@ -103,6 +103,25 @@ gatewayClass:
       - "-s"
       - "malloc,512m"
 
+    # Extra init containers for the gateway pods (e.g., downloading VMODs)
+    extraInitContainers: []
+    # - name: install-vmods
+    #   image: curlimages/curl:latest
+    #   command: ["curl", "-fsSL", "-o", "/dst/libvmod_example.so", "https://example.com/libvmod_example.so"]
+    #   volumeMounts:
+    #     - name: extra-vmods
+    #       mountPath: /dst
+
+    # Extra volumes for the gateway pods
+    extraVolumes: []
+    # - name: extra-vmods
+    #   emptyDir: {}
+
+    # Extra volume mounts for the varnish container
+    extraVolumeMounts: []
+    # - name: extra-vmods
+    #   mountPath: /extra-vmods
+
 # Chaperone (gateway data plane) configuration
 chaperone:
   # Chaperone container image (used by operator to create Gateway pods)
