@@ -253,7 +253,12 @@ VCL subroutine boundaries (e.g., `vcl_recv` → `vcl_backend_response`).
 
 **Use C API directly** (ghost has `ctx` access in `vcl_recv`):
 - `ctx.set_hash_ignore_busy()` — disable request coalescing
-- `ctx.set_pass()` — bypass cache (replaces `return(pass)` in VCL)
+
+**Use header + postamble for VCL flow control:**
+- `X-Ghost-Pass` header — signals pass mode; the postamble `vcl_recv` (appended after
+  user VCL) checks this header and calls `return(pass)`. This ensures user VCL runs
+  before the pass decision takes effect. Do NOT use `ctx.set_pass()` as it terminates
+  VCL execution immediately, preventing user VCL from running.
 
 **Use headers only for cross-subroutine bridging** (values set in `vcl_recv` that must
 reach `vcl_backend_response` via `bereq`):

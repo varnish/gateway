@@ -18,7 +18,7 @@ import (
 // gateway routing call.
 func Merge(generatedVCL, userVCL string) string {
 	if userVCL == "" {
-		return generatedVCL
+		return generatedVCL + postambleVCL
 	}
 
 	// Parse both VCLs
@@ -65,6 +65,9 @@ func Merge(generatedVCL, userVCL string) string {
 			sb.WriteString("\n")
 		}
 	}
+
+	// Postamble: runs after user VCL to handle deferred actions (e.g., return(pass))
+	sb.WriteString(postambleVCL)
 
 	return sb.String()
 }

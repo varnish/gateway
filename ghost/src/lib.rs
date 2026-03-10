@@ -335,8 +335,14 @@ mod ghost {
 
             // Apply cache directives via C API (not headers)
             let _ = ctx.set_hash_ignore_busy(result.hash_ignore_busy);
+
+            // Signal pass via header instead of ctx.set_pass() so that
+            // user VCL concatenated after the preamble vcl_recv still runs.
+            // The postamble vcl_recv checks this header and calls return(pass).
             if result.pass {
-                ctx.set_pass();
+                if let Some(req) = ctx.http_req.as_mut() {
+                    let _ = req.set_header("X-Ghost-Pass", "true");
+                }
             }
 
             // Set X-Gateway-Listener and X-Gateway-Route headers for user VCL

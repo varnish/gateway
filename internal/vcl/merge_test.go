@@ -15,8 +15,9 @@ sub vcl_init {
 `
 	result := Merge(generated, "")
 
-	if result != generated {
-		t.Errorf("expected generated VCL unchanged, got:\n%s", result)
+	expected := generated + postambleVCL
+	if result != expected {
+		t.Errorf("expected generated VCL with postamble, got:\n%s", result)
 	}
 }
 

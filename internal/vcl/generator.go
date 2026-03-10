@@ -13,6 +13,9 @@ import (
 //go:embed preamble.vcl
 var preambleVCL string
 
+//go:embed postamble.vcl
+var postambleVCL string
+
 // GeneratorConfig holds configuration for VCL generation.
 type GeneratorConfig struct {
 	GhostConfigPath string // Path to ghost.json (default: /var/run/varnish/ghost.json)

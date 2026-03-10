@@ -26,7 +26,9 @@ sub vcl_recv {
         }
     }
     # Route request using ghost (listener-aware).
-    # Ghost sets req.hash_ignore_busy and return(pass) directly via C API.
+    # Ghost sets req.hash_ignore_busy via C API and X-Ghost-Pass header for pass mode.
+    # The actual return(pass) is deferred to the postamble vcl_recv so that
+    # user VCL concatenated between preamble and postamble gets a chance to run.
     set req.backend_hint = router.recv();
 }
 
