@@ -49,6 +49,10 @@ rules:
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["varnishcachepolicies/status"]
     verbs: ["get", "update", "patch"]
+  # Garbage collect completed CacheInvalidation resources
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["cacheinvalidations"]
+    verbs: ["get", "list", "watch", "delete"]
   # Namespaces (needed for NamespacesFromSelector route checking)
   - apiGroups: [""]
     resources: ["namespaces"]

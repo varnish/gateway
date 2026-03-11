@@ -119,6 +119,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup CacheInvalidation GC (runs only on leader)
+	if err := mgr.Add(&controller.CacheInvalidationGC{
+		Client: mgr.GetClient(),
+		Logger: logger.With("controller", "CacheInvalidationGC"),
+	}); err != nil {
+		logger.Error("unable to add CacheInvalidation GC runnable", "error", err)
+		os.Exit(1)
+	}
+
 	// Setup health checks
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		logger.Error("unable to setup health check", "error", err)

@@ -1,0 +1,137 @@
+# CacheInvalidation CRD for cache purge/ban operations
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: cacheinvalidations.gateway.varnish-software.com
+  labels:
+    app.kubernetes.io/name: varnish-gateway
+    app.kubernetes.io/component: crds
+spec:
+  group: gateway.varnish-software.com
+  names:
+    kind: CacheInvalidation
+    listKind: CacheInvalidationList
+    plural: cacheinvalidations
+    singular: cacheinvalidation
+    shortNames:
+      - cinv
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            CacheInvalidation is a one-shot resource that triggers cache purge or ban
+            on a Varnish Gateway. Each chaperone pod serving the target gateway processes
+            the invalidation independently and reports its result.
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              description: Defines the desired cache invalidation.
+              required:
+                - gatewayRef
+                - type
+                - hostname
+                - path
+              properties:
+                gatewayRef:
+                  type: object
+                  description: Identifies which Gateway's cache to invalidate.
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the Gateway.
+                    namespace:
+                      type: string
+                      description: >-
+                        Namespace of the Gateway.
+                        Defaults to the CacheInvalidation's namespace if not specified.
+                type:
+                  type: string
+                  description: >-
+                    Invalidation method: Purge (exact URL) or Ban (URL pattern).
+                  enum:
+                    - Purge
+                    - Ban
+                hostname:
+                  type: string
+                  description: Host header value for the invalidation request.
+                path:
+                  type: string
+                  description: >-
+                    URL path for the invalidation.
+                    For Purge: exact path of the cached object (e.g., "/api/users/123").
+                    For Ban: regex pattern matching cached URLs (e.g., "/api/.*").
+                ttl:
+                  type: string
+                  description: >-
+                    How long to keep this resource after all pods have completed.
+                    The resource is eligible for garbage collection after this duration.
+                    Default: 1h
+            status:
+              type: object
+              description: Observed state of the CacheInvalidation.
+              properties:
+                phase:
+                  type: string
+                  description: Aggregate state across all pods.
+                  enum:
+                    - Pending
+                    - InProgress
+                    - Complete
+                    - Failed
+                completedAt:
+                  type: string
+                  format: date-time
+                  description: When the last pod reported, completing the invalidation.
+                podResults:
+                  type: array
+                  description: Per-pod outcomes.
+                  items:
+                    type: object
+                    required:
+                      - podName
+                      - success
+                      - completedAt
+                    properties:
+                      podName:
+                        type: string
+                        description: Name of the chaperone pod that processed this invalidation.
+                      success:
+                        type: boolean
+                        description: Whether the invalidation succeeded on this pod.
+                      message:
+                        type: string
+                        description: Details about the result (error message on failure).
+                      completedAt:
+                        type: string
+                        format: date-time
+                        description: When this pod completed processing.
+      additionalPrinterColumns:
+        - name: Type
+          type: string
+          jsonPath: .spec.type
+        - name: Hostname
+          type: string
+          jsonPath: .spec.hostname
+        - name: Status
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

@@ -17,11 +17,13 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/ghost"
+	"github.com/varnish/gateway/internal/invalidation"
 	vtls "github.com/varnish/gateway/internal/tls"
 	"github.com/varnish/gateway/internal/varnishadm"
 	"github.com/varnish/gateway/internal/vcl"
 	"github.com/varnish/gateway/internal/vrun"
 	"golang.org/x/sync/errgroup"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -63,6 +65,10 @@ type Config struct {
 
 	// Dashboard (optional, empty = disabled)
 	DashboardAddr string // address for dashboard UI
+
+	// Cache invalidation
+	GatewayName string // name of the gateway (empty = skip invalidation watcher)
+	PodName     string // this pod's name (from downward API)
 }
 
 func loadConfig() (*Config, error) {
@@ -87,6 +93,8 @@ func loadConfig() (*Config, error) {
 		TLSListen:         parseList(os.Getenv("VARNISH_TLS_LISTEN")), // empty by default
 		HealthAddr:        getEnvOrDefault("HEALTH_ADDR", ":8080"),
 		DashboardAddr:     os.Getenv("DASHBOARD_ADDR"), // empty = disabled
+		GatewayName:       os.Getenv("GATEWAY_NAME"),
+		PodName:           os.Getenv("POD_NAME"),
 	}
 
 	return cfg, nil
@@ -179,6 +187,11 @@ func run() error {
 		return fmt.Errorf("kubernetes.NewForConfig: %w", err)
 	}
 
+	dynClient, err := dynamic.NewForConfig(k8sConfig)
+	if err != nil {
+		return fmt.Errorf("dynamic.NewForConfig: %w", err)
+	}
+
 	// Dashboard event bus (always created, used for state tracking even without UI)
 	dashBus := dashboard.NewEventBus(256)
 	dashState := dashboard.NewStateTracker(dashBus, strings.TrimSpace(version))
@@ -253,6 +266,20 @@ func run() error {
 	if cfg.TLSCertDir != "" {
 		tlsReloader = vtls.New(vadm, cfg.TLSCertDir, logger.With("component", "tls"))
 		tlsReloader.SetDashboard(dashBus)
+	}
+
+	// 5. Cache invalidation watcher (if gateway name is configured)
+	var invWatcher *invalidation.Watcher
+	if cfg.GatewayName != "" && cfg.PodName != "" {
+		invWatcher = invalidation.NewWatcher(
+			dynClient,
+			k8sClient,
+			cfg.VarnishHTTPAddr,
+			cfg.GatewayName,
+			cfg.Namespace,
+			cfg.PodName,
+			logger.With("component", "invalidation"),
+		)
 	}
 
 	// Build varnishd arguments
@@ -347,6 +374,16 @@ func run() error {
 			case <-gctx.Done():
 				return nil
 			}
+		})
+	}
+
+	// Start invalidation watcher (if configured)
+	if invWatcher != nil {
+		g.Go(func() error {
+			if err := invWatcher.Run(gctx, readyCh); err != nil && !errors.Is(err, context.Canceled) {
+				return fmt.Errorf("invWatcher.Run: %w", err)
+			}
+			return nil
 		})
 	}
 

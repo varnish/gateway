@@ -25,6 +25,31 @@ sub vcl_recv {
             return (synth(500, "Reload failed"));
         }
     }
+
+    # Cache invalidation: PURGE removes a single cached object by exact URL.
+    # Chaperone sends: PURGE /path HTTP/1.1 \n Host: example.com
+    if (req.method == "PURGE") {
+        if (!client.ip ~ localhost) {
+            return (synth(405, "Not allowed."));
+        }
+        return (purge);
+    }
+
+    # Cache invalidation: BAN invalidates objects matching a URL regex.
+    # Chaperone sends: BAN /pattern.* HTTP/1.1 \n Host: example.com
+    # Uses ban lurker friendly expressions (obj.http.*) for background cleanup.
+    if (req.method == "BAN") {
+        if (!client.ip ~ localhost) {
+            return (synth(403, "Not allowed."));
+        }
+        if (std.ban("obj.http.x-cache-host == " + req.http.host +
+                     " && obj.http.x-cache-url ~ " + req.url)) {
+            return (synth(200, "Ban added"));
+        } else {
+            return (synth(400, std.ban_error()));
+        }
+    }
+
     # Route request using ghost (listener-aware).
     # Ghost sets req.hash_ignore_busy via C API and X-Ghost-Pass header for pass mode.
     # The actual return(pass) is deferred to the postamble vcl_recv so that
@@ -58,6 +83,11 @@ sub vcl_backend_fetch {
 }
 
 sub vcl_backend_response {
+    # Store host and URL on cached object for ban lurker.
+    # The ban expression matches against these headers for efficient background invalidation.
+    set beresp.http.x-cache-host = bereq.http.host;
+    set beresp.http.x-cache-url = bereq.url;
+
     # Copy filter context from req to beresp for vcl_deliver
     if (bereq.http.X-Ghost-Filter-Context) {
         set beresp.http.X-Ghost-Filter-Context = bereq.http.X-Ghost-Filter-Context;
@@ -91,6 +121,9 @@ sub vcl_backend_response {
 
 sub vcl_deliver {
     ghost.deliver();
+    # Strip ban lurker headers from client responses
+    unset resp.http.x-cache-host;
+    unset resp.http.x-cache-url;
 }
 
 # --- User VCL concatenated below ---

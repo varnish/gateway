@@ -7,6 +7,143 @@ import (
 )
 
 // DeepCopyInto copies the receiver into out.
+func (in *GatewayReference) DeepCopyInto(out *GatewayReference) {
+	*out = *in
+}
+
+// DeepCopy creates a deep copy of GatewayReference.
+func (in *GatewayReference) DeepCopy() *GatewayReference {
+	if in == nil {
+		return nil
+	}
+	out := new(GatewayReference)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *CacheInvalidationSpec) DeepCopyInto(out *CacheInvalidationSpec) {
+	*out = *in
+	out.GatewayRef = in.GatewayRef
+	if in.TTL != nil {
+		in, out := &in.TTL, &out.TTL
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+}
+
+// DeepCopy creates a deep copy of CacheInvalidationSpec.
+func (in *CacheInvalidationSpec) DeepCopy() *CacheInvalidationSpec {
+	if in == nil {
+		return nil
+	}
+	out := new(CacheInvalidationSpec)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *PodResult) DeepCopyInto(out *PodResult) {
+	*out = *in
+	in.CompletedAt.DeepCopyInto(&out.CompletedAt)
+}
+
+// DeepCopy creates a deep copy of PodResult.
+func (in *PodResult) DeepCopy() *PodResult {
+	if in == nil {
+		return nil
+	}
+	out := new(PodResult)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *CacheInvalidationStatus) DeepCopyInto(out *CacheInvalidationStatus) {
+	*out = *in
+	if in.CompletedAt != nil {
+		in, out := &in.CompletedAt, &out.CompletedAt
+		*out = (*in).DeepCopy()
+	}
+	if in.PodResults != nil {
+		in, out := &in.PodResults, &out.PodResults
+		*out = make([]PodResult, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy creates a deep copy of CacheInvalidationStatus.
+func (in *CacheInvalidationStatus) DeepCopy() *CacheInvalidationStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(CacheInvalidationStatus)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *CacheInvalidation) DeepCopyInto(out *CacheInvalidation) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+	in.Spec.DeepCopyInto(&out.Spec)
+	in.Status.DeepCopyInto(&out.Status)
+}
+
+// DeepCopy creates a deep copy of CacheInvalidation.
+func (in *CacheInvalidation) DeepCopy() *CacheInvalidation {
+	if in == nil {
+		return nil
+	}
+	out := new(CacheInvalidation)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject implements runtime.Object.
+func (in *CacheInvalidation) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *CacheInvalidationList) DeepCopyInto(out *CacheInvalidationList) {
+	*out = *in
+	out.TypeMeta = in.TypeMeta
+	in.ListMeta.DeepCopyInto(&out.ListMeta)
+	if in.Items != nil {
+		in, out := &in.Items, &out.Items
+		*out = make([]CacheInvalidation, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy creates a deep copy of CacheInvalidationList.
+func (in *CacheInvalidationList) DeepCopy() *CacheInvalidationList {
+	if in == nil {
+		return nil
+	}
+	out := new(CacheInvalidationList)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyObject implements runtime.Object.
+func (in *CacheInvalidationList) DeepCopyObject() runtime.Object {
+	if c := in.DeepCopy(); c != nil {
+		return c
+	}
+	return nil
+}
+
+// DeepCopyInto copies the receiver into out.
 func (in *ConfigMapReference) DeepCopyInto(out *ConfigMapReference) {
 	*out = *in
 }

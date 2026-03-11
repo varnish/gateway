@@ -32,6 +32,17 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
+  # Cache invalidation: watch and process CacheInvalidation resources
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["cacheinvalidations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["cacheinvalidations/status"]
+    verbs: ["get", "update", "patch"]
+  # List pods to determine expected pod count for invalidation phase calculation
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
 ---
 # ClusterRoleBinding for varnish-gateway-system namespace
 # This grants all chaperone pods in the namespace access to cluster-wide EndpointSlices

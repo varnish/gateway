@@ -373,6 +373,15 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 		{Name: "VARNISH_DIR", Value: "/var/run/varnish/vsm"}, // VSM subdirectory on shared volume
 		{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
 		{Name: "DASHBOARD_ADDR", Value: fmt.Sprintf(":%d", chaperoneDashboardPort)},
+		{Name: "GATEWAY_NAME", Value: gateway.Name},
+		{
+			Name: "POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.name",
+				},
+			},
+		},
 	}
 
 	// Add varnishd extra args if specified (semicolon-separated)

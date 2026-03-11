@@ -245,6 +245,44 @@ HTTPRoute reconcile
 - **VCL changes** (user VCL updates): varnishadm hot-reload
 - **Backend/routing changes**: ghost HTTP reload (`/.varnish-ghost/reload`)
 
+### Cache Invalidation
+
+CacheInvalidation is a one-shot CRD for purging/banning cached objects across all gateway pods.
+
+**Data Flow:**
+
+1. User creates a CacheInvalidation CR with type (Purge/Ban), hostname, path, and gatewayRef
+2. Each chaperone pod watches CacheInvalidation resources via dynamic client
+3. Chaperone sends HTTP request to local Varnish: PURGE or BAN method
+4. VCL preamble handles the method: `return(purge)` for PURGE, `std.ban()` for BAN
+5. Chaperone writes per-pod result to `status.podResults`
+6. Phase transitions: Pending → InProgress → Complete (all pods succeed) or Failed
+7. Operator GC deletes completed CRs after TTL (default 1h)
+
+**PURGE vs BAN:**
+
+- **PURGE**: Exact URL removal. Chaperone sends `PURGE /path` with `Host: hostname`. Varnish looks up and removes the single cached object.
+- **BAN**: Regex pattern invalidation. Chaperone sends `BAN /pattern` with `Host: hostname`. Uses ban lurker-friendly expressions (`obj.http.x-cache-host`, `obj.http.x-cache-url`) for efficient background cleanup.
+
+**Ban Lurker Headers:**
+
+The VCL preamble stores `x-cache-host` and `x-cache-url` on cached objects in `vcl_backend_response` and strips them in `vcl_deliver`. These enable efficient ban lurker matching.
+
+**Example:**
+
+```yaml
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: CacheInvalidation
+metadata:
+  name: purge-user-123
+spec:
+  gatewayRef:
+    name: my-gateway
+  type: Purge
+  hostname: api.example.com
+  path: /api/users/123
+```
+
 ### Ghost ↔ VCL Communication
 
 Ghost should use the Varnish C API directly whenever possible instead of setting internal
