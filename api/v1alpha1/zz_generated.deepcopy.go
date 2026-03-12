@@ -25,6 +25,11 @@ func (in *GatewayReference) DeepCopy() *GatewayReference {
 func (in *VarnishCacheInvalidationSpec) DeepCopyInto(out *VarnishCacheInvalidationSpec) {
 	*out = *in
 	out.GatewayRef = in.GatewayRef
+	if in.Paths != nil {
+		in, out := &in.Paths, &out.Paths
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.TTL != nil {
 		in, out := &in.TTL, &out.TTL
 		*out = new(metav1.Duration)
@@ -43,8 +48,28 @@ func (in *VarnishCacheInvalidationSpec) DeepCopy() *VarnishCacheInvalidationSpec
 }
 
 // DeepCopyInto copies the receiver into out.
+func (in *PathResult) DeepCopyInto(out *PathResult) {
+	*out = *in
+}
+
+// DeepCopy creates a deep copy of PathResult.
+func (in *PathResult) DeepCopy() *PathResult {
+	if in == nil {
+		return nil
+	}
+	out := new(PathResult)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
 func (in *PodResult) DeepCopyInto(out *PodResult) {
 	*out = *in
+	if in.PathResults != nil {
+		in, out := &in.PathResults, &out.PathResults
+		*out = make([]PathResult, len(*in))
+		copy(*out, *in)
+	}
 	in.CompletedAt.DeepCopyInto(&out.CompletedAt)
 }
 

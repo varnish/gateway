@@ -323,7 +323,7 @@ spec:
                 - gatewayRef
                 - type
                 - hostname
-                - path
+                - paths
               properties:
                 gatewayRef:
                   type: object
@@ -349,12 +349,15 @@ spec:
                 hostname:
                   type: string
                   description: Host header value for the invalidation request.
-                path:
-                  type: string
+                paths:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
                   description: >-
-                    URL path for the invalidation.
-                    For Purge: exact path of the cached object (e.g., "/api/users/123").
-                    For Ban: regex pattern matching cached URLs (e.g., "/api/.*").
+                    URL paths for the invalidation.
+                    For Purge: exact paths of cached objects (e.g., "/api/users/123").
+                    For Ban: regex patterns matching cached URLs (e.g., "/api/.*").
                 ttl:
                   type: string
                   description: >-
@@ -392,10 +395,28 @@ spec:
                         description: Name of the chaperone pod that processed this invalidation.
                       success:
                         type: boolean
-                        description: Whether the invalidation succeeded on this pod.
+                        description: Whether the invalidation succeeded on this pod (all paths).
                       message:
                         type: string
-                        description: Details about the result (error message on failure).
+                        description: Summary of the result.
+                      pathResults:
+                        type: array
+                        description: Per-path outcomes.
+                        items:
+                          type: object
+                          required:
+                            - path
+                            - success
+                          properties:
+                            path:
+                              type: string
+                              description: The URL path that was invalidated.
+                            success:
+                              type: boolean
+                              description: Whether the invalidation succeeded for this path.
+                            message:
+                              type: string
+                              description: Details about the result (error message on failure).
                       completedAt:
                         type: string
                         format: date-time

@@ -221,7 +221,7 @@ func TestHandleInvalidation_GatewayRefFiltering(t *testing.T) {
 	w := newTestWatcher(addr, "my-gw", "default", "pod-0")
 
 	// VarnishCacheInvalidation targeting a different gateway
-	obj := makeVarnishCacheInvalidation("inv-1", "default", "uid-wrong-gw", "purge", "example.com", "/foo", "other-gateway", "default")
+	obj := makeVarnishCacheInvalidation("inv-1", "default", "uid-wrong-gw", "purge", "example.com", []string{"/foo"}, "other-gateway", "default")
 
 	w.handleInvalidation(context.Background(), obj)
 
@@ -263,7 +263,7 @@ func TestHandleInvalidation_GatewayRefNamespaceDefault(t *testing.T) {
 			"spec": map[string]any{
 				"type":     "purge",
 				"hostname": "example.com",
-				"path":     "/bar",
+				"paths":    []any{"/bar"},
 				"gatewayRef": map[string]any{
 					"name": "my-gw",
 					// namespace omitted - should default to "test-ns"
@@ -295,7 +295,7 @@ func TestHandleInvalidation_AlreadyProcessed(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
 
-	obj := makeVarnishCacheInvalidation("inv-dup", "default", "uid-123", "purge", "example.com", "/dup", "my-gw", "default")
+	obj := makeVarnishCacheInvalidation("inv-dup", "default", "uid-123", "purge", "example.com", []string{"/dup"}, "my-gw", "default")
 
 	// First call - should send HTTP request
 	w.handleInvalidation(context.Background(), obj)
@@ -563,7 +563,7 @@ func TestHandleInvalidation_DispatchesPurge(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
 
-	obj := makeVarnishCacheInvalidation("inv-purge", "default", "uid-purge", "purge", "example.com", "/foo", "my-gw", "default")
+	obj := makeVarnishCacheInvalidation("inv-purge", "default", "uid-purge", "purge", "example.com", []string{"/foo"}, "my-gw", "default")
 	w.handleInvalidation(context.Background(), obj)
 
 	if gotMethod != "PURGE" {
@@ -582,7 +582,7 @@ func TestHandleInvalidation_DispatchesBan(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
 
-	obj := makeVarnishCacheInvalidation("inv-ban", "default", "uid-ban", "ban", "example.com", "/pattern/.*", "my-gw", "default")
+	obj := makeVarnishCacheInvalidation("inv-ban", "default", "uid-ban", "ban", "example.com", []string{"/pattern/.*"}, "my-gw", "default")
 	w.handleInvalidation(context.Background(), obj)
 
 	if gotMethod != "BAN" {
@@ -590,8 +590,70 @@ func TestHandleInvalidation_DispatchesBan(t *testing.T) {
 	}
 }
 
+func TestHandleInvalidation_MultiplePaths(t *testing.T) {
+	var mu sync.Mutex
+	var gotPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotPaths = append(gotPaths, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+
+	obj := makeVarnishCacheInvalidation("inv-multi", "default", "uid-multi", "purge", "example.com",
+		[]string{"/page/1", "/page/2", "/page/3"}, "my-gw", "default")
+	w.handleInvalidation(context.Background(), obj)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(gotPaths) != 3 {
+		t.Fatalf("expected 3 requests, got %d", len(gotPaths))
+	}
+	want := []string{"/page/1", "/page/2", "/page/3"}
+	for i, p := range gotPaths {
+		if p != want[i] {
+			t.Errorf("path[%d] = %q, want %q", i, p, want[i])
+		}
+	}
+}
+
+func TestHandleInvalidation_MultiplePathsPartialFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+
+	obj := makeVarnishCacheInvalidation("inv-partial", "default", "uid-partial", "purge", "example.com",
+		[]string{"/ok", "/fail", "/also-ok"}, "my-gw", "default")
+	w.handleInvalidation(context.Background(), obj)
+
+	// Verify it was marked as processed (meaning it ran to completion)
+	w.mu.Lock()
+	_, processed := w.processed["uid-partial"]
+	w.mu.Unlock()
+	if !processed {
+		t.Error("expected invalidation to be marked as processed")
+	}
+}
+
 // makeVarnishCacheInvalidation is a helper to build an unstructured VarnishCacheInvalidation object.
-func makeVarnishCacheInvalidation(name, ns, uid, invType, hostname, path, gwName, gwNS string) *unstructured.Unstructured {
+func makeVarnishCacheInvalidation(name, ns, uid, invType, hostname string, paths []string, gwName, gwNS string) *unstructured.Unstructured {
+	// Convert []string to []any for unstructured
+	pathsAny := make([]any, len(paths))
+	for i, p := range paths {
+		pathsAny[i] = p
+	}
 	return &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.varnish-software.com/v1alpha1",
@@ -604,7 +666,7 @@ func makeVarnishCacheInvalidation(name, ns, uid, invType, hostname, path, gwName
 			"spec": map[string]any{
 				"type":     invType,
 				"hostname": hostname,
-				"path":     path,
+				"paths":    pathsAny,
 				"gatewayRef": map[string]any{
 					"name":      gwName,
 					"namespace": gwNS,

@@ -52,10 +52,11 @@ type VarnishCacheInvalidationSpec struct {
 	// Hostname is the Host header value for the invalidation request.
 	Hostname string `json:"hostname"`
 
-	// Path is the URL path for the invalidation.
-	// For Purge: exact path of the cached object (e.g., "/api/users/123").
-	// For Ban: regex pattern matching cached URLs (e.g., "/api/.*").
-	Path string `json:"path"`
+	// Paths is the list of URL paths for the invalidation.
+	// For Purge: exact paths of cached objects (e.g., "/api/users/123").
+	// For Ban: regex patterns matching cached URLs (e.g., "/api/.*").
+	// +kubebuilder:validation:MinItems=1
+	Paths []string `json:"paths"`
 
 	// TTL is how long to keep this resource after all pods have completed.
 	// The resource is eligible for garbage collection after this duration.
@@ -92,17 +93,34 @@ const (
 	VarnishCacheInvalidationFailed VarnishCacheInvalidationPhase = "Failed"
 )
 
-// PodResult records the outcome of an invalidation on a single pod.
-type PodResult struct {
-	// PodName is the name of the chaperone pod that processed this invalidation.
-	PodName string `json:"podName"`
+// PathResult records the outcome of an invalidation for a single path.
+type PathResult struct {
+	// Path is the URL path that was invalidated.
+	Path string `json:"path"`
 
-	// Success indicates whether the invalidation succeeded on this pod.
+	// Success indicates whether the invalidation succeeded for this path.
 	Success bool `json:"success"`
 
 	// Message provides details about the result (error message on failure).
 	// +optional
 	Message string `json:"message,omitempty"`
+}
+
+// PodResult records the outcome of an invalidation on a single pod.
+type PodResult struct {
+	// PodName is the name of the chaperone pod that processed this invalidation.
+	PodName string `json:"podName"`
+
+	// Success indicates whether the invalidation succeeded on this pod (all paths).
+	Success bool `json:"success"`
+
+	// Message provides a summary of the result.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// PathResults contains per-path outcomes.
+	// +optional
+	PathResults []PathResult `json:"pathResults,omitempty"`
 
 	// CompletedAt is when this pod completed processing.
 	CompletedAt metav1.Time `json:"completedAt"`

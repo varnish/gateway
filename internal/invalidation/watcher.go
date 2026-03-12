@@ -194,41 +194,57 @@ func (w *Watcher) handleInvalidation(ctx context.Context, obj *unstructured.Unst
 	// Extract spec fields
 	invType, _, _ := unstructured.NestedString(obj.Object, "spec", "type")
 	hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
-	path, _, _ := unstructured.NestedString(obj.Object, "spec", "path")
+	paths, _, _ := unstructured.NestedStringSlice(obj.Object, "spec", "paths")
 
 	w.logger.Info("processing cache invalidation",
 		"name", name,
 		"namespace", ns,
 		"type", invType,
 		"hostname", hostname,
-		"path", path,
+		"paths", paths,
 	)
 
-	// Execute the invalidation
-	var execErr error
-	switch strings.ToLower(invType) {
-	case "purge":
-		execErr = w.executePurge(ctx, hostname, path)
-	case "ban":
-		execErr = w.executeBan(ctx, hostname, path)
-	default:
-		execErr = fmt.Errorf("unknown invalidation type: %s", invType)
+	// Execute the invalidation for each path
+	var pathResults []any
+	failures := 0
+	for _, path := range paths {
+		var execErr error
+		switch strings.ToLower(invType) {
+		case "purge":
+			execErr = w.executePurge(ctx, hostname, path)
+		case "ban":
+			execErr = w.executeBan(ctx, hostname, path)
+		default:
+			execErr = fmt.Errorf("unknown invalidation type: %s", invType)
+		}
+
+		pr := map[string]any{
+			"path":    path,
+			"success": execErr == nil,
+		}
+		if execErr != nil {
+			pr["message"] = execErr.Error()
+			failures++
+			w.logger.Error("cache invalidation failed",
+				"name", name,
+				"namespace", ns,
+				"path", path,
+				"error", execErr,
+			)
+		} else {
+			pr["message"] = fmt.Sprintf("%s applied successfully", invType)
+		}
+		pathResults = append(pathResults, pr)
 	}
 
-	// Build this pod's result
-	success := execErr == nil
-	message := fmt.Sprintf("%s applied successfully", invType)
-	if execErr != nil {
-		message = execErr.Error()
-		w.logger.Error("cache invalidation failed",
-			"name", name,
-			"namespace", ns,
-			"error", execErr,
-		)
-	} else {
+	// Build aggregate result
+	success := failures == 0
+	message := fmt.Sprintf("%d/%d paths succeeded", len(paths)-failures, len(paths))
+	if success {
 		w.logger.Info("cache invalidation executed",
 			"name", name,
 			"namespace", ns,
+			"paths", len(paths),
 		)
 	}
 
@@ -238,7 +254,7 @@ func (w *Watcher) handleInvalidation(ctx context.Context, obj *unstructured.Unst
 	w.mu.Unlock()
 
 	// Write per-pod result and compute aggregate phase
-	w.updateStatus(ctx, ns, name, success, message)
+	w.updateStatus(ctx, ns, name, success, message, pathResults)
 }
 
 // podAlreadyReported checks if this pod already has a result in status.podResults.
@@ -314,7 +330,7 @@ func (w *Watcher) executeBan(ctx context.Context, hostname, path string) error {
 // updateStatus appends this pod's result to status.podResults and computes the
 // aggregate phase. Uses optimistic concurrency (resourceVersion) to handle
 // concurrent updates from multiple pods.
-func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, success bool, message string) {
+func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, success bool, message string, pathResults []any) {
 	if w.dynClient == nil {
 		w.logger.Warn("no dynamic client, skipping status update", "name", name)
 		return
@@ -336,6 +352,7 @@ func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, succ
 			"success":     success,
 			"message":     message,
 			"completedAt": now,
+			"pathResults": pathResults,
 		}
 
 		// Get existing podResults, append ours
