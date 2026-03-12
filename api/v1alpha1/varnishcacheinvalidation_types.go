@@ -4,7 +4,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// CacheInvalidation is a one-shot resource that triggers cache purge or ban
+// VarnishCacheInvalidation is a one-shot resource that triggers cache purge or ban
 // on a Varnish Gateway. Each chaperone pod serving the target gateway processes
 // the invalidation independently and reports its result. The phase transitions
 // to Complete only when all pods have reported success.
@@ -19,35 +19,35 @@ import (
 // +kubebuilder:printcolumn:name="Hostname",type=string,JSONPath=`.spec.hostname`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
-type CacheInvalidation struct {
+type VarnishCacheInvalidation struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CacheInvalidationSpec   `json:"spec"`
-	Status CacheInvalidationStatus `json:"status,omitempty"`
+	Spec   VarnishCacheInvalidationSpec   `json:"spec"`
+	Status VarnishCacheInvalidationStatus `json:"status,omitempty"`
 }
 
-// CacheInvalidationType defines the type of cache invalidation.
+// VarnishCacheInvalidationType defines the type of cache invalidation.
 // +kubebuilder:validation:Enum=Purge;Ban
-type CacheInvalidationType string
+type VarnishCacheInvalidationType string
 
 const (
-	// CacheInvalidationPurge removes a single cached object by exact URL.
+	// VarnishCacheInvalidationPurge removes a single cached object by exact URL.
 	// Varnish looks up the object by Host + URL and removes it from cache.
-	CacheInvalidationPurge CacheInvalidationType = "Purge"
+	VarnishCacheInvalidationPurge VarnishCacheInvalidationType = "Purge"
 
-	// CacheInvalidationBan invalidates objects matching a URL regex pattern.
+	// VarnishCacheInvalidationBan invalidates objects matching a URL regex pattern.
 	// Uses Varnish's ban lurker for efficient background invalidation.
-	CacheInvalidationBan CacheInvalidationType = "Ban"
+	VarnishCacheInvalidationBan VarnishCacheInvalidationType = "Ban"
 )
 
-// CacheInvalidationSpec defines the desired cache invalidation.
-type CacheInvalidationSpec struct {
+// VarnishCacheInvalidationSpec defines the desired cache invalidation.
+type VarnishCacheInvalidationSpec struct {
 	// GatewayRef identifies which Gateway's cache to invalidate.
 	GatewayRef GatewayReference `json:"gatewayRef"`
 
 	// Type is the invalidation method: Purge (exact URL) or Ban (URL pattern).
-	Type CacheInvalidationType `json:"type"`
+	Type VarnishCacheInvalidationType `json:"type"`
 
 	// Hostname is the Host header value for the invalidation request.
 	Hostname string `json:"hostname"`
@@ -70,26 +70,26 @@ type GatewayReference struct {
 	Name string `json:"name"`
 
 	// Namespace is the namespace of the Gateway.
-	// Defaults to the CacheInvalidation's namespace if not specified.
+	// Defaults to the VarnishCacheInvalidation's namespace if not specified.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
 
-// CacheInvalidationPhase describes the current state of the invalidation.
-type CacheInvalidationPhase string
+// VarnishCacheInvalidationPhase describes the current state of the invalidation.
+type VarnishCacheInvalidationPhase string
 
 const (
-	// CacheInvalidationPending means no pod has processed the invalidation yet.
-	CacheInvalidationPending CacheInvalidationPhase = "Pending"
+	// VarnishCacheInvalidationPending means no pod has processed the invalidation yet.
+	VarnishCacheInvalidationPending VarnishCacheInvalidationPhase = "Pending"
 
-	// CacheInvalidationInProgress means at least one pod has processed it, but not all.
-	CacheInvalidationInProgress CacheInvalidationPhase = "InProgress"
+	// VarnishCacheInvalidationInProgress means at least one pod has processed it, but not all.
+	VarnishCacheInvalidationInProgress VarnishCacheInvalidationPhase = "InProgress"
 
-	// CacheInvalidationComplete means all pods have successfully processed the invalidation.
-	CacheInvalidationComplete CacheInvalidationPhase = "Complete"
+	// VarnishCacheInvalidationComplete means all pods have successfully processed the invalidation.
+	VarnishCacheInvalidationComplete VarnishCacheInvalidationPhase = "Complete"
 
-	// CacheInvalidationFailed means one or more pods failed to process the invalidation.
-	CacheInvalidationFailed CacheInvalidationPhase = "Failed"
+	// VarnishCacheInvalidationFailed means one or more pods failed to process the invalidation.
+	VarnishCacheInvalidationFailed VarnishCacheInvalidationPhase = "Failed"
 )
 
 // PodResult records the outcome of an invalidation on a single pod.
@@ -108,11 +108,11 @@ type PodResult struct {
 	CompletedAt metav1.Time `json:"completedAt"`
 }
 
-// CacheInvalidationStatus defines the observed state of a CacheInvalidation.
-type CacheInvalidationStatus struct {
+// VarnishCacheInvalidationStatus defines the observed state of a VarnishCacheInvalidation.
+type VarnishCacheInvalidationStatus struct {
 	// Phase is the aggregate state across all pods.
 	// +optional
-	Phase CacheInvalidationPhase `json:"phase,omitempty"`
+	Phase VarnishCacheInvalidationPhase `json:"phase,omitempty"`
 
 	// CompletedAt is when the last pod reported, completing the invalidation.
 	// +optional
@@ -123,11 +123,11 @@ type CacheInvalidationStatus struct {
 	PodResults []PodResult `json:"podResults,omitempty"`
 }
 
-// CacheInvalidationList contains a list of CacheInvalidation.
+// VarnishCacheInvalidationList contains a list of VarnishCacheInvalidation.
 //
 // +kubebuilder:object:root=true
-type CacheInvalidationList struct {
+type VarnishCacheInvalidationList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []CacheInvalidation `json:"items"`
+	Items           []VarnishCacheInvalidation `json:"items"`
 }

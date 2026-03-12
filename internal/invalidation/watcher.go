@@ -1,7 +1,7 @@
-// Package invalidation watches CacheInvalidation custom resources and executes
+// Package invalidation watches VarnishCacheInvalidation custom resources and executes
 // purge/ban operations against the local Varnish instance via HTTP.
 //
-// Each chaperone pod independently watches for CacheInvalidation resources,
+// Each chaperone pod independently watches for VarnishCacheInvalidation resources,
 // executes the invalidation against its local Varnish, and writes its result
 // to status.podResults[]. The phase transitions to Complete when all gateway
 // pods have reported success.
@@ -26,13 +26,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-var cacheInvalidationGVR = schema.GroupVersionResource{
+var varnishCacheInvalidationGVR = schema.GroupVersionResource{
 	Group:    "gateway.varnish-software.com",
 	Version:  "v1alpha1",
-	Resource: "cacheinvalidations",
+	Resource: "varnishcacheinvalidations",
 }
 
-// Watcher watches CacheInvalidation resources and executes purge/ban
+// Watcher watches VarnishCacheInvalidation resources and executes purge/ban
 // operations against the local Varnish instance.
 type Watcher struct {
 	dynClient   dynamic.Interface
@@ -79,7 +79,7 @@ func NewWatcher(
 	}
 }
 
-// Run starts watching CacheInvalidation resources.
+// Run starts watching VarnishCacheInvalidation resources.
 // It blocks until the context is cancelled.
 // If readyCh is non-nil, Run waits for it to close before starting (indicating Varnish is ready).
 func (w *Watcher) Run(ctx context.Context, readyCh <-chan struct{}) error {
@@ -119,11 +119,11 @@ func (w *Watcher) Run(ctx context.Context, readyCh <-chan struct{}) error {
 	}
 }
 
-// processExisting lists and processes any pending CacheInvalidation resources.
+// processExisting lists and processes any pending VarnishCacheInvalidation resources.
 func (w *Watcher) processExisting(ctx context.Context) error {
-	list, err := w.dynClient.Resource(cacheInvalidationGVR).Namespace("").List(ctx, metav1.ListOptions{})
+	list, err := w.dynClient.Resource(varnishCacheInvalidationGVR).Namespace("").List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("list CacheInvalidations: %w", err)
+		return fmt.Errorf("list VarnishCacheInvalidations: %w", err)
 	}
 
 	for i := range list.Items {
@@ -134,9 +134,9 @@ func (w *Watcher) processExisting(ctx context.Context) error {
 
 // watchLoop runs a single watch session.
 func (w *Watcher) watchLoop(ctx context.Context) error {
-	watcher, err := w.dynClient.Resource(cacheInvalidationGVR).Namespace("").Watch(ctx, metav1.ListOptions{})
+	watcher, err := w.dynClient.Resource(varnishCacheInvalidationGVR).Namespace("").Watch(ctx, metav1.ListOptions{})
 	if err != nil {
-		return fmt.Errorf("watch CacheInvalidations: %w", err)
+		return fmt.Errorf("watch VarnishCacheInvalidations: %w", err)
 	}
 	defer watcher.Stop()
 
@@ -159,7 +159,7 @@ func (w *Watcher) watchLoop(ctx context.Context) error {
 	}
 }
 
-// handleInvalidation processes a single CacheInvalidation resource.
+// handleInvalidation processes a single VarnishCacheInvalidation resource.
 func (w *Watcher) handleInvalidation(ctx context.Context, obj *unstructured.Unstructured) {
 	name := obj.GetName()
 	ns := obj.GetNamespace()
@@ -322,9 +322,9 @@ func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, succ
 	// Retry loop for conflict resolution (multiple pods updating concurrently)
 	for attempt := 0; attempt < 5; attempt++ {
 		// Get the latest version
-		current, err := w.dynClient.Resource(cacheInvalidationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		current, err := w.dynClient.Resource(varnishCacheInvalidationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
-			w.logger.Error("failed to get CacheInvalidation for status update",
+			w.logger.Error("failed to get VarnishCacheInvalidation for status update",
 				"name", name, "error", err)
 			return
 		}
@@ -369,14 +369,14 @@ func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, succ
 			return
 		}
 
-		_, err = w.dynClient.Resource(cacheInvalidationGVR).Namespace(namespace).UpdateStatus(
+		_, err = w.dynClient.Resource(varnishCacheInvalidationGVR).Namespace(namespace).UpdateStatus(
 			ctx, current, metav1.UpdateOptions{})
 		if err != nil {
 			if strings.Contains(err.Error(), "the object has been modified") {
 				w.logger.Debug("status update conflict, retrying", "attempt", attempt+1)
 				continue
 			}
-			w.logger.Error("failed to update CacheInvalidation status",
+			w.logger.Error("failed to update VarnishCacheInvalidation status",
 				"name", name, "error", err)
 			return
 		}

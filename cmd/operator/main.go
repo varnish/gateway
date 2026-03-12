@@ -119,12 +119,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup CacheInvalidation GC (runs only on leader)
-	if err := mgr.Add(&controller.CacheInvalidationGC{
+	// Setup VarnishCacheInvalidation GC (runs only on leader)
+	if err := mgr.Add(&controller.VarnishCacheInvalidationGC{
 		Client: mgr.GetClient(),
-		Logger: logger.With("controller", "CacheInvalidationGC"),
+		Logger: logger.With("controller", "VarnishCacheInvalidationGC"),
 	}); err != nil {
-		logger.Error("unable to add CacheInvalidation GC runnable", "error", err)
+		logger.Error("unable to add VarnishCacheInvalidation GC runnable", "error", err)
 		os.Exit(1)
 	}
 

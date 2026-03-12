@@ -191,7 +191,7 @@ func TestPodAlreadyReported(t *testing.T) {
 			obj := &unstructured.Unstructured{
 				Object: map[string]any{
 					"apiVersion": "gateway.varnish-software.com/v1alpha1",
-					"kind":       "CacheInvalidation",
+					"kind":       "VarnishCacheInvalidation",
 					"metadata":   map[string]any{"name": "test", "namespace": "default"},
 				},
 			}
@@ -220,8 +220,8 @@ func TestHandleInvalidation_GatewayRefFiltering(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	w := newTestWatcher(addr, "my-gw", "default", "pod-0")
 
-	// CacheInvalidation targeting a different gateway
-	obj := makeCacheInvalidation("inv-1", "default", "uid-wrong-gw", "purge", "example.com", "/foo", "other-gateway", "default")
+	// VarnishCacheInvalidation targeting a different gateway
+	obj := makeVarnishCacheInvalidation("inv-1", "default", "uid-wrong-gw", "purge", "example.com", "/foo", "other-gateway", "default")
 
 	w.handleInvalidation(context.Background(), obj)
 
@@ -254,7 +254,7 @@ func TestHandleInvalidation_GatewayRefNamespaceDefault(t *testing.T) {
 	obj := &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.varnish-software.com/v1alpha1",
-			"kind":       "CacheInvalidation",
+			"kind":       "VarnishCacheInvalidation",
 			"metadata": map[string]any{
 				"name":      "inv-2",
 				"namespace": "test-ns",
@@ -295,7 +295,7 @@ func TestHandleInvalidation_AlreadyProcessed(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
 
-	obj := makeCacheInvalidation("inv-dup", "default", "uid-123", "purge", "example.com", "/dup", "my-gw", "default")
+	obj := makeVarnishCacheInvalidation("inv-dup", "default", "uid-123", "purge", "example.com", "/dup", "my-gw", "default")
 
 	// First call - should send HTTP request
 	w.handleInvalidation(context.Background(), obj)
@@ -563,7 +563,7 @@ func TestHandleInvalidation_DispatchesPurge(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
 
-	obj := makeCacheInvalidation("inv-purge", "default", "uid-purge", "purge", "example.com", "/foo", "my-gw", "default")
+	obj := makeVarnishCacheInvalidation("inv-purge", "default", "uid-purge", "purge", "example.com", "/foo", "my-gw", "default")
 	w.handleInvalidation(context.Background(), obj)
 
 	if gotMethod != "PURGE" {
@@ -582,7 +582,7 @@ func TestHandleInvalidation_DispatchesBan(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
 
-	obj := makeCacheInvalidation("inv-ban", "default", "uid-ban", "ban", "example.com", "/pattern/.*", "my-gw", "default")
+	obj := makeVarnishCacheInvalidation("inv-ban", "default", "uid-ban", "ban", "example.com", "/pattern/.*", "my-gw", "default")
 	w.handleInvalidation(context.Background(), obj)
 
 	if gotMethod != "BAN" {
@@ -590,12 +590,12 @@ func TestHandleInvalidation_DispatchesBan(t *testing.T) {
 	}
 }
 
-// makeCacheInvalidation is a helper to build an unstructured CacheInvalidation object.
-func makeCacheInvalidation(name, ns, uid, invType, hostname, path, gwName, gwNS string) *unstructured.Unstructured {
+// makeVarnishCacheInvalidation is a helper to build an unstructured VarnishCacheInvalidation object.
+func makeVarnishCacheInvalidation(name, ns, uid, invType, hostname, path, gwName, gwNS string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "gateway.varnish-software.com/v1alpha1",
-			"kind":       "CacheInvalidation",
+			"kind":       "VarnishCacheInvalidation",
 			"metadata": map[string]any{
 				"name":      name,
 				"namespace": ns,
@@ -615,13 +615,13 @@ func makeCacheInvalidation(name, ns, uid, invType, hostname, path, gwName, gwNS 
 }
 
 // Test that the GVR constant is set correctly.
-func TestCacheInvalidationGVR(t *testing.T) {
+func TestVarnishCacheInvalidationGVR(t *testing.T) {
 	want := schema.GroupVersionResource{
 		Group:    "gateway.varnish-software.com",
 		Version:  "v1alpha1",
-		Resource: "cacheinvalidations",
+		Resource: "varnishcacheinvalidations",
 	}
-	if cacheInvalidationGVR != want {
-		t.Errorf("cacheInvalidationGVR = %v, want %v", cacheInvalidationGVR, want)
+	if varnishCacheInvalidationGVR != want {
+		t.Errorf("varnishCacheInvalidationGVR = %v, want %v", varnishCacheInvalidationGVR, want)
 	}
 }

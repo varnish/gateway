@@ -32,12 +32,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch"]
-  # Cache invalidation: watch and process CacheInvalidation resources
+  # Cache invalidation: watch and process VarnishCacheInvalidation resources
   - apiGroups: ["gateway.varnish-software.com"]
-    resources: ["cacheinvalidations"]
+    resources: ["varnishcacheinvalidations"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["gateway.varnish-software.com"]
-    resources: ["cacheinvalidations/status"]
+    resources: ["varnishcacheinvalidations/status"]
     verbs: ["get", "update", "patch"]
   # List pods to determine expected pod count for invalidation phase calculation
   - apiGroups: [""]

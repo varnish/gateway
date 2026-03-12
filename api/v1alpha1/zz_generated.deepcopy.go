@@ -22,7 +22,7 @@ func (in *GatewayReference) DeepCopy() *GatewayReference {
 }
 
 // DeepCopyInto copies the receiver into out.
-func (in *CacheInvalidationSpec) DeepCopyInto(out *CacheInvalidationSpec) {
+func (in *VarnishCacheInvalidationSpec) DeepCopyInto(out *VarnishCacheInvalidationSpec) {
 	*out = *in
 	out.GatewayRef = in.GatewayRef
 	if in.TTL != nil {
@@ -32,12 +32,12 @@ func (in *CacheInvalidationSpec) DeepCopyInto(out *CacheInvalidationSpec) {
 	}
 }
 
-// DeepCopy creates a deep copy of CacheInvalidationSpec.
-func (in *CacheInvalidationSpec) DeepCopy() *CacheInvalidationSpec {
+// DeepCopy creates a deep copy of VarnishCacheInvalidationSpec.
+func (in *VarnishCacheInvalidationSpec) DeepCopy() *VarnishCacheInvalidationSpec {
 	if in == nil {
 		return nil
 	}
-	out := new(CacheInvalidationSpec)
+	out := new(VarnishCacheInvalidationSpec)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -59,7 +59,7 @@ func (in *PodResult) DeepCopy() *PodResult {
 }
 
 // DeepCopyInto copies the receiver into out.
-func (in *CacheInvalidationStatus) DeepCopyInto(out *CacheInvalidationStatus) {
+func (in *VarnishCacheInvalidationStatus) DeepCopyInto(out *VarnishCacheInvalidationStatus) {
 	*out = *in
 	if in.CompletedAt != nil {
 		in, out := &in.CompletedAt, &out.CompletedAt
@@ -74,18 +74,18 @@ func (in *CacheInvalidationStatus) DeepCopyInto(out *CacheInvalidationStatus) {
 	}
 }
 
-// DeepCopy creates a deep copy of CacheInvalidationStatus.
-func (in *CacheInvalidationStatus) DeepCopy() *CacheInvalidationStatus {
+// DeepCopy creates a deep copy of VarnishCacheInvalidationStatus.
+func (in *VarnishCacheInvalidationStatus) DeepCopy() *VarnishCacheInvalidationStatus {
 	if in == nil {
 		return nil
 	}
-	out := new(CacheInvalidationStatus)
+	out := new(VarnishCacheInvalidationStatus)
 	in.DeepCopyInto(out)
 	return out
 }
 
 // DeepCopyInto copies the receiver into out.
-func (in *CacheInvalidation) DeepCopyInto(out *CacheInvalidation) {
+func (in *VarnishCacheInvalidation) DeepCopyInto(out *VarnishCacheInvalidation) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
@@ -93,18 +93,18 @@ func (in *CacheInvalidation) DeepCopyInto(out *CacheInvalidation) {
 	in.Status.DeepCopyInto(&out.Status)
 }
 
-// DeepCopy creates a deep copy of CacheInvalidation.
-func (in *CacheInvalidation) DeepCopy() *CacheInvalidation {
+// DeepCopy creates a deep copy of VarnishCacheInvalidation.
+func (in *VarnishCacheInvalidation) DeepCopy() *VarnishCacheInvalidation {
 	if in == nil {
 		return nil
 	}
-	out := new(CacheInvalidation)
+	out := new(VarnishCacheInvalidation)
 	in.DeepCopyInto(out)
 	return out
 }
 
 // DeepCopyObject implements runtime.Object.
-func (in *CacheInvalidation) DeepCopyObject() runtime.Object {
+func (in *VarnishCacheInvalidation) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}
@@ -112,31 +112,31 @@ func (in *CacheInvalidation) DeepCopyObject() runtime.Object {
 }
 
 // DeepCopyInto copies the receiver into out.
-func (in *CacheInvalidationList) DeepCopyInto(out *CacheInvalidationList) {
+func (in *VarnishCacheInvalidationList) DeepCopyInto(out *VarnishCacheInvalidationList) {
 	*out = *in
 	out.TypeMeta = in.TypeMeta
 	in.ListMeta.DeepCopyInto(&out.ListMeta)
 	if in.Items != nil {
 		in, out := &in.Items, &out.Items
-		*out = make([]CacheInvalidation, len(*in))
+		*out = make([]VarnishCacheInvalidation, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
 }
 
-// DeepCopy creates a deep copy of CacheInvalidationList.
-func (in *CacheInvalidationList) DeepCopy() *CacheInvalidationList {
+// DeepCopy creates a deep copy of VarnishCacheInvalidationList.
+func (in *VarnishCacheInvalidationList) DeepCopy() *VarnishCacheInvalidationList {
 	if in == nil {
 		return nil
 	}
-	out := new(CacheInvalidationList)
+	out := new(VarnishCacheInvalidationList)
 	in.DeepCopyInto(out)
 	return out
 }
 
 // DeepCopyObject implements runtime.Object.
-func (in *CacheInvalidationList) DeepCopyObject() runtime.Object {
+func (in *VarnishCacheInvalidationList) DeepCopyObject() runtime.Object {
 	if c := in.DeepCopy(); c != nil {
 		return c
 	}

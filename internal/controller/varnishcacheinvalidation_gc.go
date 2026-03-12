@@ -14,16 +14,16 @@ const (
 	defaultTTL = 1 * time.Hour
 )
 
-// CacheInvalidationGC periodically deletes completed or failed CacheInvalidation
+// VarnishCacheInvalidationGC periodically deletes completed or failed VarnishCacheInvalidation
 // resources whose TTL has expired. It implements manager.Runnable.
-type CacheInvalidationGC struct {
+type VarnishCacheInvalidationGC struct {
 	Client client.Client
 	Logger *slog.Logger
 }
 
 // Start runs the GC loop until the context is cancelled.
-func (gc *CacheInvalidationGC) Start(ctx context.Context) error {
-	gc.Logger.Info("starting CacheInvalidation GC", "interval", gcInterval, "defaultTTL", defaultTTL)
+func (gc *VarnishCacheInvalidationGC) Start(ctx context.Context) error {
+	gc.Logger.Info("starting VarnishCacheInvalidation GC", "interval", gcInterval, "defaultTTL", defaultTTL)
 
 	ticker := time.NewTicker(gcInterval)
 	defer ticker.Stop()
@@ -34,7 +34,7 @@ func (gc *CacheInvalidationGC) Start(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			gc.Logger.Info("stopping CacheInvalidation GC")
+			gc.Logger.Info("stopping VarnishCacheInvalidation GC")
 			return nil
 		case <-ticker.C:
 			gc.collect(ctx)
@@ -42,11 +42,11 @@ func (gc *CacheInvalidationGC) Start(ctx context.Context) error {
 	}
 }
 
-// collect lists all CacheInvalidation resources and deletes those eligible for GC.
-func (gc *CacheInvalidationGC) collect(ctx context.Context) {
-	var list v1alpha1.CacheInvalidationList
+// collect lists all VarnishCacheInvalidation resources and deletes those eligible for GC.
+func (gc *VarnishCacheInvalidationGC) collect(ctx context.Context) {
+	var list v1alpha1.VarnishCacheInvalidationList
 	if err := gc.Client.List(ctx, &list); err != nil {
-		gc.Logger.Error("failed to list CacheInvalidation resources", "error", err)
+		gc.Logger.Error("failed to list VarnishCacheInvalidation resources", "error", err)
 		return
 	}
 
@@ -61,14 +61,14 @@ func (gc *CacheInvalidationGC) collect(ctx context.Context) {
 		}
 
 		if err := gc.Client.Delete(ctx, ci); err != nil {
-			gc.Logger.Error("failed to delete CacheInvalidation",
+			gc.Logger.Error("failed to delete VarnishCacheInvalidation",
 				"name", ci.Name,
 				"namespace", ci.Namespace,
 				"error", err)
 			continue
 		}
 
-		gc.Logger.Info("deleted expired CacheInvalidation",
+		gc.Logger.Info("deleted expired VarnishCacheInvalidation",
 			"name", ci.Name,
 			"namespace", ci.Namespace,
 			"phase", ci.Status.Phase)
@@ -80,12 +80,12 @@ func (gc *CacheInvalidationGC) collect(ctx context.Context) {
 	}
 }
 
-// isEligible returns true if the CacheInvalidation is in a terminal phase
+// isEligible returns true if the VarnishCacheInvalidation is in a terminal phase
 // and its TTL has expired since completion.
-func (gc *CacheInvalidationGC) isEligible(ci *v1alpha1.CacheInvalidation, now time.Time) bool {
+func (gc *VarnishCacheInvalidationGC) isEligible(ci *v1alpha1.VarnishCacheInvalidation, now time.Time) bool {
 	// Only collect terminal resources.
-	if ci.Status.Phase != v1alpha1.CacheInvalidationComplete &&
-		ci.Status.Phase != v1alpha1.CacheInvalidationFailed {
+	if ci.Status.Phase != v1alpha1.VarnishCacheInvalidationComplete &&
+		ci.Status.Phase != v1alpha1.VarnishCacheInvalidationFailed {
 		return false
 	}
 
@@ -104,7 +104,7 @@ func (gc *CacheInvalidationGC) isEligible(ci *v1alpha1.CacheInvalidation, now ti
 }
 
 // NeedLeaderElection returns true so the GC only runs on the leader.
-func (gc *CacheInvalidationGC) NeedLeaderElection() bool {
+func (gc *VarnishCacheInvalidationGC) NeedLeaderElection() bool {
 	return true
 }
 
