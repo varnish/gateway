@@ -182,7 +182,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 
 	// Collect TLS certificate data from HTTPS listeners
 	tlsCertData := r.collectTLSCertData(ctx, gateway)
-	hasTLS := len(tlsCertData) > 0
+	hasTLS := hasHTTPSListener(gateway)
 
 	// Compute infrastructure hash for pod restart detection
 	infraConfig := InfrastructureConfig{

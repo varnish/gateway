@@ -754,6 +754,64 @@ func TestBuildTLSSecret(t *testing.T) {
 	}
 }
 
+// TestTLSBundleSecretCreatedWithMissingCerts verifies that when a Gateway has
+// HTTPS listeners but the referenced TLS secrets don't exist yet (e.g. cert-manager
+// hasn't issued them), the operator still creates the TLS bundle Secret (possibly
+// empty). This prevents MountVolume.SetUp failures since buildVolumes always adds
+// the tls-certs volume for HTTPS gateways.
+func TestTLSBundleSecretCreatedWithMissingCerts(t *testing.T) {
+	tlsMode := gatewayv1.TLSModeTerminate
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{
+					Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
+					TLS: &gatewayv1.GatewayTLSConfig{
+						Mode:            &tlsMode,
+						CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "not-yet-created"}},
+					},
+				},
+			},
+		},
+	}
+
+	r := &GatewayReconciler{
+		Config: Config{GatewayClassName: "varnish"},
+	}
+
+	// collectTLSCertData would return empty since the secret doesn't exist.
+	// The bug was: hasTLS was based on len(tlsCertData) > 0, so the bundle
+	// Secret was never created, but buildVolumes still referenced it.
+	// After fix: hasTLS is based on hasHTTPSListener(), so bundle is always created.
+	if !hasHTTPSListener(gateway) {
+		t.Fatal("expected hasHTTPSListener to return true for HTTPS gateway")
+	}
+
+	// Verify the bundle Secret is created even with empty cert data
+	emptyData := map[string][]byte{}
+	secret := r.buildTLSSecret(gateway, emptyData)
+	if secret.Name != "my-gw-tls" {
+		t.Errorf("expected secret name %q, got %q", "my-gw-tls", secret.Name)
+	}
+
+	// Verify buildVolumes includes the tls-certs volume
+	volumes := r.buildVolumes(gateway, nil)
+	hasTLSVolume := false
+	for _, v := range volumes {
+		if v.Name == volumeTLSCerts {
+			hasTLSVolume = true
+			if v.Secret == nil || v.Secret.SecretName != "my-gw-tls" {
+				t.Errorf("tls-certs volume should reference secret %q", "my-gw-tls")
+			}
+		}
+	}
+	if !hasTLSVolume {
+		t.Error("expected tls-certs volume for HTTPS gateway")
+	}
+}
+
 func TestBuildClusterRoleBinding(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{GatewayClassName: "varnish"},
