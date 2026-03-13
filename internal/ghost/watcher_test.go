@@ -367,6 +367,42 @@ func TestExtractEndpointsMultiPort(t *testing.T) {
 	}
 }
 
+func TestExtractEndpointsWithPortNames(t *testing.T) {
+	int32Ptr := func(i int32) *int32 { return &i }
+	strPtr := func(s string) *string { return &s }
+	boolPtr := func(b bool) *bool { return &b }
+
+	slice := &discoveryv1.EndpointSlice{
+		Endpoints: []discoveryv1.Endpoint{
+			{
+				Addresses:  []string{"10.0.0.1"},
+				Conditions: discoveryv1.EndpointConditions{Ready: boolPtr(true)},
+			},
+		},
+		Ports: []discoveryv1.EndpointPort{
+			{Name: strPtr("http"), Port: int32Ptr(80)},
+			{Name: strPtr("https"), Port: int32Ptr(443)},
+		},
+	}
+
+	endpoints := extractEndpoints(slice)
+	if len(endpoints) != 2 {
+		t.Fatalf("expected 2 endpoints, got %d", len(endpoints))
+	}
+
+	// Verify port names are captured
+	namesByPort := make(map[int]string)
+	for _, ep := range endpoints {
+		namesByPort[ep.Port] = ep.PortName
+	}
+	if namesByPort[80] != "http" {
+		t.Errorf("expected port 80 name 'http', got %q", namesByPort[80])
+	}
+	if namesByPort[443] != "https" {
+		t.Errorf("expected port 443 name 'https', got %q", namesByPort[443])
+	}
+}
+
 // TestWatcherReloadFailureFatal verifies that ghost reload failures cause the watcher to exit
 func TestWatcherReloadFailureFatal(t *testing.T) {
 	// Create a fake HTTP server that returns 503 for reload requests

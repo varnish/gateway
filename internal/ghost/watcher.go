@@ -509,21 +509,31 @@ func diffEndpoints(oldEndpoints, newEndpoints []Endpoint) (added, removed []Endp
 // An endpoint entry is created for each (address, port) combination so that
 // multi-port Services are represented correctly. The generator filters by
 // the route's target port when building backends.
+// portInfo holds a port number and its optional name from an EndpointSlice.
+type portInfo struct {
+	port int
+	name string
+}
+
 func extractEndpoints(slice *discoveryv1.EndpointSlice) []Endpoint {
 	var endpoints []Endpoint
 
 	// Collect all ports from the slice. If no ports are defined, use port 0
 	// (the generator will fall back to the route's port).
-	ports := []int{0}
+	ports := []portInfo{{port: 0}}
 	if len(slice.Ports) > 0 {
-		ports = make([]int, 0, len(slice.Ports))
+		ports = make([]portInfo, 0, len(slice.Ports))
 		for _, p := range slice.Ports {
 			if p.Port != nil {
-				ports = append(ports, int(*p.Port))
+				name := ""
+				if p.Name != nil {
+					name = *p.Name
+				}
+				ports = append(ports, portInfo{port: int(*p.Port), name: name})
 			}
 		}
 		if len(ports) == 0 {
-			ports = []int{0}
+			ports = []portInfo{{port: 0}}
 		}
 	}
 
@@ -535,10 +545,11 @@ func extractEndpoints(slice *discoveryv1.EndpointSlice) []Endpoint {
 
 		// Add an endpoint for each (address, port) combination
 		for _, addr := range ep.Addresses {
-			for _, port := range ports {
+			for _, pi := range ports {
 				endpoints = append(endpoints, Endpoint{
-					IP:   addr,
-					Port: port,
+					IP:       addr,
+					Port:     pi.port,
+					PortName: pi.name,
 				})
 			}
 		}

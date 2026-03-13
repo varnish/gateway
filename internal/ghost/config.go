@@ -169,6 +169,7 @@ type Route struct {
 	Service     string            `json:"service"`
 	Namespace   string            `json:"namespace"`
 	Port        int               `json:"port"`
+	PortName    string            `json:"port_name,omitempty"` // Service port name for filtering when TargetPort is named
 	Weight      int               `json:"weight"`
 	Listeners   []string          `json:"listeners,omitempty"`    // Varnish socket names (e.g., ["http-80"])
 	RouteName   string            `json:"route_name,omitempty"`   // HTTPRoute namespace/name

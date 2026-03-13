@@ -91,9 +91,17 @@ func CalculateRoutePriority(
 	return priority
 }
 
-// ServicePortMap maps "namespace/service:servicePort" to the resolved targetPort.
+// ServicePortMapping holds the resolved target port and optional port name.
+// When TargetPort is a named port, Port is 0 and Name contains the service port name
+// for matching against EndpointSlice port names.
+type ServicePortMapping struct {
+	Port int
+	Name string
+}
+
+// ServicePortMap maps "namespace/service:servicePort" to the resolved target port info.
 // Used to translate HTTPRoute BackendRef service ports to actual pod ports.
-type ServicePortMap map[string]int
+type ServicePortMap map[string]ServicePortMapping
 
 // CollectHTTPRouteBackends extracts backend and path match information from HTTPRoutes for config generation.
 // Returns a list of Route structs that include path matching rules.
@@ -179,10 +187,12 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							port = int(*backend.Port)
 						}
 						// Resolve service port to target port
+						var portName string
 						if portMap != nil {
 							key := fmt.Sprintf("%s/%s:%d", backendNS, backend.Name, port)
 							if tp, ok := portMap[key]; ok {
-								port = tp
+								port = tp.Port
+								portName = tp.Name
 							}
 						}
 
@@ -204,6 +214,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							Service:   string(backend.Name),
 							Namespace: backendNS,
 							Port:      port,
+							PortName:  portName,
 							Weight:    weight,
 							Listeners: listeners,
 							RouteName: routeName,
@@ -345,10 +356,12 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 								port = int(*backend.Port)
 							}
 							// Resolve service port to target port
+							var portName string
 							if portMap != nil {
 								key := fmt.Sprintf("%s/%s:%d", backendNS, backend.Name, port)
 								if tp, ok := portMap[key]; ok {
-									port = tp
+									port = tp.Port
+									portName = tp.Name
 								}
 							}
 
@@ -367,6 +380,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 								Service:     string(backend.Name),
 								Namespace:   backendNS,
 								Port:        port,
+								PortName:    portName,
 								Weight:      weight,
 								Listeners:   listeners,
 								RouteName:   routeName,

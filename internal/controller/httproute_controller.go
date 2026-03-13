@@ -691,13 +691,13 @@ func (r *HTTPRouteReconciler) buildServicePortMap(ctx context.Context, routes []
 					}
 					if sp.TargetPort.Type == intstr.Int {
 						if sp.TargetPort.IntVal != 0 {
-							portMap[key] = int(sp.TargetPort.IntVal)
+							portMap[key] = vcl.ServicePortMapping{Port: int(sp.TargetPort.IntVal)}
 						}
 						// IntVal == 0 means targetPort defaults to servicePort (no mapping needed)
 					} else {
-						// Named port: set to 0 to disable port filtering in routeToBackends,
-						// letting it use whatever port the EndpointSlice provides
-						portMap[key] = 0
+						// Named port: store the service port name so the chaperone can
+						// filter EndpointSlice ports by name instead of number.
+						portMap[key] = vcl.ServicePortMapping{Port: 0, Name: sp.Name}
 					}
 					break
 				}

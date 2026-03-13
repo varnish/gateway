@@ -1157,6 +1157,7 @@ func TestBuildServicePortMap(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			Ports: []corev1.ServicePort{
 				{
+					Name:       "https",
 					Port:       443,
 					TargetPort: intstr.FromString("https"),
 				},
@@ -1230,10 +1231,11 @@ func TestBuildServicePortMap(t *testing.T) {
 	portMap := r.buildServicePortMap(context.Background(), routes, "default")
 
 	tests := []struct {
-		name     string
-		key      string
-		wantPort int
-		wantOK   bool
+		name         string
+		key          string
+		wantPort     int
+		wantPortName string
+		wantOK       bool
 	}{
 		{
 			name:     "service port 80 resolves to target port 3000",
@@ -1248,10 +1250,11 @@ func TestBuildServicePortMap(t *testing.T) {
 			wantOK:   true,
 		},
 		{
-			name:     "named target port resolves to 0",
-			key:      "default/named-svc:443",
-			wantPort: 0,
-			wantOK:   true,
+			name:         "named target port stores port name",
+			key:          "default/named-svc:443",
+			wantPort:     0,
+			wantPortName: "https",
+			wantOK:       true,
 		},
 		{
 			name:   "missing service leaves key unmapped",
@@ -1274,13 +1277,16 @@ func TestBuildServicePortMap(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			port, ok := portMap[tc.key]
+			mapping, ok := portMap[tc.key]
 			if ok != tc.wantOK {
 				t.Errorf("portMap[%q]: exists=%v, want exists=%v (map=%v)", tc.key, ok, tc.wantOK, portMap)
 				return
 			}
-			if ok && port != tc.wantPort {
-				t.Errorf("portMap[%q] = %d, want %d", tc.key, port, tc.wantPort)
+			if ok && mapping.Port != tc.wantPort {
+				t.Errorf("portMap[%q].Port = %d, want %d", tc.key, mapping.Port, tc.wantPort)
+			}
+			if ok && mapping.Name != tc.wantPortName {
+				t.Errorf("portMap[%q].Name = %q, want %q", tc.key, mapping.Name, tc.wantPortName)
 			}
 		})
 	}

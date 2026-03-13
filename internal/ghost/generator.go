@@ -8,8 +8,9 @@ import (
 
 // Endpoint represents a discovered backend endpoint from Kubernetes.
 type Endpoint struct {
-	IP   string
-	Port int
+	IP       string
+	Port     int
+	PortName string // Port name from EndpointSlice (e.g., "http", "https")
 }
 
 // String returns a string representation of the endpoint for comparison and logging.
@@ -48,6 +49,26 @@ func endpointsToBackendGroup(rule RoutingRule, endpoints ServiceEndpoints) Backe
 		})
 	}
 	return BackendGroup{Weight: rule.Weight, Backends: backends}
+}
+
+// endpointMatchesRoute returns true if an endpoint should be included for the given route.
+// It checks by port number first, then falls back to port name matching for named target ports.
+func endpointMatchesRoute(ep Endpoint, routePort int, routePortName string) (int, bool) {
+	port := ep.Port
+	if port == 0 {
+		// No port in endpoint — use route's port
+		return routePort, true
+	}
+	if routePort != 0 {
+		// Route has a numeric target port — filter by number
+		return port, port == routePort
+	}
+	if routePortName != "" {
+		// Route has a named target port — filter by EndpointSlice port name
+		return port, ep.PortName == routePortName
+	}
+	// No port constraint — accept all
+	return port, true
 }
 
 // GenerateRoutingConfig creates a RoutingConfig from a map of hostname to routes.
@@ -243,7 +264,8 @@ func Generate(routingConfig *RoutingConfig, endpoints ServiceEndpoints) *Config 
 // routeToBackendGroup converts a route with endpoints to a BackendGroup.
 // For multi-port services, only endpoints matching the route's target port are included.
 // After service-port-to-target-port resolution in the operator, route.Port contains the
-// target port that matches what EndpointSlice reports.
+// target port that matches what EndpointSlice reports. When the target port is a named
+// port (route.Port == 0, route.PortName != ""), filtering is done by port name instead.
 func routeToBackendGroup(route Route, endpoints ServiceEndpoints) BackendGroup {
 	key := ServiceKey(route.Namespace, route.Service)
 	eps, ok := endpoints[key]
@@ -253,12 +275,8 @@ func routeToBackendGroup(route Route, endpoints ServiceEndpoints) BackendGroup {
 
 	backends := make([]Backend, 0, len(eps))
 	for _, ep := range eps {
-		port := ep.Port
-		if port == 0 {
-			port = route.Port
-		} else if route.Port != 0 && port != route.Port {
-			// Skip endpoints whose port doesn't match the route's target port.
-			// This filters out irrelevant ports for multi-port services.
+		port, ok := endpointMatchesRoute(ep, route.Port, route.PortName)
+		if !ok {
 			continue
 		}
 		backends = append(backends, Backend{

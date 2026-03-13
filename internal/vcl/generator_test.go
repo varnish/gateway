@@ -805,8 +805,8 @@ func TestCollectHTTPRouteBackends_PortMapResolution(t *testing.T) {
 	}
 
 	portMap := ServicePortMap{
-		"default/web-svc:80":        3000, // service port 80 → target port 3000
-		"default/fallback-svc:8080": 9090, // service port 8080 → target port 9090
+		"default/web-svc:80":        {Port: 3000}, // service port 80 → target port 3000
+		"default/fallback-svc:8080": {Port: 9090}, // service port 8080 → target port 9090
 	}
 
 	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap)
@@ -884,7 +884,7 @@ func TestCollectHTTPRouteBackends_PortMapPartialResolution(t *testing.T) {
 
 	// Only map one of the two services
 	portMap := ServicePortMap{
-		"default/mapped-svc:80": 3000,
+		"default/mapped-svc:80": {Port: 3000},
 		// unmapped-svc:9090 not in map → falls through to service port
 	}
 

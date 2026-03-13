@@ -373,6 +373,60 @@ func TestRouteToBackendGroupMultiPort(t *testing.T) {
 	}
 }
 
+// TestRouteToBackendGroupNamedPort verifies that when a route uses a named target port
+// (Port=0, PortName="http"), only endpoints with matching port names are included.
+// This is the fix for the bug where multi-port services with named target ports
+// would include all ports (e.g., both 80 and 443) instead of just the matching one.
+func TestRouteToBackendGroupNamedPort(t *testing.T) {
+	// Service has both "http" (port 80) and "https" (port 443) endpoints
+	endpoints := ServiceEndpoints{
+		"default/multi-port-svc": {
+			{IP: "10.0.0.1", Port: 80, PortName: "http"},
+			{IP: "10.0.0.1", Port: 443, PortName: "https"},
+			{IP: "10.0.0.2", Port: 80, PortName: "http"},
+			{IP: "10.0.0.2", Port: 443, PortName: "https"},
+		},
+	}
+
+	// Route targeting the "http" named port (Port=0 because operator couldn't resolve named targetPort)
+	route := Route{
+		Service:   "multi-port-svc",
+		Namespace: "default",
+		Port:      0,
+		PortName:  "http",
+		Weight:    1,
+	}
+
+	group := routeToBackendGroup(route, endpoints)
+	if len(group.Backends) != 2 {
+		t.Fatalf("expected 2 backends for named port 'http', got %d", len(group.Backends))
+	}
+	for _, b := range group.Backends {
+		if b.Port != 80 {
+			t.Errorf("expected all backends on port 80, got port %d", b.Port)
+		}
+	}
+
+	// Route targeting the "https" named port
+	routeHTTPS := Route{
+		Service:   "multi-port-svc",
+		Namespace: "default",
+		Port:      0,
+		PortName:  "https",
+		Weight:    1,
+	}
+
+	group = routeToBackendGroup(routeHTTPS, endpoints)
+	if len(group.Backends) != 2 {
+		t.Fatalf("expected 2 backends for named port 'https', got %d", len(group.Backends))
+	}
+	for _, b := range group.Backends {
+		if b.Port != 443 {
+			t.Errorf("expected all backends on port 443, got port %d", b.Port)
+		}
+	}
+}
+
 // TestMethodMatchingConformancePipeline simulates the full pipeline for the
 // HTTPRouteMethodMatching conformance test. It verifies that the ghost.json
 // produced by the operator→chaperone pipeline contains correct priorities
