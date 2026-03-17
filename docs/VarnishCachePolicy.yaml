@@ -1,0 +1,40 @@
+apiVersion: gateway.varnish.org/v1alpha1
+kind: VarnishCachePolicy
+metadata:
+  name: basic-caching
+  namespace: varnish-gateway-system
+spec:
+  # 1. Standard Gateway API Policy Attachment Target
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: my-app-route
+    
+  # 2. Caching Rules
+  defaultTTL: 5m             # e.g., "60s", "5m", "1h"
+  requestCoalescing: true    # Enable/Disable collapsed forwarding
+  
+  # 3. Advanced Varnish Timers
+  grace: 30s                 # Serve stale while revalidating
+  keep: 24h                  # Serve stale if backend is down
+
+  # 4. Cache Key Customization
+  cacheKey:
+    headers:
+      - Accept-Language
+      - X-User-Tier
+    queryParameters:
+      include:
+        - page
+        - filter
+      # Mutually exclusive with 'include'. Useful to strip UTM tags.
+      # exclude: 
+      #   - utm_source
+
+  # 5. Conditional Bypassing (Overrides default behavior)
+  bypass:
+    headers:
+      - name: Authorization
+      - name: Cookie
+        # Optional: only bypass if specific cookie is present
+        valueRegex: "^.*(session_id|admin_token).*$"
