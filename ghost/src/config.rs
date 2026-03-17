@@ -152,6 +152,8 @@ pub struct CachePolicy {
     pub grace_seconds: u32,
     #[serde(default)]
     pub keep_seconds: u32,
+    // TODO: use when varnish-rs exposes set_hash_ignore_busy()
+    #[allow(dead_code)]
     #[serde(default = "default_request_coalescing")]
     pub request_coalescing: bool,
     pub cache_key: Option<CacheKeyConfig>,

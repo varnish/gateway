@@ -524,7 +524,6 @@ impl GhostDirector {
                 route_name: None,
                 log_msgs: Vec::new(),
                 pass: true,
-                hash_ignore_busy: true,
             },
         };
 
@@ -536,7 +535,6 @@ impl GhostDirector {
                 route_name: None,
                 log_msgs: Vec::new(),
                 pass: true,
-                hash_ignore_busy: true,
             },
         };
 

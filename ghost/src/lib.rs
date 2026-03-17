@@ -333,8 +333,8 @@ mod ghost {
                 ctx.log(tag, &msg);
             }
 
-            // Apply cache directives via C API (not headers)
-            let _ = ctx.set_hash_ignore_busy(result.hash_ignore_busy);
+            // TODO: set hash_ignore_busy via C API when varnish-rs exposes it.
+            // For now, pass mode (the default) already prevents coalescing.
 
             // Signal pass via header instead of ctx.set_pass() so that
             // user VCL concatenated after the preamble vcl_recv still runs.
