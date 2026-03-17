@@ -1,5 +1,10 @@
 # TODO
 
+## Explore adding VCL to VCP.
+
+Consider attaching VCLs to VCP rules. So, unsure if this works, but the idea would be that a HTTPRoute, when
+matching could also jump to a VCL. The gateway VCL would be the main VCL.
+
 ## Client-Side TLS
 
 ### Known Limitations
@@ -254,8 +259,8 @@ Use Policy Attachment instead of GatewayClass-specific fields for Varnish config
 
 - Future: Add varnishlog-json support when available
 - Future: Create VarnishLoggingPolicy CRD using Gateway API policy attachment pattern
-    - Policy targets Gateway via `targetRef`, overrides class defaults when present
-    - Enables per-gateway logging config (e.g., verbose for staging, minimal for prod)
+  - Policy targets Gateway via `targetRef`, overrides class defaults when present
+  - Enables per-gateway logging config (e.g., verbose for staging, minimal for prod)
 
 ## Development Workflow
 
