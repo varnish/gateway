@@ -75,11 +75,11 @@ sub vcl_synth {
 }
 
 sub vcl_backend_fetch {
-    # Clean up internal cache policy headers before sending to backend
-    unset bereq.http.X-Ghost-Default-TTL;
-    unset bereq.http.X-Ghost-Forced-TTL;
-    unset bereq.http.X-Ghost-Grace;
-    unset bereq.http.X-Ghost-Keep;
+    # Clean up internal headers before sending to backend.
+    # Cache policy headers (X-Ghost-*-TTL, Grace, Keep) are kept on bereq
+    # because vcl_backend_response needs to read them. They are cleaned up
+    # at the end of vcl_backend_response instead.
+    unset bereq.http.X-Ghost-Pass;
 }
 
 sub vcl_backend_response {
@@ -117,6 +117,13 @@ sub vcl_backend_response {
     if (bereq.http.X-Ghost-Keep) {
         set beresp.keep = std.duration(bereq.http.X-Ghost-Keep, 0s);
     }
+
+    # Clean up internal cache policy headers so they don't leak to the backend
+    # on retries or show up in beresp. Must happen after the TTL logic above.
+    unset bereq.http.X-Ghost-Default-TTL;
+    unset bereq.http.X-Ghost-Forced-TTL;
+    unset bereq.http.X-Ghost-Grace;
+    unset bereq.http.X-Ghost-Keep;
 }
 
 sub vcl_deliver {
