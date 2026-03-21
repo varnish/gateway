@@ -61,13 +61,13 @@ jobs:
   test-rust:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/varnish/varnish-base:8.0
+      image: varnish:9.0
       options: --user root
     steps:
       - name: Install build tools and git
         run: |
           apt-get update && apt-get install -y \
-            curl build-essential pkg-config clang libclang-dev git
+            curl build-essential pkg-config clang libclang-dev git varnish-dev
 
       - name: Checkout
         uses: actions/checkout@v4

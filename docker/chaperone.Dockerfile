@@ -11,7 +11,7 @@ RUN CGO_ENABLED=0 go build -mod=vendor -o /chaperone ./cmd/chaperone
 
 # Stage 2: Build ghost VMOD (Rust)
 # Base on varnish image so headers match exactly at compile time
-FROM ghcr.io/varnish/varnish-base:8.0 AS rust-builder
+FROM varnish:9.0 AS rust-builder
 USER root
 
 # Install Rust toolchain and build dependencies
@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     clang \
     libclang-dev \
+    varnish-dev \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -36,7 +37,7 @@ COPY ghost/src ./src
 RUN cargo build --release
 
 # Stage 3: Runtime image based on Varnish
-FROM ghcr.io/varnish/varnish-base:8.0
+FROM varnish:9.0
 
 USER root
 

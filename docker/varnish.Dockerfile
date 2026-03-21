@@ -4,7 +4,7 @@
 # Stage 2: Varnish runtime with Ghost installed
 
 # Build stage - base on varnish image so headers match exactly
-FROM ghcr.io/varnish/varnish-base:8.0 AS builder
+FROM varnish:9.0 AS builder
 USER root
 
 # Install Rust toolchain and build dependencies
@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     clang \
     libclang-dev \
+    varnish-dev \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -28,11 +29,12 @@ COPY ghost/src ./src
 RUN cargo build --release
 
 # Runtime stage
-FROM ghcr.io/varnish/varnish-base:8.0
+FROM varnish:9.0
 
 # Copy the built vmod
 COPY --from=builder /build/target/release/libvmod_ghost.so /usr/lib/varnish/vmods/
 
 EXPOSE 80 6081
 
-CMD ["varnishd", "-F", "-a", ":80", "-f", "/etc/varnish/default.vcl"]
+ENTRYPOINT ["varnishd"]
+CMD ["-F", "-a", ":80", "-f", "/etc/varnish/default.vcl"]
