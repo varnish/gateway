@@ -10,6 +10,7 @@ kind: GatewayClassParameters
 metadata:
   name: my-params
 spec:
+  image: my-registry/varnish-gateway-custom:v1  # optional, overrides GATEWAY_IMAGE
   userVCLConfigMapRef:    # optional
     name: my-vcl
     namespace: default
@@ -18,6 +19,14 @@ spec:
     - "-p"
     - "thread_pools=2"
 ```
+
+### spec.image
+
+Custom container image for varnish-gateway pods. Overrides the operator's `GATEWAY_IMAGE` environment variable for all Gateways using this GatewayClass. Useful for images with additional VMODs baked in. If not set, the operator default is used.
+
+The logging sidecar also inherits this image unless `logging.image` is set explicitly.
+
+Changing this field triggers a rolling restart of all affected gateway pods.
 
 ### spec.userVCLConfigMapRef
 

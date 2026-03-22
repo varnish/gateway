@@ -3548,6 +3548,13 @@ spec:
                   - name
                   type: object
                 type: array
+              image:
+                description: |-
+                  Image specifies the container image for varnish-gateway pods.
+                  Overrides the operator's GATEWAY_IMAGE for Gateways using this GatewayClass.
+                  Useful for custom images with additional VMODs baked in.
+                  Defaults to the operator's GATEWAY_IMAGE if not specified.
+                type: string
               logging:
                 description: |-
                   Logging configures varnish log output via a sidecar container.

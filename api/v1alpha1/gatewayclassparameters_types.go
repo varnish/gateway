@@ -22,6 +22,13 @@ type GatewayClassParameters struct {
 
 // GatewayClassParametersSpec defines the desired state of GatewayClassParameters.
 type GatewayClassParametersSpec struct {
+	// Image specifies the container image for varnish-gateway pods.
+	// Overrides the operator's GATEWAY_IMAGE for Gateways using this GatewayClass.
+	// Useful for custom images with additional VMODs baked in.
+	// Defaults to the operator's GATEWAY_IMAGE if not specified.
+	// +optional
+	Image string `json:"image,omitempty"`
+
 	// UserVCLConfigMapRef references a ConfigMap containing user VCL.
 	// The ConfigMap should have the VCL content in a key (default "user.vcl").
 	// The user VCL will be appended to the generated VCL using VCL's

@@ -143,7 +143,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", nil, nil, nil, nil)
+	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", nil, nil, nil, nil)
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -162,8 +162,8 @@ func TestBuildDeployment(t *testing.T) {
 	if container.Name != "varnish-gateway" {
 		t.Errorf("expected container name %q, got %q", "varnish-gateway", container.Name)
 	}
-	if container.Image != "ghcr.io/varnish/varnish-gateway:latest" {
-		t.Errorf("expected image %q, got %q", "ghcr.io/varnish/varnish-gateway:latest", container.Image)
+	if container.Image != "test-image:latest" {
+		t.Errorf("expected image %q, got %q", "test-image:latest", container.Image)
 	}
 
 	// Verify ports (HTTP, health, dashboard)
@@ -214,7 +214,7 @@ func TestBuildDeployment_WithExtras(t *testing.T) {
 		{Name: "vmod-loader", Image: "busybox:latest", Command: []string{"cp", "/src/libvmod.so", "/dst/"}},
 	}
 
-	deployment := r.buildDeployment(gateway, nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil)
+	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil)
 
 	// Verify extra volumes
 	foundVol := false
@@ -867,7 +867,7 @@ func TestBuildLoggingSidecar(t *testing.T) {
 			name:          "varnishlog mode",
 			logging:       &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishlog"},
 			expectCommand: []string{"varnishlog"},
-			expectImage:   "ghcr.io/varnish/varnish-gateway:latest",
+			expectImage:   "test-image:latest",
 		},
 		{
 			name: "varnishncsa with format",
@@ -876,7 +876,7 @@ func TestBuildLoggingSidecar(t *testing.T) {
 				Format: "%h %l %u %t",
 			},
 			expectCommand:   []string{"varnishncsa"},
-			expectImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			expectImage:     "test-image:latest",
 			expectFormatArg: true,
 		},
 		{
@@ -908,7 +908,7 @@ func TestBuildLoggingSidecar(t *testing.T) {
 				},
 			}
 
-			container := r.buildLoggingSidecar(gateway, tc.logging)
+			container := r.buildLoggingSidecar(gateway, "test-image:latest", tc.logging)
 
 			if container.Name != "varnish-log" {
 				t.Errorf("expected name varnish-log, got %q", container.Name)
@@ -1040,7 +1040,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 				},
 			}
 
-			container := r.buildGatewayContainer(tc.gateway, tc.varnishdExtraArgs, tc.extraVolumeMounts, nil)
+			container := r.buildGatewayContainer(tc.gateway, "test-image:latest", tc.varnishdExtraArgs, tc.extraVolumeMounts, nil)
 
 			if len(container.Ports) != tc.expectPorts {
 				t.Errorf("expected %d ports, got %d", tc.expectPorts, len(container.Ports))
@@ -1198,7 +1198,7 @@ func TestBuildContainers(t *testing.T) {
 	}
 
 	t.Run("without logging", func(t *testing.T) {
-		containers := r.buildContainers(gateway, nil, nil, nil, nil)
+		containers := r.buildContainers(gateway, "test-image:latest", nil, nil, nil, nil)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container, got %d", len(containers))
 		}
@@ -1209,7 +1209,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("with logging", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishlog"}
-		containers := r.buildContainers(gateway, nil, logging, nil, nil)
+		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil)
 		if len(containers) != 2 {
 			t.Errorf("expected 2 containers, got %d", len(containers))
 		}
@@ -1220,7 +1220,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("logging with empty mode is not added", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: ""}
-		containers := r.buildContainers(gateway, nil, logging, nil, nil)
+		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container when logging mode is empty, got %d", len(containers))
 		}
