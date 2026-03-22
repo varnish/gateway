@@ -17,6 +17,10 @@ import (
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=vcp
+// +kubebuilder:printcolumn:name="Target Kind",type=string,JSONPath=`.spec.targetRef.kind`
+// +kubebuilder:printcolumn:name="Target Name",type=string,JSONPath=`.spec.targetRef.name`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type VarnishCachePolicy struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -130,6 +134,10 @@ type PolicyTargetReference struct {
 
 // VarnishCachePolicyAncestorStatus describes the status of a policy with respect to an ancestor.
 type VarnishCachePolicyAncestorStatus struct {
+	// AncestorRef corresponds with a ParentRef in the spec that this
+	// PolicyAncestorStatus struct describes the status of.
+	AncestorRef PolicyTargetReference `json:"ancestorRef"`
+
 	// ControllerName is the name of the controller that wrote this status.
 	ControllerName string `json:"controllerName"`
 

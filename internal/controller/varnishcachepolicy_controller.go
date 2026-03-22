@@ -241,6 +241,7 @@ func (r *VarnishCachePolicyReconciler) setAccepted(vcp *gatewayparamsv1alpha1.Va
 		vcp.Status.Ancestors = make([]gatewayparamsv1alpha1.VarnishCachePolicyAncestorStatus, 1)
 	}
 	vcp.Status.Ancestors[0] = gatewayparamsv1alpha1.VarnishCachePolicyAncestorStatus{
+		AncestorRef:    vcp.Spec.TargetRef,
 		ControllerName: ControllerName,
 		Conditions:     []metav1.Condition{condition},
 	}

@@ -9,6 +9,7 @@ VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
 .PHONY: helm-lint helm-template
 .PHONY: test-conformance test-conformance-report test-conformance-single
+.PHONY: manifests generate verify-manifests
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -49,6 +50,11 @@ help:
 	@echo "Helm:"
 	@echo "  make helm-lint        Lint Helm chart"
 	@echo "  make helm-template    Template Helm chart (dry-run)"
+	@echo ""
+	@echo "Code generation:"
+	@echo "  make manifests        Generate CRD manifests from Go types (controller-gen)"
+	@echo "  make generate         Generate deepcopy functions (controller-gen)"
+	@echo "  make verify-manifests Verify generated files are up-to-date"
 	@echo ""
 	@echo "Other:"
 	@echo "  make vendor           Update Go vendor directory"
@@ -214,6 +220,36 @@ helm-lint:
 
 helm-template:
 	helm template $(RELEASE_NAME) $(CHART_PATH) --debug
+
+# ============================================================================
+# Code generation (controller-gen)
+# ============================================================================
+
+CONTROLLER_GEN = go tool controller-gen
+
+# Generate CRD manifests from Go types into Helm chart, then assemble deploy/00-prereqs.yaml
+manifests:
+	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=charts/varnish-gateway/crds
+	@echo "Assembling deploy/00-prereqs.yaml..."
+	@cat deploy/namespace.yaml > deploy/00-prereqs.yaml
+	@echo "---" >> deploy/00-prereqs.yaml
+	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_gatewayclassparameters.yaml >> deploy/00-prereqs.yaml
+	@echo "---" >> deploy/00-prereqs.yaml
+	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_varnishcachepolicies.yaml >> deploy/00-prereqs.yaml
+	@echo "---" >> deploy/00-prereqs.yaml
+	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_varnishcacheinvalidations.yaml >> deploy/00-prereqs.yaml
+
+# Generate deepcopy functions from Go types
+generate:
+	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
+
+# Verify generated files are up-to-date (for CI)
+verify-manifests: manifests generate
+	@if [ -n "$$(git diff --name-only)" ]; then \
+		echo "ERROR: Generated files are out of date. Run 'make manifests generate' and commit the changes."; \
+		git diff --name-only; \
+		exit 1; \
+	fi
 
 # ============================================================================
 # Maintenance
