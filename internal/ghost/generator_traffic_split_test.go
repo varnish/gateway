@@ -108,6 +108,132 @@ func TestMergeRoutesByMatchCriteria(t *testing.T) {
 	}
 }
 
+// TestMergeRoutesByMatchCriteriaDifferentCachePolicy verifies that routes with identical
+// match criteria but different cache policies are NOT merged.
+// Regression test for https://github.com/varnish/gateway/issues/8
+func TestMergeRoutesByMatchCriteriaDifferentCachePolicy(t *testing.T) {
+	defaultTTL := 60
+	forcedTTL := 300
+
+	routes := []Route{
+		{
+			Hostname: "api.example.com",
+			PathMatch: &PathMatch{
+				Type:  PathMatchPathPrefix,
+				Value: "/",
+			},
+			Service:   "app-cached",
+			Namespace: "default",
+			Port:      8080,
+			Weight:    100,
+			Priority:  1010,
+			CachePolicy: &CachePolicy{
+				DefaultTTLSeconds: &defaultTTL,
+				GraceSeconds:      30,
+			},
+		},
+		{
+			Hostname: "api.example.com",
+			PathMatch: &PathMatch{
+				Type:  PathMatchPathPrefix,
+				Value: "/",
+			},
+			Service:   "app-forced",
+			Namespace: "default",
+			Port:      8080,
+			Weight:    100,
+			Priority:  1010,
+			CachePolicy: &CachePolicy{
+				ForcedTTLSeconds: &forcedTTL,
+				GraceSeconds:     60,
+			},
+		},
+	}
+
+	endpoints := ServiceEndpoints{
+		"default/app-cached": {{IP: "10.0.1.1", Port: 8080}},
+		"default/app-forced": {{IP: "10.0.2.1", Port: 8080}},
+	}
+
+	merged := mergeRoutesByMatchCriteria(routes, endpoints)
+
+	// Should result in TWO separate routes (different cache policies)
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 routes (different cache policies should not merge), got %d", len(merged))
+	}
+
+	// Each should have 1 backend group
+	for _, route := range merged {
+		if len(route.BackendGroups) != 1 {
+			t.Errorf("expected 1 backend group per route, got %d", len(route.BackendGroups))
+		}
+		if route.CachePolicy == nil {
+			t.Error("expected cache policy to be preserved, got nil")
+		}
+	}
+}
+
+// TestMergeRoutesByMatchCriteriaSameCachePolicy verifies that routes with identical
+// match criteria AND identical cache policies ARE still merged (traffic splitting).
+func TestMergeRoutesByMatchCriteriaSameCachePolicy(t *testing.T) {
+	ttl := 60
+
+	routes := []Route{
+		{
+			Hostname: "api.example.com",
+			PathMatch: &PathMatch{
+				Type:  PathMatchPathPrefix,
+				Value: "/",
+			},
+			Service:   "app-stable",
+			Namespace: "default",
+			Port:      8080,
+			Weight:    90,
+			Priority:  1010,
+			CachePolicy: &CachePolicy{
+				DefaultTTLSeconds: &ttl,
+				GraceSeconds:      30,
+			},
+		},
+		{
+			Hostname: "api.example.com",
+			PathMatch: &PathMatch{
+				Type:  PathMatchPathPrefix,
+				Value: "/",
+			},
+			Service:   "app-canary",
+			Namespace: "default",
+			Port:      8080,
+			Weight:    10,
+			Priority:  1010,
+			CachePolicy: &CachePolicy{
+				DefaultTTLSeconds: &ttl,
+				GraceSeconds:      30,
+			},
+		},
+	}
+
+	endpoints := ServiceEndpoints{
+		"default/app-stable": {{IP: "10.0.1.1", Port: 8080}},
+		"default/app-canary": {{IP: "10.0.2.1", Port: 8080}},
+	}
+
+	merged := mergeRoutesByMatchCriteria(routes, endpoints)
+
+	// Should merge into 1 route (same cache policy)
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged route (identical cache policies), got %d", len(merged))
+	}
+
+	if len(merged[0].BackendGroups) != 2 {
+		t.Errorf("expected 2 backend groups, got %d", len(merged[0].BackendGroups))
+	}
+
+	if merged[0].CachePolicy == nil {
+		t.Error("expected cache policy to be preserved, got nil")
+	}
+}
+
 // TestMergeRoutesByMatchCriteriaDifferentPaths verifies that routes with different
 // path matches are NOT merged.
 func TestMergeRoutesByMatchCriteriaDifferentPaths(t *testing.T) {
