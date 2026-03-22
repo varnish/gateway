@@ -13,7 +13,7 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 
 ## Current Status
 
-The project passes the Gateway API conformance test suite (`make test-conformance`). See TODO.md for remaining work.
+The project passes the Gateway API conformance test suite (`make test-conformance`). Remaining work is tracked in GitHub issues.
 
 ### Component Overview
 

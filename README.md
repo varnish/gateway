@@ -68,13 +68,33 @@ Images are public and require no authentication to pull. Currently amd64 only.
 - Weighted backend selection
 - Async HTTP client with connection pooling
 
-## Config reload
+## Config Reload
 
-All changes in HTTPRoutes will be 
-
-Two separate reload paths:
+Two separate reload paths, both zero-downtime:
 - **VCL changes** (user VCL updates): varnishadm hot-reload
 - **Backend/routing changes**: ghost HTTP reload
+
+## Caching
+
+By default, Varnish Gateway operates as a pure reverse proxy with **no caching**. Every request passes through to the backend.
+
+To enable caching, create a **VarnishCachePolicy** (VCP) targeting a Gateway, HTTPRoute, or individual route rule. VCP controls TTL, grace/keep, request coalescing, cache key customization, and bypass conditions.
+
+```yaml
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: VarnishCachePolicy
+metadata:
+  name: cache-static
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: static-assets
+  defaultTTL: 1h
+  grace: 5m
+```
+
+See [VarnishCachePolicy Reference](docs/varnish-cache-policy.md) for full documentation.
 
 ## Real-Time Dashboard
 
