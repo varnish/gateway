@@ -28,20 +28,16 @@ sub vcl_recv {
 
     # Cache invalidation: PURGE removes a single cached object by exact URL.
     # Chaperone sends: PURGE /path HTTP/1.1 \n Host: example.com
-    if (req.method == "PURGE") {
-        if (!client.ip ~ localhost) {
-            return (synth(405, "Not allowed."));
-        }
+    # Only handles localhost requests; non-localhost PURGE falls through to user VCL.
+    if (req.method == "PURGE" && client.ip ~ localhost) {
         return (purge);
     }
 
     # Cache invalidation: BAN invalidates objects matching a URL regex.
     # Chaperone sends: BAN /pattern.* HTTP/1.1 \n Host: example.com
     # Uses ban lurker friendly expressions (obj.http.*) for background cleanup.
-    if (req.method == "BAN") {
-        if (!client.ip ~ localhost) {
-            return (synth(403, "Not allowed."));
-        }
+    # Only handles localhost requests; non-localhost BAN falls through to user VCL.
+    if (req.method == "BAN" && client.ip ~ localhost) {
         if (std.ban("obj.http.x-cache-host == " + req.http.host +
                      " && obj.http.x-cache-url ~ " + req.url)) {
             return (synth(200, "Ban added"));
