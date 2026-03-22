@@ -13,7 +13,7 @@ use varnish::vcl::{
 
 use crate::backend_pool::BackendPool;
 use crate::config::RouteFilters;
-use crate::director::{PathMatchCompiled, RouteEntry, WeightedBackendGroup};
+use crate::director::{BypassHeaderCompiled, PathMatchCompiled, RouteEntry, WeightedBackendGroup};
 use crate::redirect_backend::RedirectConfig;
 use crate::stats::VhostStats;
 
@@ -42,6 +42,7 @@ pub struct RouteMatchResult<'a> {
     pub matched_path: Option<&'a PathMatchCompiled>,
     pub route_name: Option<&'a str>,
     pub cache_policy: Option<&'a crate::config::CachePolicy>,
+    pub bypass_headers: &'a [crate::director::BypassHeaderCompiled],
 }
 
 /// Result returned by route_request to the caller (recv/resolve).
@@ -522,6 +523,7 @@ fn match_routes<'a>(
             matched_path: route.path_match.as_ref(),
             route_name: route.route_name.as_deref(),
             cache_policy: route.cache_policy.as_ref(),
+            bypass_headers: &route.bypass_headers,
         });
     }
 
@@ -549,31 +551,26 @@ fn apply_cache_policy_headers(
         }
     };
 
-    // Check bypass rules: if any bypass header condition matches, pass
-    if !cache_policy.bypass_headers.is_empty() {
-        for bypass in &cache_policy.bypass_headers {
-            let header_val = http.header(&bypass.name);
-            if let Some(val) = header_val {
-                let val_str = match val {
-                    StrOrBytes::Utf8(s) => s,
-                    StrOrBytes::Bytes(b) => match std::str::from_utf8(b) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    },
-                };
-
-                let should_bypass = match &bypass.value_regex {
-                    Some(pattern) => {
-                        // Match regex against header value
-                        regex::Regex::new(pattern)
-                            .map(|re| re.is_match(val_str))
-                            .unwrap_or(false)
-                    }
-                    None => true, // No regex = any value triggers bypass
-                };
-
-                if should_bypass {
+    // Check bypass rules using pre-compiled regexes from config load
+    for bypass in match_result.bypass_headers {
+        match bypass {
+            BypassHeaderCompiled::Present { name } => {
+                if http.header(name).is_some() {
                     return true;
+                }
+            }
+            BypassHeaderCompiled::Regex { name, regex } => {
+                if let Some(val) = http.header(name) {
+                    let val_str = match val {
+                        StrOrBytes::Utf8(s) => s,
+                        StrOrBytes::Bytes(b) => match std::str::from_utf8(b) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        },
+                    };
+                    if regex.is_match(val_str) {
+                        return true;
+                    }
                 }
             }
         }
@@ -882,6 +879,7 @@ mod tests {
             priority: 100,
             rule_index: 0,
             cache_policy: None,
+            bypass_headers: Vec::new(),
         }];
 
         // This test doesn't use HttpHeaders, so we can't fully test it here
@@ -908,6 +906,7 @@ mod tests {
             priority: 100,
             rule_index: 0,
             cache_policy: None,
+            bypass_headers: Vec::new(),
         }];
 
         // Verify route structure
@@ -937,6 +936,7 @@ mod tests {
                 priority: 100,
                 rule_index: 0,
                 cache_policy: None,
+                bypass_headers: Vec::new(),
             }],
             backend_pool.clone(),
             None,
@@ -1026,6 +1026,7 @@ mod tests {
             matched_path: Some(&path_match),
             route_name: Some("default/my-route"),
             cache_policy: None,
+            bypass_headers: &[],
         };
 
         assert_eq!(result.backend_groups.len(), 1);
