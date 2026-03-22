@@ -477,8 +477,8 @@ func isVCPAccepted(vcp *gatewayparamsv1alpha1.VarnishCachePolicy) bool {
 			}
 		}
 	}
-	// If no status yet, consider it potentially applicable (first reconcile may not have run)
-	return len(vcp.Status.Ancestors) == 0
+	// No accepted condition found — treat as not accepted (safe default)
+	return false
 }
 
 // isOlder returns true if a is older than b (for conflict resolution).
