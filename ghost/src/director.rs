@@ -84,6 +84,16 @@ impl PathMatchCompiled {
     }
 }
 
+/// Compiled bypass header rule for efficient per-request matching.
+/// Pre-compiled at config load time to avoid regex compilation on every request.
+#[derive(Debug, Clone)]
+pub enum BypassHeaderCompiled {
+    /// Header presence triggers bypass (no regex pattern specified)
+    Present { name: String },
+    /// Header value must match pre-compiled regex to trigger bypass
+    Regex { name: String, regex: Arc<Regex> },
+}
+
 /// Compiled header match for efficient matching
 #[derive(Debug, Clone)]
 pub enum HeaderMatchCompiled {
@@ -202,6 +212,8 @@ pub struct RouteEntry {
     pub rule_index: i32,
     /// Cache policy from VarnishCachePolicy. None means pass-through (no caching).
     pub cache_policy: Option<crate::config::CachePolicy>,
+    /// Pre-compiled bypass header rules (extracted from cache_policy at config load time).
+    pub bypass_headers: Vec<BypassHeaderCompiled>,
 }
 
 /// Map of vhost directors for two-tier routing
@@ -288,6 +300,35 @@ pub fn build_vhost_directors(
 
             let filters = route.filters.as_ref().map(|f| Arc::new(f.clone()));
 
+            // Pre-compile bypass header regexes (avoids per-request compilation)
+            let bypass_headers = match &route.cache_policy {
+                Some(cp) => {
+                    let compiled: Result<Vec<_>, String> = cp
+                        .bypass_headers
+                        .iter()
+                        .map(|bh| match &bh.value_regex {
+                            None => Ok(BypassHeaderCompiled::Present {
+                                name: bh.name.clone(),
+                            }),
+                            Some(pattern) => {
+                                let re = Regex::new(pattern).map_err(|e| {
+                                    format!(
+                                        "Invalid bypass header regex '{}': {}",
+                                        pattern, e
+                                    )
+                                })?;
+                                Ok(BypassHeaderCompiled::Regex {
+                                    name: bh.name.clone(),
+                                    regex: Arc::new(re),
+                                })
+                            }
+                        })
+                        .collect();
+                    compiled.map_err(VclError::new)?
+                }
+                None => Vec::new(),
+            };
+
             route_entries.push(RouteEntry {
                 path_match,
                 method: route.method.clone(),
@@ -300,6 +341,7 @@ pub fn build_vhost_directors(
                 priority: route.priority,
                 rule_index: route.rule_index,
                 cache_policy: route.cache_policy.clone(),
+                bypass_headers,
             });
         }
 
@@ -336,6 +378,7 @@ pub fn build_vhost_directors(
                 priority: 0,
                 rule_index: i32::MAX,
                 cache_policy: None,
+                bypass_headers: Vec::new(),
             });
         }
 
@@ -524,7 +567,6 @@ impl GhostDirector {
                 route_name: None,
                 log_msgs: Vec::new(),
                 pass: true,
-                hash_ignore_busy: true,
             },
         };
 
@@ -536,7 +578,6 @@ impl GhostDirector {
                 route_name: None,
                 log_msgs: Vec::new(),
                 pass: true,
-                hash_ignore_busy: true,
             },
         };
 

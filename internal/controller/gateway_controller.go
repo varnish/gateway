@@ -173,13 +173,21 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	var extraVolumeMounts []corev1.VolumeMount
 	var extraInitContainers []corev1.Container
 	var containerResources *corev1.ResourceRequirements
+	var imageOverride string
 	if params := r.getGatewayClassParameters(ctx, gateway); params != nil {
+		imageOverride = params.Spec.Image
 		varnishdExtraArgs = params.Spec.VarnishdExtraArgs
 		logging = params.Spec.Logging
 		extraVolumes = params.Spec.ExtraVolumes
 		extraVolumeMounts = params.Spec.ExtraVolumeMounts
 		extraInitContainers = params.Spec.ExtraInitContainers
 		containerResources = params.Spec.Resources
+	}
+
+	// Resolve effective image: per-GatewayClass override or operator default
+	effectiveImage := r.Config.GatewayImage
+	if imageOverride != "" {
+		effectiveImage = imageOverride
 	}
 
 	// Generate VCL content (ghost preamble + user VCL)
@@ -194,7 +202,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 
 	// Compute infrastructure hash for pod restart detection
 	infraConfig := InfrastructureConfig{
-		GatewayImage:        r.Config.GatewayImage,
+		GatewayImage:        effectiveImage,
 		VarnishdExtraArgs:   varnishdExtraArgs,
 		Logging:             logging,
 		ImagePullSecrets:    imagePullSecrets,
@@ -218,7 +226,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	resources = append(resources,
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
-		r.buildDeployment(gateway, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources),
+		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources),
 		r.buildService(gateway),
 	)
 

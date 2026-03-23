@@ -83,11 +83,9 @@ gatewayClass:
         key: user.vcl
       # Default content for initial install (Helm will not overwrite on upgrades)
       content: |
-        # Disable caching for all requests
-        sub vcl_recv {
-            # pass all the things!
-            return (pass);
-        }
+        # Add custom VCL here.
+        # Note: routes without a VarnishCachePolicy are automatically
+        # passed (not cached). No need for an explicit return(pass).
 
     # Logging configuration
     logging:

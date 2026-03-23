@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -36,7 +36,7 @@ jobs:
         run: go vet ./...
 
       - name: Cache envtest binaries
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: testbin
           key: envtest-1.31.0-${{ runner.os }}
@@ -61,16 +61,16 @@ jobs:
   test-rust:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/varnish/varnish-base:8.0
+      image: varnish:9.0
       options: --user root
     steps:
       - name: Install build tools and git
         run: |
           apt-get update && apt-get install -y \
-            curl build-essential pkg-config clang libclang-dev git
+            curl build-essential pkg-config clang libclang-dev git varnish-dev
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Rust
         run: |

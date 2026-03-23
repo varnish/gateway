@@ -102,11 +102,26 @@ helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
 
 ## Upgrading
 
-### Upgrade the chart
+**Important:** Helm preserves values from previous releases across upgrades. If you
+previously set `operator.image.tag` or `chaperone.image.tag` (directly or via a values
+file), those pinned versions will persist even when upgrading to a newer chart version.
+Use `--reset-values` to discard previous overrides and pick up the new chart defaults:
 
 ```bash
 helm upgrade varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
-  --namespace varnish-gateway-system
+  --namespace varnish-gateway-system \
+  --version 0.x.y \
+  --reset-values
+```
+
+If you have other custom values you want to keep, pass them explicitly with `-f` or `--set`
+on every upgrade instead of relying on Helm's value persistence:
+
+```bash
+helm upgrade varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
+  --namespace varnish-gateway-system \
+  --version 0.x.y \
+  -f my-values.yaml
 ```
 
 ### CRD Upgrades

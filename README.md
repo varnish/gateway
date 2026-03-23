@@ -68,13 +68,33 @@ Images are public and require no authentication to pull. Currently amd64 only.
 - Weighted backend selection
 - Async HTTP client with connection pooling
 
-## Config reload
+## Config Reload
 
-All changes in HTTPRoutes will be 
-
-Two separate reload paths:
+Two separate reload paths, both zero-downtime:
 - **VCL changes** (user VCL updates): varnishadm hot-reload
 - **Backend/routing changes**: ghost HTTP reload
+
+## Caching
+
+By default, Varnish Gateway operates as a pure reverse proxy with **no caching**. Every request passes through to the backend.
+
+To enable caching, create a **VarnishCachePolicy** (VCP) targeting a Gateway, HTTPRoute, or individual route rule. VCP controls TTL, grace/keep, request coalescing, cache key customization, and bypass conditions.
+
+```yaml
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: VarnishCachePolicy
+metadata:
+  name: cache-static
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: static-assets
+  defaultTTL: 1h
+  grace: 5m
+```
+
+See [VarnishCachePolicy Reference](docs/varnish-cache-policy.md) for full documentation.
 
 ## Real-Time Dashboard
 
@@ -163,7 +183,31 @@ See [INSTALL.md](INSTALL.md) for detailed installation instructions and configur
 
 ## Loading Custom VMODs
 
-To load custom Varnish VMODs (or any other files) into the gateway pods, use `extraVolumes`, `extraVolumeMounts`, and `extraInitContainers` in `GatewayClassParameters`. This follows the standard Kubernetes pattern of using an init container to populate a shared volume before the main container starts.
+The recommended way to load custom VMODs is to build a custom container image that includes them, then point your GatewayClass at it via `spec.image`:
+
+```yaml
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: custom-varnish
+spec:
+  image: my-registry/varnish-gateway-custom:v1.2.3
+```
+
+The custom image is typically a one-liner Dockerfile that adds your VMOD to the base image:
+
+```dockerfile
+FROM ghcr.io/varnish/varnish-gateway:latest
+COPY libvmod_custom.so /usr/lib/varnish/vmods/
+```
+
+This is the most reliable approach: the VMOD is always present when varnishd starts, there are no race conditions, and it works identically in every environment. The logging sidecar (if configured) also inherits the custom image automatically, unless `logging.image` is set explicitly.
+
+Changing `spec.image` triggers a rolling restart of all gateway pods using that GatewayClass.
+
+### Alternative: Init containers
+
+For cases where building a custom image is not practical, you can use `extraInitContainers` to copy VMOD files into a shared volume at pod startup:
 
 ```yaml
 apiVersion: gateway.varnish-software.com/v1alpha1
@@ -189,6 +233,6 @@ spec:
           mountPath: /dst
 ```
 
-The init container copies the `.so` files into a shared `emptyDir` volume, the main container mounts that volume, and `varnishdExtraArgs` extends the VMOD search path so Varnish finds them. The same mechanism works for any file you need inside the pod (config files, TLS certs from external sources, etc.).
+The init container copies the `.so` files into a shared `emptyDir` volume, the main container mounts that volume, and `varnishdExtraArgs` extends the VMOD search path so Varnish finds them. This approach is more fragile than a custom image since it depends on init container ordering during pod startup.
 
 See [CLAUDE.md](CLAUDE.md) for development setup and detailed documentation.

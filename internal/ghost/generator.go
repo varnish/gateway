@@ -115,6 +115,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 		queryParams string // JSON serialization of QueryParams
 		filters     string // JSON serialization of Filters
 		listeners   string // sorted, comma-joined
+		cachePolicy string // JSON serialization of CachePolicy
 		priority    int
 		ruleIndex   int
 	}
@@ -128,6 +129,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			queryParams: serializeQueryParams(route.QueryParams),
 			filters:     serializeFilters(route.Filters),
 			listeners:   serializeListeners(route.Listeners),
+			cachePolicy: serializeCachePolicy(route.CachePolicy),
 			priority:    route.Priority,
 			ruleIndex:   route.RuleIndex,
 		}
@@ -212,6 +214,15 @@ func serializeFilters(filters *RouteFilters) string {
 		return ""
 	}
 	data, _ := json.Marshal(filters)
+	return string(data)
+}
+
+// serializeCachePolicy converts a CachePolicy to string for grouping.
+func serializeCachePolicy(cp *CachePolicy) string {
+	if cp == nil {
+		return ""
+	}
+	data, _ := json.Marshal(cp)
 	return string(data)
 }
 

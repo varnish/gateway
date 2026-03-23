@@ -1,0 +1,178 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: varnishcacheinvalidations.gateway.varnish-software.com
+spec:
+  group: gateway.varnish-software.com
+  names:
+    kind: VarnishCacheInvalidation
+    listKind: VarnishCacheInvalidationList
+    plural: varnishcacheinvalidations
+    shortNames:
+    - vcinv
+    singular: varnishcacheinvalidation
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.type
+      name: Type
+      type: string
+    - jsonPath: .spec.hostname
+      name: Hostname
+      type: string
+    - jsonPath: .status.phase
+      name: Status
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          VarnishCacheInvalidation is a one-shot resource that triggers cache purge or ban
+          on a Varnish Gateway. Each chaperone pod serving the target gateway processes
+          the invalidation independently and reports its result. The phase transitions
+          to Complete only when all pods have reported success.
+
+          PURGE removes a single cached object by exact URL.
+          BAN invalidates objects matching a URL pattern (regex) using Varnish's ban lurker.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VarnishCacheInvalidationSpec defines the desired cache invalidation.
+            properties:
+              gatewayRef:
+                description: GatewayRef identifies which Gateway's cache to invalidate.
+                properties:
+                  name:
+                    description: Name is the name of the Gateway.
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the Gateway.
+                      Defaults to the VarnishCacheInvalidation's namespace if not specified.
+                    type: string
+                required:
+                - name
+                type: object
+              hostname:
+                description: Hostname is the Host header value for the invalidation
+                  request.
+                type: string
+              paths:
+                description: |-
+                  Paths is the list of URL paths for the invalidation.
+                  For Purge: exact paths of cached objects (e.g., "/api/users/123").
+                  For Ban: regex patterns matching cached URLs (e.g., "/api/.*").
+                items:
+                  type: string
+                minItems: 1
+                type: array
+              ttl:
+                description: |-
+                  TTL is how long to keep this resource after all pods have completed.
+                  The resource is eligible for garbage collection after this duration.
+                  Default: 1h
+                type: string
+              type:
+                description: 'Type is the invalidation method: Purge (exact URL) or
+                  Ban (URL pattern).'
+                enum:
+                - Purge
+                - Ban
+                type: string
+            required:
+            - gatewayRef
+            - hostname
+            - paths
+            - type
+            type: object
+          status:
+            description: VarnishCacheInvalidationStatus defines the observed state
+              of a VarnishCacheInvalidation.
+            properties:
+              completedAt:
+                description: CompletedAt is when the last pod reported, completing
+                  the invalidation.
+                format: date-time
+                type: string
+              phase:
+                description: Phase is the aggregate state across all pods.
+                type: string
+              podResults:
+                description: PodResults contains per-pod outcomes.
+                items:
+                  description: PodResult records the outcome of an invalidation on
+                    a single pod.
+                  properties:
+                    completedAt:
+                      description: CompletedAt is when this pod completed processing.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message provides a summary of the result.
+                      type: string
+                    pathResults:
+                      description: PathResults contains per-path outcomes.
+                      items:
+                        description: PathResult records the outcome of an invalidation
+                          for a single path.
+                        properties:
+                          message:
+                            description: Message provides details about the result
+                              (error message on failure).
+                            type: string
+                          path:
+                            description: Path is the URL path that was invalidated.
+                            type: string
+                          success:
+                            description: Success indicates whether the invalidation
+                              succeeded for this path.
+                            type: boolean
+                        required:
+                        - path
+                        - success
+                        type: object
+                      type: array
+                    podName:
+                      description: PodName is the name of the chaperone pod that processed
+                        this invalidation.
+                      type: string
+                    success:
+                      description: Success indicates whether the invalidation succeeded
+                        on this pod (all paths).
+                      type: boolean
+                  required:
+                  - completedAt
+                  - podName
+                  - success
+                  type: object
+                type: array
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -15,6 +15,7 @@ import (
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=vcinv
 // +kubebuilder:printcolumn:name="Type",type=string,JSONPath=`.spec.type`
 // +kubebuilder:printcolumn:name="Hostname",type=string,JSONPath=`.spec.hostname`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.phase`

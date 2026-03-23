@@ -13,7 +13,7 @@ use varnish::vcl::{
 
 use crate::backend_pool::BackendPool;
 use crate::config::RouteFilters;
-use crate::director::{PathMatchCompiled, RouteEntry, WeightedBackendGroup};
+use crate::director::{BypassHeaderCompiled, PathMatchCompiled, RouteEntry, WeightedBackendGroup};
 use crate::redirect_backend::RedirectConfig;
 use crate::stats::VhostStats;
 
@@ -42,6 +42,7 @@ pub struct RouteMatchResult<'a> {
     pub matched_path: Option<&'a PathMatchCompiled>,
     pub route_name: Option<&'a str>,
     pub cache_policy: Option<&'a crate::config::CachePolicy>,
+    pub bypass_headers: &'a [crate::director::BypassHeaderCompiled],
 }
 
 /// Result returned by route_request to the caller (recv/resolve).
@@ -53,9 +54,7 @@ pub struct RouteRequestResult {
     pub log_msgs: Vec<(LogTag, String)>,
     /// Whether to bypass the cache entirely (return(pass) in VCL terms).
     pub pass: bool,
-    /// Whether to disable request coalescing (hash_ignore_busy).
-    /// Default true (no coalescing) — only false when a VCP explicitly enables it.
-    pub hash_ignore_busy: bool,
+    // TODO: re-add hash_ignore_busy when varnish-rs exposes set_hash_ignore_busy().
 }
 
 /// Director for a single virtual host
@@ -279,7 +278,6 @@ impl VhostDirector {
                 route_name: None,
                 log_msgs,
                 pass: true,
-                hash_ignore_busy: true,
             },
         };
         let backend_groups = match_result.backend_groups;
@@ -346,7 +344,6 @@ impl VhostDirector {
                             route_name: route_name.clone(),
                             log_msgs,
                             pass: true,
-                            hash_ignore_busy: true,
                         };
                     }
                 };
@@ -361,7 +358,6 @@ impl VhostDirector {
                         route_name: route_name.clone(),
                         log_msgs,
                         pass: true,
-                        hash_ignore_busy: true,
                     };
                 }
 
@@ -370,7 +366,6 @@ impl VhostDirector {
                     route_name: route_name.clone(),
                     log_msgs,
                     pass: true,
-                    hash_ignore_busy: true,
                 };
             }
 
@@ -395,8 +390,7 @@ impl VhostDirector {
         }
 
         // Determine cache behavior from policy
-        let (pass, hash_ignore_busy) =
-            apply_cache_policy_headers(http, &match_result, &query_string_owned);
+        let pass = apply_cache_policy_headers(http, &match_result, &query_string_owned);
 
         // Select backend using two-level weighted random:
         // Level 1: pick a group by weight
@@ -409,7 +403,6 @@ impl VhostDirector {
                     route_name,
                     log_msgs,
                     pass,
-                    hash_ignore_busy,
                 };
             }
         };
@@ -425,7 +418,6 @@ impl VhostDirector {
                 route_name,
                 log_msgs,
                 pass,
-                hash_ignore_busy,
             },
         };
 
@@ -434,7 +426,6 @@ impl VhostDirector {
             route_name,
             log_msgs,
             pass,
-            hash_ignore_busy,
         }
     }
 }
@@ -532,13 +523,14 @@ fn match_routes<'a>(
             matched_path: route.path_match.as_ref(),
             route_name: route.route_name.as_deref(),
             cache_policy: route.cache_policy.as_ref(),
+            bypass_headers: &route.bypass_headers,
         });
     }
 
     None
 }
 
-/// Apply cache policy to the request. Returns (pass, hash_ignore_busy).
+/// Apply cache policy to the request. Returns whether to pass (bypass cache).
 ///
 /// Sets bereq-bridging headers for values that need to reach vcl_backend_response:
 /// - `X-Ghost-Default-TTL: <N>s` → set beresp.ttl when origin has no Cache-Control
@@ -546,47 +538,39 @@ fn match_routes<'a>(
 /// - `X-Ghost-Grace: <N>s` → set beresp.grace
 /// - `X-Ghost-Keep: <N>s` → set beresp.keep
 /// - `X-Ghost-Cache-Key-Extra: <data>` → additional hash_data() input
-///
-/// Pass and hash_ignore_busy are returned to the caller for direct C API use
-/// (ctx.set_pass() and ctx.set_hash_ignore_busy()) instead of using headers.
 fn apply_cache_policy_headers(
     http: &mut HttpHeaders,
     match_result: &RouteMatchResult,
     query_string: &Option<String>,
-) -> (bool, bool) {
+) -> bool {
     let cache_policy = match match_result.cache_policy {
         Some(cp) => cp,
         None => {
-            // No cache policy → pass-through mode (no caching, no coalescing)
-            return (true, true);
+            // No cache policy → pass-through mode (no caching)
+            return true;
         }
     };
 
-    // Check bypass rules: if any bypass header condition matches, pass
-    if !cache_policy.bypass_headers.is_empty() {
-        for bypass in &cache_policy.bypass_headers {
-            let header_val = http.header(&bypass.name);
-            if let Some(val) = header_val {
-                let val_str = match val {
-                    StrOrBytes::Utf8(s) => s,
-                    StrOrBytes::Bytes(b) => match std::str::from_utf8(b) {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    },
-                };
-
-                let should_bypass = match &bypass.value_regex {
-                    Some(pattern) => {
-                        // Match regex against header value
-                        regex::Regex::new(pattern)
-                            .map(|re| re.is_match(val_str))
-                            .unwrap_or(false)
+    // Check bypass rules using pre-compiled regexes from config load
+    for bypass in match_result.bypass_headers {
+        match bypass {
+            BypassHeaderCompiled::Present { name } => {
+                if http.header(name).is_some() {
+                    return true;
+                }
+            }
+            BypassHeaderCompiled::Regex { name, regex } => {
+                if let Some(val) = http.header(name) {
+                    let val_str = match val {
+                        StrOrBytes::Utf8(s) => s,
+                        StrOrBytes::Bytes(b) => match std::str::from_utf8(b) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        },
+                    };
+                    if regex.is_match(val_str) {
+                        return true;
                     }
-                    None => true, // No regex = any value triggers bypass
-                };
-
-                if should_bypass {
-                    return (true, true);
                 }
             }
         }
@@ -642,8 +626,9 @@ fn apply_cache_policy_headers(
         }
     }
 
-    // Return: not pass, hash_ignore_busy = !coalescing
-    (false, !cache_policy.request_coalescing)
+    // Cache policy present → do not pass (enable caching)
+    // TODO: hash_ignore_busy = !request_coalescing when varnish-rs exposes the API
+    false
 }
 
 /// Filter query parameters based on include/exclude lists.
@@ -894,6 +879,7 @@ mod tests {
             priority: 100,
             rule_index: 0,
             cache_policy: None,
+            bypass_headers: Vec::new(),
         }];
 
         // This test doesn't use HttpHeaders, so we can't fully test it here
@@ -920,6 +906,7 @@ mod tests {
             priority: 100,
             rule_index: 0,
             cache_policy: None,
+            bypass_headers: Vec::new(),
         }];
 
         // Verify route structure
@@ -949,6 +936,7 @@ mod tests {
                 priority: 100,
                 rule_index: 0,
                 cache_policy: None,
+                bypass_headers: Vec::new(),
             }],
             backend_pool.clone(),
             None,
@@ -1038,6 +1026,7 @@ mod tests {
             matched_path: Some(&path_match),
             route_name: Some("default/my-route"),
             cache_policy: None,
+            bypass_headers: &[],
         };
 
         assert_eq!(result.backend_groups.len(), 1);

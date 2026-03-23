@@ -28,20 +28,16 @@ sub vcl_recv {
 
     # Cache invalidation: PURGE removes a single cached object by exact URL.
     # Chaperone sends: PURGE /path HTTP/1.1 \n Host: example.com
-    if (req.method == "PURGE") {
-        if (!client.ip ~ localhost) {
-            return (synth(405, "Not allowed."));
-        }
+    # Only handles localhost requests; non-localhost PURGE falls through to user VCL.
+    if (req.method == "PURGE" && client.ip ~ localhost) {
         return (purge);
     }
 
     # Cache invalidation: BAN invalidates objects matching a URL regex.
     # Chaperone sends: BAN /pattern.* HTTP/1.1 \n Host: example.com
     # Uses ban lurker friendly expressions (obj.http.*) for background cleanup.
-    if (req.method == "BAN") {
-        if (!client.ip ~ localhost) {
-            return (synth(403, "Not allowed."));
-        }
+    # Only handles localhost requests; non-localhost BAN falls through to user VCL.
+    if (req.method == "BAN" && client.ip ~ localhost) {
         if (std.ban("obj.http.x-cache-host == " + req.http.host +
                      " && obj.http.x-cache-url ~ " + req.url)) {
             return (synth(200, "Ban added"));
@@ -75,11 +71,11 @@ sub vcl_synth {
 }
 
 sub vcl_backend_fetch {
-    # Clean up internal cache policy headers before sending to backend
-    unset bereq.http.X-Ghost-Default-TTL;
-    unset bereq.http.X-Ghost-Forced-TTL;
-    unset bereq.http.X-Ghost-Grace;
-    unset bereq.http.X-Ghost-Keep;
+    # Clean up internal headers before sending to backend.
+    # Cache policy headers (X-Ghost-*-TTL, Grace, Keep) are kept on bereq
+    # because vcl_backend_response needs to read them. They are cleaned up
+    # at the end of vcl_backend_response instead.
+    unset bereq.http.X-Ghost-Pass;
 }
 
 sub vcl_backend_response {
@@ -117,6 +113,13 @@ sub vcl_backend_response {
     if (bereq.http.X-Ghost-Keep) {
         set beresp.keep = std.duration(bereq.http.X-Ghost-Keep, 0s);
     }
+
+    # Clean up internal cache policy headers so they don't leak to the backend
+    # on retries or show up in beresp. Must happen after the TTL logic above.
+    unset bereq.http.X-Ghost-Default-TTL;
+    unset bereq.http.X-Ghost-Forced-TTL;
+    unset bereq.http.X-Ghost-Grace;
+    unset bereq.http.X-Ghost-Keep;
 }
 
 sub vcl_deliver {

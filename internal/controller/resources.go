@@ -191,7 +191,7 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements) *appsv1.Deployment {
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -246,7 +246,7 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, varnishd
 						"kubernetes.io/arch": "amd64",
 					},
 					InitContainers: extraInitContainers,
-					Containers:     r.buildContainers(gateway, varnishdExtraArgs, logging, extraVolumeMounts, resources),
+					Containers:     r.buildContainers(gateway, effectiveImage, varnishdExtraArgs, logging, extraVolumeMounts, resources),
 					Volumes:        r.buildVolumes(gateway, extraVolumes),
 				},
 			},
@@ -293,14 +293,14 @@ func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, extra []cor
 }
 
 // buildContainers creates the pod containers: main gateway container and optional logging sidecar.
-func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) []corev1.Container {
+func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) []corev1.Container {
 	containers := []corev1.Container{
-		r.buildGatewayContainer(gateway, varnishdExtraArgs, extraVolumeMounts, resources),
+		r.buildGatewayContainer(gateway, effectiveImage, varnishdExtraArgs, extraVolumeMounts, resources),
 	}
 
 	// Add logging sidecar if configured
 	if logging != nil && logging.Mode != "" {
-		containers = append(containers, r.buildLoggingSidecar(gateway, logging))
+		containers = append(containers, r.buildLoggingSidecar(gateway, effectiveImage, logging))
 	}
 
 	return containers
@@ -308,7 +308,7 @@ func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, varnishd
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
 // This container runs chaperone which manages varnishd internally.
-func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, varnishdExtraArgs []string, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) corev1.Container {
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) corev1.Container {
 	hasTLS := hasHTTPSListener(gateway)
 
 	// Build VARNISH_LISTEN from all listeners, deduplicating by port.
@@ -455,7 +455,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, va
 
 	return corev1.Container{
 		Name:  "varnish-gateway",
-		Image: r.Config.GatewayImage,
+		Image: effectiveImage,
 		Env:   env,
 		SecurityContext: &corev1.SecurityContext{
 			Capabilities: &corev1.Capabilities{
@@ -556,9 +556,9 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway) *corev1.Ser
 // buildLoggingSidecar creates a sidecar container for varnish logging.
 // The sidecar runs varnishlog or varnishncsa, streaming logs to stdout
 // where they're captured by Kubernetes logging infrastructure.
-func (r *GatewayReconciler) buildLoggingSidecar(gateway *gatewayv1.Gateway, logging *gatewayparamsv1alpha1.VarnishLogging) corev1.Container {
+func (r *GatewayReconciler) buildLoggingSidecar(gateway *gatewayv1.Gateway, effectiveImage string, logging *gatewayparamsv1alpha1.VarnishLogging) corev1.Container {
 	// Use the same image as the gateway unless logging.Image is specified
-	image := r.Config.GatewayImage
+	image := effectiveImage
 	if logging.Image != "" {
 		image = logging.Image
 	}

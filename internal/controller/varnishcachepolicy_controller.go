@@ -38,11 +38,6 @@ func (r *VarnishCachePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	var vcp gatewayparamsv1alpha1.VarnishCachePolicy
 	if err := r.Get(ctx, req.NamespacedName, &vcp); err != nil {
 		if apierrors.IsNotFound(err) {
-			// VCP deleted - trigger HTTPRoute re-reconciliation for all gateways
-			if err := r.triggerAllHTTPRoutes(ctx); err != nil {
-				log.Error("failed to trigger HTTPRoute reconciliation after VCP deletion", "error", err)
-				return ctrl.Result{}, err
-			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
@@ -132,12 +127,6 @@ func (r *VarnishCachePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	r.setAccepted(&vcp, true, "Accepted", "Policy accepted")
 	if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
 		log.Error("failed to update VCP status", "error", statusErr)
-	}
-
-	// Trigger HTTPRoute re-reconciliation so routing.json gets updated
-	if err := r.triggerAffectedHTTPRoutes(ctx, &vcp); err != nil {
-		log.Error("failed to trigger HTTPRoute reconciliation", "error", err)
-		return ctrl.Result{}, err
 	}
 
 	log.Debug("VarnishCachePolicy reconciliation complete")
@@ -252,82 +241,10 @@ func (r *VarnishCachePolicyReconciler) setAccepted(vcp *gatewayparamsv1alpha1.Va
 		vcp.Status.Ancestors = make([]gatewayparamsv1alpha1.VarnishCachePolicyAncestorStatus, 1)
 	}
 	vcp.Status.Ancestors[0] = gatewayparamsv1alpha1.VarnishCachePolicyAncestorStatus{
+		AncestorRef:    vcp.Spec.TargetRef,
 		ControllerName: ControllerName,
 		Conditions:     []metav1.Condition{condition},
 	}
-}
-
-// triggerAffectedHTTPRoutes triggers re-reconciliation of HTTPRoutes affected by this VCP.
-func (r *VarnishCachePolicyReconciler) triggerAffectedHTTPRoutes(ctx context.Context, vcp *gatewayparamsv1alpha1.VarnishCachePolicy) error {
-	targetKind := string(vcp.Spec.TargetRef.Kind)
-	targetName := string(vcp.Spec.TargetRef.Name)
-
-	switch targetKind {
-	case "HTTPRoute":
-		// Touch the HTTPRoute to trigger reconciliation by annotating it
-		var route gatewayv1.HTTPRoute
-		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: vcp.Namespace}, &route); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}
-		// Annotate to force reconciliation
-		if route.Annotations == nil {
-			route.Annotations = make(map[string]string)
-		}
-		route.Annotations["varnish.io/cache-policy-generation"] = fmt.Sprintf("%d", vcp.Generation)
-		return r.Update(ctx, &route)
-
-	case "Gateway":
-		// For Gateway-level VCP, trigger all HTTPRoutes attached to the gateway
-		var gw gatewayv1.Gateway
-		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: vcp.Namespace}, &gw); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}
-		routes, err := listAcceptedRoutesForGateway(ctx, r.Client, &gw)
-		if err != nil {
-			return err
-		}
-		for i := range routes {
-			if routes[i].Annotations == nil {
-				routes[i].Annotations = make(map[string]string)
-			}
-			routes[i].Annotations["varnish.io/cache-policy-generation"] = fmt.Sprintf("%d", vcp.Generation)
-			if err := r.Update(ctx, &routes[i]); err != nil {
-				r.Logger.Error("failed to annotate HTTPRoute for VCP change",
-					"httproute", routes[i].Name, "error", err)
-			}
-		}
-		return nil
-	}
-
-	return nil
-}
-
-// triggerAllHTTPRoutes triggers re-reconciliation of all HTTPRoutes.
-// Used when a VCP is deleted and we don't know which routes were affected.
-func (r *VarnishCachePolicyReconciler) triggerAllHTTPRoutes(ctx context.Context) error {
-	var routeList gatewayv1.HTTPRouteList
-	if err := r.List(ctx, &routeList); err != nil {
-		return fmt.Errorf("List(HTTPRouteList): %w", err)
-	}
-
-	for i := range routeList.Items {
-		if routeList.Items[i].Annotations == nil {
-			routeList.Items[i].Annotations = make(map[string]string)
-		}
-		routeList.Items[i].Annotations["varnish.io/cache-policy-generation"] = fmt.Sprintf("%d", time.Now().UnixNano())
-		if err := r.Update(ctx, &routeList.Items[i]); err != nil {
-			r.Logger.Debug("failed to annotate HTTPRoute after VCP deletion",
-				"httproute", routeList.Items[i].Name, "error", err)
-		}
-	}
-
-	return nil
 }
 
 // findVCPsForHTTPRoute returns reconcile requests for all VCPs targeting this HTTPRoute.
@@ -477,8 +394,8 @@ func isVCPAccepted(vcp *gatewayparamsv1alpha1.VarnishCachePolicy) bool {
 			}
 		}
 	}
-	// If no status yet, consider it potentially applicable (first reconcile may not have run)
-	return len(vcp.Status.Ancestors) == 0
+	// No accepted condition found — treat as not accepted (safe default)
+	return false
 }
 
 // isOlder returns true if a is older than b (for conflict resolution).

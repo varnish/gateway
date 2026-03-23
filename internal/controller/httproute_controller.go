@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/status"
 	"github.com/varnish/gateway/internal/vcl"
@@ -1056,6 +1057,50 @@ func routeReferencesService(route *gatewayv1.HTTPRoute, serviceName, serviceName
 	return false
 }
 
+// findHTTPRoutesForVCP returns reconcile requests for HTTPRoutes affected by a VCP change.
+func (r *HTTPRouteReconciler) findHTTPRoutesForVCP(ctx context.Context, obj client.Object) []reconcile.Request {
+	vcp, ok := obj.(*gatewayparamsv1alpha1.VarnishCachePolicy)
+	if !ok {
+		return nil
+	}
+
+	targetKind := string(vcp.Spec.TargetRef.Kind)
+	targetName := string(vcp.Spec.TargetRef.Name)
+
+	switch targetKind {
+	case "HTTPRoute":
+		return []reconcile.Request{{
+			NamespacedName: types.NamespacedName{
+				Name:      targetName,
+				Namespace: vcp.Namespace,
+			},
+		}}
+
+	case "Gateway":
+		var gw gatewayv1.Gateway
+		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: vcp.Namespace}, &gw); err != nil {
+			return nil
+		}
+		routes, err := listAcceptedRoutesForGateway(ctx, r.Client, &gw)
+		if err != nil {
+			r.Logger.Error("failed to list routes for gateway VCP", "error", err)
+			return nil
+		}
+		var requests []reconcile.Request
+		for _, route := range routes {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      route.Name,
+					Namespace: route.Namespace,
+				},
+			})
+		}
+		return requests
+	}
+
+	return nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -1070,6 +1115,10 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Service{},
 			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForService),
+		).
+		Watches(
+			&gatewayparamsv1alpha1.VarnishCachePolicy{},
+			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForVCP),
 		).
 		Complete(r)
 }

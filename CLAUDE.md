@@ -13,7 +13,7 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 
 ## Current Status
 
-The project passes the Gateway API conformance test suite (`make test-conformance`). See TODO.md for remaining work.
+The project passes the Gateway API conformance test suite (`make test-conformance`). Remaining work is tracked in GitHub issues.
 
 ### Component Overview
 
@@ -293,9 +293,6 @@ Ghost should use the Varnish C API directly whenever possible instead of setting
 request headers for VCL to interpret. Headers are a last resort for values that must cross
 VCL subroutine boundaries (e.g., `vcl_recv` → `vcl_backend_response`).
 
-**Use C API directly** (ghost has `ctx` access in `vcl_recv`):
-- `ctx.set_hash_ignore_busy()` — disable request coalescing
-
 **Use header + postamble for VCL flow control:**
 - `X-Ghost-Pass` header — signals pass mode; the postamble `vcl_recv` (appended after
   user VCL) checks this header and calls `return(pass)`. This ensures user VCL runs
@@ -308,9 +305,9 @@ reach `vcl_backend_response` via `bereq`):
 - `X-Ghost-Grace` / `X-Ghost-Keep` — stale serving parameters
 - `X-Ghost-Cache-Key-Extra` — additional hash data
 
-**Default cache behavior**: Without a VarnishCachePolicy, ghost sets `pass` and
-`hash_ignore_busy = true` on all routes — behaving as a plain reverse proxy with no
-caching, consistent with Gateway API expectations.
+**Default cache behavior**: Without a VarnishCachePolicy, ghost sets `pass` on all
+routes — behaving as a plain reverse proxy with no caching, consistent with Gateway API
+expectations.
 
 ## Key Dependencies
 
