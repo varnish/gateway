@@ -54,9 +54,14 @@ func main() {
 	ctrl.SetLogger(logrLogger)
 	klog.SetLogger(logrLogger)
 
+	// Warn if deprecated GATEWAY_CLASS_NAME is still set
+	if gcn := os.Getenv("GATEWAY_CLASS_NAME"); gcn != "" {
+		logger.Warn("GATEWAY_CLASS_NAME is deprecated and ignored; the operator now manages all GatewayClasses with controllerName "+controller.ControllerName,
+			"GATEWAY_CLASS_NAME", gcn)
+	}
+
 	// Load config from environment
 	cfg := controller.Config{
-		GatewayClassName: getEnvOrDefault("GATEWAY_CLASS_NAME", "varnish"),
 		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/varnish-gateway:latest"),
 		ImagePullSecrets: getEnvOrDefault("IMAGE_PULL_SECRETS", ""),
 	}
@@ -140,7 +145,7 @@ func main() {
 
 	logger.Info("starting operator",
 		"version", strings.TrimSpace(version),
-		"gatewayClassName", cfg.GatewayClassName,
+		"controllerName", controller.ControllerName,
 		"gatewayImage", cfg.GatewayImage)
 
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

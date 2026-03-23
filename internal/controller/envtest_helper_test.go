@@ -101,8 +101,7 @@ func NewEnvtestGatewayReconciler(env *EnvtestEnvironment) *GatewayReconciler {
 		Client: env.Client,
 		Scheme: env.Scheme,
 		Config: Config{
-			GatewayClassName: "varnish",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 		Logger: slog.Default(),
 	}
@@ -113,9 +112,7 @@ func NewEnvtestHTTPRouteReconciler(env *EnvtestEnvironment) *HTTPRouteReconciler
 	return &HTTPRouteReconciler{
 		Client: env.Client,
 		Scheme: env.Scheme,
-		Config: Config{
-			GatewayClassName: "varnish",
-		},
+		Config: Config{},
 		Logger: slog.Default(),
 	}
 }

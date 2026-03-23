@@ -43,10 +43,32 @@ func must(err error) {
 	}
 }
 
+// newTestGatewayClass creates a GatewayClass with our ControllerName for testing.
+func newTestGatewayClass(name string) *gatewayv1.GatewayClass {
+	return &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+		},
+	}
+}
+
 func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayReconciler {
+	// Ensure a default GatewayClass exists for tests (skip if caller already provides one named "varnish")
+	hasVarnishGC := false
+	for _, obj := range objs {
+		if gc, ok := obj.(*gatewayv1.GatewayClass); ok && gc.Name == "varnish" {
+			hasVarnishGC = true
+			break
+		}
+	}
+	allObjs := objs
+	if !hasVarnishGC {
+		allObjs = append([]runtime.Object{newTestGatewayClass("varnish")}, objs...)
+	}
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithRuntimeObjects(objs...).
+		WithRuntimeObjects(allObjs...).
 		WithStatusSubresource(&gatewayv1.Gateway{}).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}).
 		Build()
@@ -55,8 +77,7 @@ func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayR
 		Client: fakeClient,
 		Scheme: scheme,
 		Config: Config{
-			GatewayClassName: "varnish",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 		Logger: slog.Default(),
 	}
@@ -99,7 +120,7 @@ k8H3ULWF
 
 func TestBuildLabels(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 
 	gateway := &gatewayv1.Gateway{
@@ -125,8 +146,7 @@ func TestBuildLabels(t *testing.T) {
 func TestBuildDeployment(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
-			GatewayClassName: "varnish",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 	}
 
@@ -186,8 +206,7 @@ func TestBuildDeployment(t *testing.T) {
 func TestBuildDeployment_WithExtras(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
-			GatewayClassName: "varnish",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 	}
 
@@ -252,7 +271,7 @@ func TestBuildDeployment_WithExtras(t *testing.T) {
 
 func TestBuildService(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 
 	tests := []struct {
@@ -330,7 +349,7 @@ func TestBuildService(t *testing.T) {
 
 func TestBuildVCLConfigMap(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 
 	gateway := &gatewayv1.Gateway{
@@ -362,7 +381,7 @@ func TestBuildVCLConfigMap(t *testing.T) {
 
 func TestBuildAdminSecret(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 
 	gateway := &gatewayv1.Gateway{
@@ -389,7 +408,7 @@ func TestBuildAdminSecret(t *testing.T) {
 
 func TestBuildServiceAccount(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 
 	gateway := &gatewayv1.Gateway{
@@ -595,7 +614,7 @@ func TestValidateListenerTLSRefs_SameNamespace(t *testing.T) {
 
 func TestGatewayReferencesSecret_CrossNamespace(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 
 	certNS := gatewayv1.Namespace("cert-ns")
@@ -699,7 +718,7 @@ func TestReconcile_NotFoundReturnsNoError(t *testing.T) {
 
 func TestBuildTLSSecret(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-gw", Namespace: "default"},
@@ -778,7 +797,7 @@ func TestTLSBundleSecretCreatedWithMissingCerts(t *testing.T) {
 	}
 
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 
 	// collectTLSCertData would return empty since the secret doesn't exist.
@@ -814,7 +833,7 @@ func TestTLSBundleSecretCreatedWithMissingCerts(t *testing.T) {
 
 func TestBuildClusterRoleBinding(t *testing.T) {
 	r := &GatewayReconciler{
-		Config: Config{GatewayClassName: "varnish"},
+		Config: Config{},
 	}
 	gateway := &gatewayv1.Gateway{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-gw", Namespace: "prod"},
@@ -903,8 +922,7 @@ func TestBuildLoggingSidecar(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &GatewayReconciler{
 				Config: Config{
-					GatewayClassName: "varnish",
-					GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+					GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 				},
 			}
 
@@ -1035,8 +1053,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &GatewayReconciler{
 				Config: Config{
-					GatewayClassName: "varnish",
-					GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+					GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 				},
 			}
 
@@ -1158,7 +1175,7 @@ func TestBuildVolumes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &GatewayReconciler{Config: Config{GatewayClassName: "varnish"}}
+			r := &GatewayReconciler{Config: Config{}}
 			volumes := r.buildVolumes(tc.gateway, tc.extra)
 			if len(volumes) != tc.expect {
 				t.Errorf("expected %d volumes, got %d", tc.expect, len(volumes))
@@ -1184,8 +1201,7 @@ func TestBuildVolumes(t *testing.T) {
 func TestBuildContainers(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
-			GatewayClassName: "varnish",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 	}
 	gateway := &gatewayv1.Gateway{

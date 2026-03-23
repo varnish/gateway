@@ -33,8 +33,6 @@ spec:
             - --leader-elect=false
             {{- end }}
           env:
-            - name: GATEWAY_CLASS_NAME
-              value: {{ .Values.gatewayClass.name | quote }}
             - name: GATEWAY_IMAGE
               value: {{ include "varnish-gateway.chaperoneImage" . | quote }}
             {{- if .Values.chaperone.imagePullSecrets }}

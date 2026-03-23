@@ -17,9 +17,21 @@ import (
 )
 
 func newHTTPRouteTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *HTTPRouteReconciler {
+	// Ensure a default GatewayClass exists for tests (skip if caller already provides one named "varnish")
+	hasVarnishGC := false
+	for _, obj := range objs {
+		if gc, ok := obj.(*gatewayv1.GatewayClass); ok && gc.Name == "varnish" {
+			hasVarnishGC = true
+			break
+		}
+	}
+	allObjs := objs
+	if !hasVarnishGC {
+		allObjs = append([]runtime.Object{newTestGatewayClass("varnish")}, objs...)
+	}
 	fakeClient := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithRuntimeObjects(objs...).
+		WithRuntimeObjects(allObjs...).
 		WithStatusSubresource(&gatewayv1.HTTPRoute{}, &gatewayv1.Gateway{}).
 		Build()
 
@@ -27,8 +39,7 @@ func newHTTPRouteTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) 
 		Client: fakeClient,
 		Scheme: scheme,
 		Config: Config{
-			GatewayClassName: "varnish",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 		Logger: slog.Default(),
 	}

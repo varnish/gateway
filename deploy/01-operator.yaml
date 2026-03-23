@@ -134,8 +134,6 @@ spec:
           args:
             - --leader-elect=true
           env:
-            - name: GATEWAY_CLASS_NAME
-              value: "varnish"
             - name: GATEWAY_IMAGE
               value: "ghcr.io/varnish/gateway-chaperone:v0.10.0"
           ports:

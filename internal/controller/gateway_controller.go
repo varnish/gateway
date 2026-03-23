@@ -51,9 +51,18 @@ const (
 
 // Config holds controller configuration from environment.
 type Config struct {
-	GatewayClassName string // Which GatewayClass this operator manages
 	GatewayImage     string // Combined varnish+ghost+chaperone image
 	ImagePullSecrets string // Comma-separated list of image pull secret names
+}
+
+// isOurGatewayClass checks whether the named GatewayClass has our controllerName.
+// Returns true if the GatewayClass exists and its spec.controllerName == ControllerName.
+func isOurGatewayClass(ctx context.Context, c client.Reader, className string) bool {
+	var gc gatewayv1.GatewayClass
+	if err := c.Get(ctx, types.NamespacedName{Name: className}, &gc); err != nil {
+		return false
+	}
+	return string(gc.Spec.ControllerName) == ControllerName
 }
 
 // GatewayReconciler reconciles Gateway objects.
@@ -78,11 +87,10 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
 	}
-	// 2. Check if this Gateway uses our GatewayClass
-	if string(gateway.Spec.GatewayClassName) != r.Config.GatewayClassName {
-		log.Debug("gateway uses different GatewayClass, skipping",
-			"gatewayClass", gateway.Spec.GatewayClassName,
-			"expected", r.Config.GatewayClassName)
+	// 2. Check if this Gateway uses a GatewayClass managed by our controller
+	if !isOurGatewayClass(ctx, r.Client, string(gateway.Spec.GatewayClassName)) {
+		log.Debug("gateway uses GatewayClass not managed by us, skipping",
+			"gatewayClass", gateway.Spec.GatewayClassName)
 		return ctrl.Result{}, nil
 	}
 
@@ -819,43 +827,11 @@ func (r *GatewayReconciler) getGatewayClassParameters(ctx context.Context, gatew
 // getUserVCL returns user-provided VCL from GatewayClassParameters.
 // It traverses: Gateway -> GatewayClass -> GatewayClassParameters -> ConfigMap
 func (r *GatewayReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
-	// 1. Get GatewayClass
-	var gatewayClass gatewayv1.GatewayClass
-	if err := r.Get(ctx, types.NamespacedName{Name: string(gateway.Spec.GatewayClassName)}, &gatewayClass); err != nil {
-		if !apierrors.IsNotFound(err) {
-			r.Logger.Error("failed to get GatewayClass", "error", err)
-		}
+	params := r.getGatewayClassParameters(ctx, gateway)
+	if params == nil || params.Spec.UserVCLConfigMapRef == nil {
 		return ""
 	}
 
-	// 2. Check if ParametersRef is set
-	if gatewayClass.Spec.ParametersRef == nil {
-		return ""
-	}
-
-	// 3. Validate ParametersRef points to our CRD
-	ref := gatewayClass.Spec.ParametersRef
-	if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
-		string(ref.Kind) != "GatewayClassParameters" {
-		return "" // Not our parameters type
-	}
-
-	// 4. Fetch GatewayClassParameters
-	var params gatewayparamsv1alpha1.GatewayClassParameters
-	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, &params); err != nil {
-		if !apierrors.IsNotFound(err) {
-			r.Logger.Error("failed to get GatewayClassParameters",
-				"name", ref.Name, "error", err)
-		}
-		return ""
-	}
-
-	// 5. If UserVCLConfigMapRef is not set, return empty
-	if params.Spec.UserVCLConfigMapRef == nil {
-		return ""
-	}
-
-	// 6. Fetch the ConfigMap containing user VCL
 	cmRef := params.Spec.UserVCLConfigMapRef
 	var cm corev1.ConfigMap
 	if err := r.Get(ctx, types.NamespacedName{
@@ -1203,7 +1179,7 @@ func (r *GatewayReconciler) enqueueGatewaysForTLSSecret() handler.EventHandler {
 
 		var requests []ctrl.Request
 		for _, gw := range gateways.Items {
-			if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+			if !isOurGatewayClass(ctx, r.Client, string(gw.Spec.GatewayClassName)) {
 				continue
 			}
 			if r.gatewayReferencesSecret(&gw, secret.Name, secret.Namespace) {
@@ -1293,7 +1269,7 @@ func (r *GatewayReconciler) enqueueGatewaysForReferenceGrant() handler.EventHand
 				continue
 			}
 			for _, gw := range gateways.Items {
-				if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+				if !isOurGatewayClass(ctx, r.Client, string(gw.Spec.GatewayClassName)) {
 					continue
 				}
 				if gatewayHasCrossNSCertRefTo(&gw, grant.Namespace) {
@@ -1377,7 +1353,7 @@ func (r *GatewayReconciler) enqueueGatewaysForHTTPRoute() handler.EventHandler {
 			if err := r.Get(ctx, nn, &gw); err != nil {
 				continue
 			}
-			if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+			if !isOurGatewayClass(ctx, r.Client, string(gw.Spec.GatewayClassName)) {
 				continue
 			}
 

@@ -134,11 +134,10 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 		return fmt.Errorf("r.getParentGateway: %w", err)
 	}
 
-	// Check if Gateway uses our GatewayClass
-	if string(gateway.Spec.GatewayClassName) != r.Config.GatewayClassName {
-		log.Debug("Gateway uses different GatewayClass, skipping",
-			"gatewayClass", gateway.Spec.GatewayClassName,
-			"expected", r.Config.GatewayClassName)
+	// Check if Gateway uses a GatewayClass managed by our controller
+	if !isOurGatewayClass(ctx, r.Client, string(gateway.Spec.GatewayClassName)) {
+		log.Debug("Gateway uses GatewayClass not managed by us, skipping",
+			"gatewayClass", gateway.Spec.GatewayClassName)
 		// Don't set status for Gateways managed by other controllers
 		return nil
 	}
@@ -719,7 +718,7 @@ func (r *HTTPRouteReconciler) regenerateAllGateways(ctx context.Context) error {
 
 	for i := range gatewayList.Items {
 		gw := &gatewayList.Items[i]
-		if string(gw.Spec.GatewayClassName) != r.Config.GatewayClassName {
+		if !isOurGatewayClass(ctx, r.Client, string(gw.Spec.GatewayClassName)) {
 			continue
 		}
 		routes, err := r.listRoutesForGateway(ctx, gw)
@@ -961,8 +960,8 @@ func (r *HTTPRouteReconciler) findHTTPRoutesForGateway(ctx context.Context, obj 
 		return nil
 	}
 
-	// Skip Gateways that don't use our GatewayClass
-	if string(gateway.Spec.GatewayClassName) != r.Config.GatewayClassName {
+	// Skip Gateways not managed by our controller
+	if !isOurGatewayClass(ctx, r.Client, string(gateway.Spec.GatewayClassName)) {
 		return nil
 	}
 

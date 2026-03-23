@@ -287,8 +287,7 @@ func TestHTTPRouteReconcile_DeletionUpdatesRoutingJSON_Envtest(t *testing.T) {
 		Client: testEnv.Client,
 		Scheme: testEnv.Scheme,
 		Config: Config{
-			GatewayClassName: "varnish-del-test",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 		Logger: slog.Default(),
 	}
@@ -379,7 +378,7 @@ func TestHTTPRouteReconcile_DeletionUpdatesRoutingJSON_Envtest(t *testing.T) {
 	httpReconciler := &HTTPRouteReconciler{
 		Client: testEnv.Client,
 		Scheme: testEnv.Scheme,
-		Config: Config{GatewayClassName: "varnish-del-test"},
+		Config: Config{},
 		Logger: slog.Default(),
 	}
 

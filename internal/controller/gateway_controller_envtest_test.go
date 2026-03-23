@@ -53,7 +53,7 @@ func TestReconcile_CreatesResources_Envtest(t *testing.T) {
 			Name: "varnish",
 		},
 		Spec: gatewayv1.GatewayClassSpec{
-			ControllerName: "varnish.io/gateway-controller",
+			ControllerName: gatewayv1.GatewayController(ControllerName),
 		},
 	}
 	if err := testEnv.Client.Create(ctx, gatewayClass); err != nil {
@@ -218,7 +218,7 @@ func TestHTTPSListener_MissingSecret_ProgrammedFalse(t *testing.T) {
 			Name: "varnish-tls-test",
 		},
 		Spec: gatewayv1.GatewayClassSpec{
-			ControllerName: "varnish.io/gateway-controller",
+			ControllerName: gatewayv1.GatewayController(ControllerName),
 		},
 	}
 	if err := testEnv.Client.Create(ctx, gatewayClass); err != nil {
@@ -259,13 +259,12 @@ func TestHTTPSListener_MissingSecret_ProgrammedFalse(t *testing.T) {
 		_ = testEnv.Client.Delete(ctx, gateway)
 	}()
 
-	// Create reconciler using the test GatewayClass name
+	// Create reconciler
 	r := &GatewayReconciler{
 		Client: testEnv.Client,
 		Scheme: testEnv.Scheme,
 		Config: Config{
-			GatewayClassName: "varnish-tls-test",
-			GatewayImage:     "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
 		},
 		Logger: slog.Default(),
 	}
