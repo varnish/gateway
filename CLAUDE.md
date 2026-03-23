@@ -444,9 +444,11 @@ spec behavior (consistent with Envoy Gateway).
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `GATEWAY_CLASS_NAME` | `varnish` | Which GatewayClass this operator manages |
 | `GATEWAY_IMAGE` | `ghcr.io/varnish/varnish-gateway:latest` | Combined varnish+ghost+chaperone image |
 | `IMAGE_PULL_SECRETS` | `` | Comma-separated list of image pull secret names for chaperone pods |
+
+The operator manages all GatewayClasses with `controllerName: varnish-software.com/gateway`.
+Multiple GatewayClasses can coexist, each with different GatewayClassParameters (different VCL, varnishd args, etc.).
 
 ## Deployment
 
@@ -551,7 +553,6 @@ make build-go
 make docker
 
 # Run operator locally (uses ~/.kube/config)
-GATEWAY_CLASS_NAME=varnish \
 GATEWAY_IMAGE=varnish-gateway:local \
 ./dist/operator
 
