@@ -28,10 +28,27 @@
 //! higher stack requirements. Production deployments should always use this setting.
 
 use parking_lot::RwLock;
+use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use varnish::ffi::{vrt_ctx, VCL_STRING};
 use varnish::vcl::{Ctx, Director, StrOrBytes, VclError};
+
+// VRT_r_local_socket is declared in vrt_obj.h but not included in varnish-rs bindings.
+// It returns the name of the Varnish listener socket (e.g., "http-80") for the current request.
+unsafe extern "C" {
+    fn VRT_r_local_socket(ctx: *const vrt_ctx) -> VCL_STRING;
+}
+
+/// Get the local socket name from the Varnish context.
+/// Returns `None` in backend context where the session isn't available.
+fn local_socket<'a>(ctx: &'a Ctx<'a>) -> Option<&'a str> {
+    let raw = unsafe { VRT_r_local_socket(ctx.raw) };
+    let cstr = <Option<&CStr>>::from(raw)?;
+    let s = cstr.to_str().ok()?;
+    if s.is_empty() { None } else { Some(s) }
+}
 
 mod backend_pool;
 mod config;
@@ -319,7 +336,7 @@ mod ghost {
         pub unsafe fn recv(&self, ctx: &mut Ctx) -> VCL_BACKEND {
             // Copy listener to owned String to avoid borrow conflict:
             // local_socket() borrows ctx immutably, http_req.as_mut() needs mutable.
-            let listener_owned = ctx.local_socket().map(|s| s.to_string());
+            let listener_owned = local_socket(ctx).map(|s| s.to_string());
             let fallback = self.director.as_ref().vcl_ptr();
 
             let req = match ctx.http_req.as_mut() {
