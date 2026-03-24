@@ -3,7 +3,7 @@ CHART_VERSION := $(shell cat .version | sed 's/^v//')
 REGISTRY ?= ghcr.io/varnish
 OPERATOR_IMAGE := $(REGISTRY)/gateway-operator
 CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
-VARNISH_IMAGE := $(REGISTRY)/varnish-ghost
+
 
 .PHONY: help test build build-linux docker clean vendor act
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
@@ -33,7 +33,7 @@ help:
 	@echo "  make docker           Build all Docker images for current arch"
 	@echo "  make docker-operator  Build operator image"
 	@echo "  make docker-chaperone Build chaperone image"
-	@echo "  make docker-varnish   Build Varnish+Ghost image"
+
 	@echo ""
 	@echo "CI/Testing:"
 	@echo "  make act              Run CI workflow locally with act (requires act tool)"
@@ -151,7 +151,7 @@ test-ghost:
 # Docker images
 # ============================================================================
 
-docker: docker-operator docker-chaperone docker-varnish
+docker: docker-operator docker-chaperone
 
 docker-operator:
 	docker build -t $(OPERATOR_IMAGE):$(VERSION) -f docker/operator.Dockerfile .
@@ -160,10 +160,6 @@ docker-operator:
 docker-chaperone:
 	docker build -t $(CHAPERONE_IMAGE):$(VERSION) -f docker/chaperone.Dockerfile .
 	docker tag $(CHAPERONE_IMAGE):$(VERSION) $(CHAPERONE_IMAGE):latest
-
-docker-varnish:
-	docker build -t $(VARNISH_IMAGE):$(VERSION) -f docker/varnish.Dockerfile .
-	docker tag $(VARNISH_IMAGE):$(VERSION) $(VARNISH_IMAGE):latest
 
 # ============================================================================
 # CI/Testing

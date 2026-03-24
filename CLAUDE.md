@@ -576,7 +576,6 @@ Images are pushed to GitHub Container Registry (public):
 ```
 ghcr.io/varnish/gateway-operator
 ghcr.io/varnish/gateway-chaperone
-ghcr.io/varnish/varnish-ghost
 ```
 
 **Automated CI**: Tests run automatically via GitHub Actions on push to `main` and pull requests.
