@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -20,6 +21,7 @@ import (
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/controller"
+	"github.com/varnish/gateway/internal/k8sutil"
 )
 
 //go:embed .version
@@ -66,7 +68,15 @@ func main() {
 		ImagePullSecrets: getEnvOrDefault("IMAGE_PULL_SECRETS", ""),
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	// Wrap the Kubernetes client transport to warn on slow API server requests.
+	restCfg := ctrl.GetConfigOrDie()
+	k8sutil.WrapTransportForSlowRequests(restCfg, logger)
+
+	leaseDuration := 35 * time.Second
+	renewDeadline := 30 * time.Second
+	retryPeriod := 5 * time.Second
+
+	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: server.Options{
 			BindAddress: metricsAddr,
@@ -74,6 +84,9 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "varnish-gateway-operator",
+		LeaseDuration:          &leaseDuration,
+		RenewDeadline:          &renewDeadline,
+		RetryPeriod:            &retryPeriod,
 	})
 	if err != nil {
 		logger.Error("unable to create manager", "error", err)
@@ -160,3 +173,4 @@ func getEnvOrDefault(key, defaultVal string) string {
 	}
 	return defaultVal
 }
+

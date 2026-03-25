@@ -18,6 +18,7 @@ import (
 	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/invalidation"
+	"github.com/varnish/gateway/internal/k8sutil"
 	vtls "github.com/varnish/gateway/internal/tls"
 	"github.com/varnish/gateway/internal/varnishadm"
 	"github.com/varnish/gateway/internal/vcl"
@@ -181,6 +182,8 @@ func run() error {
 			return fmt.Errorf("clientcmd.ClientConfig: %w", err)
 		}
 	}
+
+	k8sutil.WrapTransportForSlowRequests(k8sConfig, slog.Default())
 
 	k8sClient, err := kubernetes.NewForConfig(k8sConfig)
 	if err != nil {
