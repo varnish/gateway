@@ -549,22 +549,21 @@ func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) [
 		return nil
 	}
 
-	// Build map: listener name → socket name
-	listenerSockets := make(map[string]string)
+	// Build lookup maps from gateway listeners in a single pass
+	listenerSockets := make(map[string]string)    // listener name → socket name
+	allSockets := make(map[string]bool)            // all socket names (for "covers all" check)
+	portSockets := make(map[int32][]string)        // port → socket names
 	for i := range gateway.Spec.Listeners {
 		l := &gateway.Spec.Listeners[i]
-		listenerSockets[string(l.Name)] = socketNameForListener(l)
-	}
-
-	// Build set of all gateway socket names for "covers all listeners" check
-	allSockets := make(map[string]bool)
-	for _, s := range listenerSockets {
-		allSockets[s] = true
+		socket := socketNameForListener(l)
+		listenerSockets[string(l.Name)] = socket
+		allSockets[socket] = true
+		portSockets[int32(l.Port)] = append(portSockets[int32(l.Port)], socket)
 	}
 
 	// Collect socket names from parentRefs targeting this gateway
 	socketSet := make(map[string]bool)
-	hasSectionName := false
+	hasFilter := false
 	for _, parentRef := range route.Spec.ParentRefs {
 		// Skip non-Gateway refs
 		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
@@ -582,18 +581,24 @@ func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) [
 			continue
 		}
 
-		if parentRef.SectionName == nil {
-			// No sectionName = all listeners
+		if parentRef.SectionName != nil {
+			hasFilter = true
+			sn := string(*parentRef.SectionName)
+			if socket, ok := listenerSockets[sn]; ok {
+				socketSet[socket] = true
+			}
+		} else if parentRef.Port != nil {
+			hasFilter = true
+			for _, socket := range portSockets[int32(*parentRef.Port)] {
+				socketSet[socket] = true
+			}
+		} else {
+			// No sectionName and no port = all listeners
 			return nil
-		}
-		hasSectionName = true
-		sn := string(*parentRef.SectionName)
-		if socket, ok := listenerSockets[sn]; ok {
-			socketSet[socket] = true
 		}
 	}
 
-	if !hasSectionName {
+	if !hasFilter {
 		return nil
 	}
 

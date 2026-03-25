@@ -165,6 +165,28 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 		}
 	}
 
+	// Validate port references an actual listener
+	if parentRef.Port != nil {
+		found := false
+		for _, listener := range gateway.Spec.Listeners {
+			if listener.Port == gatewayv1.PortNumber(*parentRef.Port) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.Info("parentRef port does not match any listener",
+				"port", *parentRef.Port)
+			status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
+				string(gatewayv1.RouteReasonNoMatchingParent),
+				fmt.Sprintf("No listener with port %d on Gateway %s", *parentRef.Port, gateway.Name))
+			status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
+				string(gatewayv1.RouteReasonResolvedRefs),
+				"References resolved")
+			return nil
+		}
+	}
+
 	// Check if the route's namespace is allowed by the Gateway's listeners
 	allowed, reasonCode, reason := isRouteAllowedByGateway(ctx, r.Client, route, gateway)
 	if !allowed {
@@ -375,17 +397,21 @@ func listenerAllowsRouteNamespace(ctx context.Context, c client.Reader, route *g
 }
 
 // effectiveHostnames computes the set of effective hostnames for a route against
-// the gateway's listeners filtered by sectionName. This is the intersection of
+// the gateway's listeners filtered by sectionName and/or port. This is the intersection of
 // route hostnames with listener hostnames, producing the most specific hostname
 // from each match pair.
 // If sectionName is non-nil, only listeners matching that name are considered.
-func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, sectionName *gatewayv1.SectionName) []gatewayv1.Hostname {
+// If port is non-nil, only listeners matching that port are considered.
+func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, sectionName *gatewayv1.SectionName, port *gatewayv1.PortNumber) []gatewayv1.Hostname {
 	routeHostnames := route.Spec.Hostnames
 
-	// Collect listener hostnames, filtered by sectionName if specified
+	// Collect listener hostnames, filtered by sectionName and/or port if specified
 	var listenerHostnames []*gatewayv1.Hostname
 	for i := range gateway.Spec.Listeners {
 		if sectionName != nil && string(gateway.Spec.Listeners[i].Name) != string(*sectionName) {
+			continue
+		}
+		if port != nil && gateway.Spec.Listeners[i].Port != *port {
 			continue
 		}
 		listenerHostnames = append(listenerHostnames, gateway.Spec.Listeners[i].Hostname)
@@ -504,7 +530,7 @@ func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gatew
 				continue
 			}
 
-			effective := effectiveHostnames(&routes[i], gateway, parentRef.SectionName)
+			effective := effectiveHostnames(&routes[i], gateway, parentRef.SectionName, parentRef.Port)
 			if effective == nil {
 				// Catch-all from this parentRef
 				isCatchAll = true
@@ -812,6 +838,13 @@ func routeAttachesToListener(route *gatewayv1.HTTPRoute, listener gatewayv1.List
 		// Check sectionName: if specified, must match listener name
 		if parentRef.SectionName != nil {
 			if string(*parentRef.SectionName) != string(listener.Name) {
+				continue
+			}
+		}
+
+		// Check port: if specified, must match listener port
+		if parentRef.Port != nil {
+			if gatewayv1.PortNumber(*parentRef.Port) != listener.Port {
 				continue
 			}
 		}

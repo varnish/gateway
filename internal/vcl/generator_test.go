@@ -919,3 +919,112 @@ func TestCollectHTTPRouteBackends_PortMapPartialResolution(t *testing.T) {
 		t.Errorf("unmapped route port = %d, want 9090 (should keep service port)", unmappedRoute.Port)
 	}
 }
+
+func TestListenersForRoute_PortFilter(t *testing.T) {
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http-80", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "https-443", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+				{Name: "http-8080", Port: 8080, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		parentRefs []gatewayv1.ParentReference
+		want       []string // nil means all listeners
+	}{
+		{
+			name: "no sectionName no port = all listeners",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw"},
+			},
+			want: nil,
+		},
+		{
+			name: "sectionName only",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", SectionName: ptr(gatewayv1.SectionName("https-443"))},
+			},
+			want: []string{"https-443"},
+		},
+		{
+			name: "port only - single match",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(443))},
+			},
+			want: []string{"https-443"},
+		},
+		{
+			name: "port only - multiple listeners on same port not possible here, matches one",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(80))},
+			},
+			want: []string{"http-80"},
+		},
+		{
+			name: "port with multiple parentRefs",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(80))},
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(443))},
+			},
+			want: []string{"http-80", "https-443"},
+		},
+		{
+			name: "port covers all listeners = nil",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(80))},
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(443))},
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(8080))},
+			},
+			want: nil,
+		},
+		{
+			name: "mixed sectionName and port parentRefs",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", SectionName: ptr(gatewayv1.SectionName("http-80"))},
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(443))},
+			},
+			want: []string{"http-80", "https-443"},
+		},
+		{
+			name: "one parentRef with no filter returns all",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(443))},
+				{Name: "gw"}, // no filter = all
+			},
+			want: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			route := &gatewayv1.HTTPRoute{
+				ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "default"},
+				Spec: gatewayv1.HTTPRouteSpec{
+					CommonRouteSpec: gatewayv1.CommonRouteSpec{
+						ParentRefs: tc.parentRefs,
+					},
+				},
+			}
+			got := listenersForRoute(route, gateway)
+			if tc.want == nil {
+				if got != nil {
+					t.Errorf("want nil, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("want[%d] = %q, got %q", i, tc.want[i], got[i])
+				}
+			}
+		})
+	}
+}
