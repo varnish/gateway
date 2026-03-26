@@ -242,6 +242,12 @@ mod ghost {
         /// `req` headers and `local.socket` for listener-aware routing.
         /// Returns a concrete backend, not a director.
         /// Sets `X-Gateway-Listener` and `X-Gateway-Route` headers on the request.
+        ///
+        /// # Safety
+        ///
+        /// Must be called from VCL context with a valid `Ctx` that has an active
+        /// client request (`http_req`). The returned `VCL_BACKEND` pointer is only
+        /// valid for the lifetime of the current VCL transaction.
         pub unsafe fn recv(&self, ctx: &mut Ctx) -> VCL_BACKEND {
             // Copy listener to owned String to avoid borrow conflict:
             // local_socket() borrows ctx immutably, http_req.as_mut() needs mutable.
@@ -293,6 +299,11 @@ mod ghost {
         ///
         /// Returns the ghost director which resolves backends in backend
         /// context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
+        ///
+        /// # Safety
+        ///
+        /// Must be called from VCL context. The returned `VCL_BACKEND` pointer is
+        /// only valid for the lifetime of the current VCL transaction.
         pub unsafe fn backend(&self) -> VCL_BACKEND {
             self.director.as_ref().vcl_ptr()
         }

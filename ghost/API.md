@@ -68,12 +68,23 @@ Performs full routing (hostname -> vhost -> route -> backend) using
 Returns a concrete backend, not a director.
 Sets `X-Gateway-Listener` and `X-Gateway-Route` headers on the request.
 
+##### Safety
+
+Must be called from VCL context with a valid `Ctx` that has an active
+client request (`http_req`). The returned `VCL_BACKEND` pointer is only
+valid for the lifetime of the current VCL transaction.
+
 #### Method `BACKEND <object>.backend()`
 
 Get the VCL backend (director) for use in `vcl_backend_fetch`.
 
 Returns the ghost director which resolves backends in backend
 context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
+
+##### Safety
+
+Must be called from VCL context. The returned `VCL_BACKEND` pointer is
+only valid for the lifetime of the current VCL transaction.
 
 #### Method `BOOL <object>.reload()`
 
