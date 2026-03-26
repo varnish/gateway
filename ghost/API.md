@@ -12,33 +12,7 @@ Ghost VMOD - Gateway API routing for Varnish.
 
 Routes requests by hostname and path to weighted backends using Varnish native
 directors. Configuration is hot-reloaded from `ghost.json` without restarting Varnish.
-
-### Minimal VCL Example
-
-```vcl
-vcl 4.1;
-
-import ghost;
-
-backend dummy { .host = "127.0.0.1"; .port = "80"; }
-
-sub vcl_init {
-ghost.init("/etc/varnish/ghost.json");
-new router = ghost.ghost_backend();
-}
-
-sub vcl_recv {
-if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
-if (router.reload()) {
-return (synth(200, "OK"));
-} else {
-set req.http.X-Ghost-Error = router.last_error();
-return (synth(500, "Reload failed"));
-}
-}
-set req.backend_hint = router.recv();
-}
-```
+See `README.md` for VCL usage examples.
 
 ```vcl
 // Place import statement at the top of your VCL file
@@ -53,24 +27,8 @@ import ghost from "path/to/libghost.so";
 
 Initialize ghost with a configuration file path.
 
-This function must be called in `vcl_init` before creating any ghost backends.
-It loads and validates the JSON configuration file.
-
-#### Arguments
-
-* `path` - Absolute path to the ghost configuration JSON file
-
-#### Errors
-
-Returns an error if the configuration file cannot be read or contains invalid JSON.
-
-#### Example
-
-```vcl
-sub vcl_init {
-ghost.init("/etc/varnish/ghost.json");
-}
-```
+Must be called in `vcl_init` before creating any ghost backends.
+The config file is not loaded here — it will be loaded when `ghost_backend` is created.
 
 ### Function `STRING ghost.recv()`
 
@@ -87,25 +45,8 @@ Reads filter context from response headers (copied from bereq in vcl_backend_res
 
 Ghost backend object for request routing.
 
-The ghost backend routes requests to upstream servers based on the
-Host header and the loaded configuration. It performs weighted random
-selection when multiple backends are available for a virtual host.
-
-Uses the director pattern with Varnish native backends for optimal
-performance and connection pooling.
-
-#### Example
-
-```vcl
-sub vcl_init {
-ghost.init("/etc/varnish/ghost.json");
-new router = ghost.ghost_backend();
-}
-
-sub vcl_backend_fetch {
-set bereq.backend = router.backend();
-}
-```
+Routes requests to upstream servers based on the Host header and loaded
+configuration. Performs weighted random backend selection per-vhost.
 
 Create a new ghost backend instance.
 
@@ -122,23 +63,10 @@ Returns an error if `ghost.init()` has not been called first.
 
 Route the request in `vcl_recv` context.
 
-Performs full routing (hostname → vhost → route → backend) using
+Performs full routing (hostname -> vhost -> route -> backend) using
 `req` headers and `local.socket` for listener-aware routing.
 Returns a concrete backend, not a director.
-
-##### Example
-
-```vcl
-sub vcl_recv {
-set req.backend_hint = router.recv();
-}
-```
-
-##### Safety
-
-The returned `VCL_BACKEND` pointer is only valid for the lifetime of
-this director. Callers must ensure the director is not dropped while
-the backend pointer is in use.
+Sets `X-Gateway-Listener` and `X-Gateway-Route` headers on the request.
 
 #### Method `BACKEND <object>.backend()`
 
@@ -147,49 +75,13 @@ Get the VCL backend (director) for use in `vcl_backend_fetch`.
 Returns the ghost director which resolves backends in backend
 context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
 
-##### Example
-
-```vcl
-sub vcl_backend_fetch {
-set bereq.backend = router.backend();
-}
-```
-
-##### Safety
-
-The returned `VCL_BACKEND` pointer is only valid for the lifetime of
-this director. Callers must ensure the director is not dropped while
-the backend pointer is in use.
-
 #### Method `BOOL <object>.reload()`
 
-Reload the configuration for this ghost backend.
+Reload the configuration from disk.
 
-Reloads the ghost.json configuration file and updates routing state.
-New backends are created as needed, existing backends are preserved
-for connection pooling.
-
-Errors are logged to VSL (varnishlog) and can be retrieved via `last_error()`.
-
-##### Returns
-
-- `true` on success
-- `false` on failure (check `last_error()` for details)
-
-##### Example
-
-```vcl
-sub vcl_recv {
-if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
-if (router.reload()) {
-return (synth(200, "OK"));
-} else {
-set req.http.X-Ghost-Error = router.last_error();
-return (synth(500, "Reload failed"));
-}
-}
-}
-```
+Reads `ghost.json`, builds new routing state, and atomically swaps it in.
+Existing backends are preserved for connection reuse.
+Returns `true` on success, `false` on failure (see `last_error()`).
 
 #### Method `STRING <object>.last_error()`
 

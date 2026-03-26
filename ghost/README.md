@@ -58,6 +58,46 @@ Ghost reads a single `ghost.json` file that maps hostnames to routes with resolv
 
 The result is a flat config with real IP addresses that ghost can use directly to create Varnish backends.
 
+### VCL Usage
+
+Minimal VCL to use ghost:
+
+```vcl
+vcl 4.1;
+
+import ghost;
+
+backend dummy { .host = "127.0.0.1"; .port = "80"; }
+
+sub vcl_init {
+    ghost.init("/etc/varnish/ghost.json");
+    new router = ghost.ghost_backend();
+}
+
+sub vcl_recv {
+    if (req.url == "/.varnish-ghost/reload"
+        && (client.ip == "127.0.0.1" || client.ip == "::1")) {
+        if (router.reload()) {
+            return (synth(200, "OK"));
+        } else {
+            set req.http.X-Ghost-Error = router.last_error();
+            return (synth(500, "Reload failed"));
+        }
+    }
+    set req.backend_hint = router.recv();
+}
+
+sub vcl_deliver {
+    ghost.deliver();
+}
+```
+
+The `recv()` method sets two headers on every request for use in user VCL:
+- `X-Gateway-Listener` — Varnish socket name (e.g., `http-80`)
+- `X-Gateway-Route` — HTTPRoute namespace/name (e.g., `default/my-route`)
+
+For the full API reference, see [API.md](API.md).
+
 ### Stack Requirements
 
 Rust code (especially debug builds and regex operations) needs more stack than Varnish's default 80kB. Configure Varnish with:

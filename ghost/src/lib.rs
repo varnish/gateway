@@ -1,31 +1,8 @@
-//! Ghost VMOD - Gateway API routing for Varnish
+//! Ghost VMOD - Gateway API routing for Varnish.
 //!
-//! A purpose-built Varnish vmod for Kubernetes Gateway API implementation.
-//! Handles backend management, request routing, and configuration hot-reloading.
-//!
-//! ## Native Backend Architecture
-//!
-//! Ghost uses Varnish native backends with the director pattern for routing.
-//! This provides:
-//!
-//! - Battle-tested HTTP client and connection pooling from Varnish
-//! - Lower latency and memory usage vs async Rust HTTP
-//! - Simpler code with fewer dependencies
-//! - Better integration with Varnish ecosystem
-//!
-//! ## Stack Usage Requirements
-//!
-//! Rust code, especially in debug builds, requires more stack space than typical C code.
-//! Varnish's default thread pool stack size (80kB) is often insufficient for ghost.
-//!
-//! **Recommended configuration**: Increase Varnish's thread pool stack to 160kB:
-//!
-//! ```bash
-//! varnishd -p thread_pool_stack=160k ...
-//! ```
-//!
-//! This is particularly important when using regex-based routing rules, which have
-//! higher stack requirements. Production deployments should always use this setting.
+//! Routes requests by hostname and path to weighted backends using Varnish
+//! native directors. Configuration is hot-reloaded from `ghost.json` without
+//! restarting Varnish. See `README.md` for architecture details.
 
 use parking_lot::RwLock;
 use std::ffi::CStr;
@@ -47,7 +24,11 @@ fn local_socket<'a>(ctx: &'a Ctx<'a>) -> Option<&'a str> {
     let raw = unsafe { VRT_r_local_socket(ctx.raw) };
     let cstr = <Option<&CStr>>::from(raw)?;
     let s = cstr.to_str().ok()?;
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 mod backend_pool;
@@ -98,33 +79,7 @@ pub struct ghost_backend {
 ///
 /// Routes requests by hostname and path to weighted backends using Varnish native
 /// directors. Configuration is hot-reloaded from `ghost.json` without restarting Varnish.
-///
-/// ## Minimal VCL Example
-///
-/// ```vcl
-/// vcl 4.1;
-///
-/// import ghost;
-///
-/// backend dummy { .host = "127.0.0.1"; .port = "80"; }
-///
-/// sub vcl_init {
-///     ghost.init("/etc/varnish/ghost.json");
-///     new router = ghost.ghost_backend();
-/// }
-///
-/// sub vcl_recv {
-///     if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
-///         if (router.reload()) {
-///             return (synth(200, "OK"));
-///         } else {
-///             set req.http.X-Ghost-Error = router.last_error();
-///             return (synth(500, "Reload failed"));
-///         }
-///     }
-///     set req.backend_hint = router.recv();
-/// }
-/// ```
+/// See `README.md` for VCL usage examples.
 #[varnish::vmod(docs = "API.md")]
 mod ghost {
     use super::*;
@@ -132,24 +87,8 @@ mod ghost {
 
     /// Initialize ghost with a configuration file path.
     ///
-    /// This function must be called in `vcl_init` before creating any ghost backends.
-    /// It loads and validates the JSON configuration file.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Absolute path to the ghost configuration JSON file
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the configuration file cannot be read or contains invalid JSON.
-    ///
-    /// # Example
-    ///
-    /// ```vcl
-    /// sub vcl_init {
-    ///     ghost.init("/etc/varnish/ghost.json");
-    /// }
-    /// ```
+    /// Must be called in `vcl_init` before creating any ghost backends.
+    /// The config file is not loaded here — it will be loaded when `ghost_backend` is created.
     pub fn init(path: &str) -> Result<(), VclError> {
         let config_path = PathBuf::from(path);
 
@@ -236,25 +175,8 @@ mod ghost {
 
     /// Ghost backend object for request routing.
     ///
-    /// The ghost backend routes requests to upstream servers based on the
-    /// Host header and the loaded configuration. It performs weighted random
-    /// selection when multiple backends are available for a virtual host.
-    ///
-    /// Uses the director pattern with Varnish native backends for optimal
-    /// performance and connection pooling.
-    ///
-    /// # Example
-    ///
-    /// ```vcl
-    /// sub vcl_init {
-    ///     ghost.init("/etc/varnish/ghost.json");
-    ///     new router = ghost.ghost_backend();
-    /// }
-    ///
-    /// sub vcl_backend_fetch {
-    ///     set bereq.backend = router.backend();
-    /// }
-    /// ```
+    /// Routes requests to upstream servers based on the Host header and loaded
+    /// configuration. Performs weighted random backend selection per-vhost.
     impl ghost_backend {
         /// Create a new ghost backend instance.
         ///
@@ -316,23 +238,10 @@ mod ghost {
 
         /// Route the request in `vcl_recv` context.
         ///
-        /// Performs full routing (hostname → vhost → route → backend) using
+        /// Performs full routing (hostname -> vhost -> route -> backend) using
         /// `req` headers and `local.socket` for listener-aware routing.
         /// Returns a concrete backend, not a director.
-        ///
-        /// # Example
-        ///
-        /// ```vcl
-        /// sub vcl_recv {
-        ///     set req.backend_hint = router.recv();
-        /// }
-        /// ```
-        ///
-        /// # Safety
-        ///
-        /// The returned `VCL_BACKEND` pointer is only valid for the lifetime of
-        /// this director. Callers must ensure the director is not dropped while
-        /// the backend pointer is in use.
+        /// Sets `X-Gateway-Listener` and `X-Gateway-Route` headers on the request.
         pub unsafe fn recv(&self, ctx: &mut Ctx) -> VCL_BACKEND {
             // Copy listener to owned String to avoid borrow conflict:
             // local_socket() borrows ctx immutably, http_req.as_mut() needs mutable.
@@ -344,8 +253,9 @@ mod ghost {
                 None => return fallback,
             };
 
-            let result = self.ghost_director
-                    .route_request(req, listener_owned.as_deref());
+            let result = self
+                .ghost_director
+                .route_request(req, listener_owned.as_deref());
             for (tag, msg) in result.log_msgs {
                 ctx.log(tag, &msg);
             }
@@ -383,51 +293,15 @@ mod ghost {
         ///
         /// Returns the ghost director which resolves backends in backend
         /// context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
-        ///
-        /// # Example
-        ///
-        /// ```vcl
-        /// sub vcl_backend_fetch {
-        ///     set bereq.backend = router.backend();
-        /// }
-        /// ```
-        ///
-        /// # Safety
-        ///
-        /// The returned `VCL_BACKEND` pointer is only valid for the lifetime of
-        /// this director. Callers must ensure the director is not dropped while
-        /// the backend pointer is in use.
         pub unsafe fn backend(&self) -> VCL_BACKEND {
             self.director.as_ref().vcl_ptr()
         }
 
-        /// Reload the configuration for this ghost backend.
+        /// Reload the configuration from disk.
         ///
-        /// Reloads the ghost.json configuration file and updates routing state.
-        /// New backends are created as needed, existing backends are preserved
-        /// for connection pooling.
-        ///
-        /// Errors are logged to VSL (varnishlog) and can be retrieved via `last_error()`.
-        ///
-        /// # Returns
-        ///
-        /// - `true` on success
-        /// - `false` on failure (check `last_error()` for details)
-        ///
-        /// # Example
-        ///
-        /// ```vcl
-        /// sub vcl_recv {
-        ///     if (req.url == "/.varnish-ghost/reload" && (client.ip == "127.0.0.1" || client.ip == "::1")) {
-        ///         if (router.reload()) {
-        ///             return (synth(200, "OK"));
-        ///         } else {
-        ///             set req.http.X-Ghost-Error = router.last_error();
-        ///             return (synth(500, "Reload failed"));
-        ///         }
-        ///     }
-        /// }
-        /// ```
+        /// Reads `ghost.json`, builds new routing state, and atomically swaps it in.
+        /// Existing backends are preserved for connection reuse.
+        /// Returns `true` on success, `false` on failure (see `last_error()`).
         pub fn reload(&self, ctx: &mut Ctx) -> bool {
             self.ghost_director.reload(ctx).is_ok()
         }
