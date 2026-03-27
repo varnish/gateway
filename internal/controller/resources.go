@@ -242,9 +242,6 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiv
 					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
-					NodeSelector: map[string]string{
-						"kubernetes.io/arch": "amd64",
-					},
 					InitContainers: extraInitContainers,
 					Containers:     r.buildContainers(gateway, effectiveImage, varnishdExtraArgs, logging, extraVolumeMounts, resources),
 					Volumes:        r.buildVolumes(gateway, extraVolumes),

@@ -20,8 +20,10 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with .Values.operator.nodeSelector }}
       nodeSelector:
-        kubernetes.io/arch: amd64
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: operator
           image: {{ include "varnish-gateway.operatorImage" . }}
