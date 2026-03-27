@@ -1,4 +1,7 @@
 fn main() {
+    // Allow cfg(varnishsys_90_sslflags) set by varnish-sys build script
+    println!("cargo::rustc-check-cfg=cfg(varnishsys_90_sslflags)");
+
     // Compile stub implementations of libvarnishd symbols that are referenced
     // by varnish-rs Drop impls but not available in libvarnishapi. These stubs
     // are needed when linking test binaries. For the cdylib target (the actual

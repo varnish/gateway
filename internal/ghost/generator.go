@@ -116,6 +116,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 		filters     string // JSON serialization of Filters
 		listeners   string // sorted, comma-joined
 		cachePolicy string // JSON serialization of CachePolicy
+		backendTLS  string // TLS hostname (routes with different TLS must not merge)
 		priority    int
 		ruleIndex   int
 	}
@@ -130,6 +131,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			filters:     serializeFilters(route.Filters),
 			listeners:   serializeListeners(route.Listeners),
 			cachePolicy: serializeCachePolicy(route.CachePolicy),
+			backendTLS:  serializeBackendTLS(route.BackendTLS),
 			priority:    route.Priority,
 			ruleIndex:   route.RuleIndex,
 		}
@@ -226,6 +228,15 @@ func serializeCachePolicy(cp *CachePolicy) string {
 	return string(data)
 }
 
+// serializeBackendTLS converts BackendTLS to string for grouping.
+func serializeBackendTLS(tls *BackendTLS) string {
+	if tls == nil {
+		return ""
+	}
+	data, _ := json.Marshal(tls)
+	return string(data)
+}
+
 // serializeListeners converts listeners to string for grouping.
 func serializeListeners(listeners []string) string {
 	if len(listeners) == 0 {
@@ -295,5 +306,5 @@ func routeToBackendGroup(route Route, endpoints ServiceEndpoints) BackendGroup {
 			Port:    port,
 		})
 	}
-	return BackendGroup{Weight: route.Weight, Backends: backends}
+	return BackendGroup{Weight: route.Weight, Backends: backends, BackendTLS: route.BackendTLS}
 }

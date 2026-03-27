@@ -8,6 +8,7 @@ use std::ffi::CString;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use crate::config::BackendTLS;
 use varnish::vcl::{Ctx, NativeBackend, NativeBackendBuilder, VclError};
 
 /// Backend pool for a single director instance
@@ -37,13 +38,15 @@ impl BackendPool {
 
     /// Get or create a backend in the pool
     ///
-    /// Returns the backend key ("address:port"). If the backend already exists,
+    /// Returns the backend key. If the backend already exists,
     /// returns the existing one. Otherwise creates a new native backend and adds it to the pool.
+    /// TLS and non-TLS backends for the same address:port are stored separately.
     ///
     /// # Arguments
     /// * `ctx` - VCL context (needed for backend creation)
     /// * `address` - IP address as a string
     /// * `port` - Port number
+    /// * `tls` - Optional TLS configuration from BackendTLSPolicy
     ///
     /// # Returns
     /// Backend key string for looking up in the pool
@@ -52,8 +55,12 @@ impl BackendPool {
         ctx: &mut Ctx,
         address: &str,
         port: u16,
+        tls: Option<&BackendTLS>,
     ) -> Result<String, VclError> {
-        let key = format!("{}:{}", address, port);
+        let key = match tls {
+            Some(t) => format!("{}:{}:tls:{}", address, port, t.hostname),
+            None => format!("{}:{}", address, port),
+        };
 
         // Check if backend already exists
         if self.backends.contains_key(&key) {
@@ -69,10 +76,30 @@ impl BackendPool {
         let addr = SocketAddr::new(ip, port);
 
         // Create backend with builder
-        let backend_name = format!("ghost_{}", key.replace([':', '.'], "_"));
+        let backend_name = format!("ghost_{}", key.replace([':', '.', '/'], "_"));
         let c_name = CString::new(backend_name)
             .map_err(|e| VclError::new(format!("Invalid backend name: {}", e)))?;
-        let backend = NativeBackendBuilder::new_ip(&c_name, addr).build(ctx)?;
+        let builder = NativeBackendBuilder::new_ip(&c_name, addr);
+
+        // Configure TLS if BackendTLSPolicy applies to this backend.
+        // Uses a Cargo patch for varnish-sys to fix .tls() return type.
+        // TODO: Remove patch once varnish-sys > 0.6.0 is released with the fix.
+        #[cfg(varnishsys_90_sslflags)]
+        let builder = if let Some(tls_config) = tls {
+            let hostname_cstr = CString::new(tls_config.hostname.as_str())
+                .map_err(|e| VclError::new(format!("Invalid TLS hostname: {}", e)))?;
+            let builder = builder.hosthdr(&hostname_cstr);
+            builder.tls(true, true)
+        } else {
+            builder
+        };
+        #[cfg(not(varnishsys_90_sslflags))]
+        if tls.is_some() {
+            return Err(VclError::new(
+                "BackendTLS requires Varnish 9.0+ (varnishsys_90_sslflags)".to_string(),
+            ));
+        }
+        let backend = builder.build(ctx)?;
 
         // Insert into pool (wrapped in Arc)
         // SAFETY: NativeBackend contains VCL_BACKEND pointers which are thread-safe

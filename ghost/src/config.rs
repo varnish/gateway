@@ -21,6 +21,13 @@ fn default_weight() -> u32 {
     100
 }
 
+/// TLS configuration for backend connections, derived from BackendTLSPolicy.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackendTLS {
+    /// Hostname used as the SNI server name and for certificate validation.
+    pub hostname: String,
+}
+
 /// A group of backends sharing a weight for correct weighted traffic distribution.
 /// Selection is two-level: (1) pick a group by weight, (2) pick a random pod within the group.
 #[derive(Debug, Clone, Deserialize)]
@@ -28,6 +35,10 @@ pub struct BackendGroup {
     #[serde(default = "default_weight")]
     pub weight: u32,
     pub backends: Vec<Backend>,
+    /// TLS configuration for connecting to backends in this group.
+    /// When present, Varnish will use TLS for backend connections.
+    #[serde(default)]
+    pub backend_tls: Option<BackendTLS>,
 }
 
 /// Mirrors Gateway API's HTTPPathMatch types for URL routing decisions.
@@ -684,5 +695,74 @@ mod tests {
             url_rewrite.replace_prefix_match.as_ref().unwrap(),
             "/api/v2"
         );
+    }
+
+    #[test]
+    fn test_backend_tls_parsing() {
+        let file = write_config(
+            r#"{
+                "version": 2,
+                "vhosts": {
+                    "api.example.com": {
+                        "routes": [
+                            {
+                                "path_match": {"type": "PathPrefix", "value": "/"},
+                                "backend_groups": [
+                                    {
+                                        "weight": 100,
+                                        "backends": [
+                                            {"address": "10.0.0.1", "port": 8443}
+                                        ],
+                                        "backend_tls": {
+                                            "hostname": "api.internal.example.com"
+                                        }
+                                    }
+                                ],
+                                "priority": 100
+                            }
+                        ]
+                    }
+                }
+            }"#,
+        );
+
+        let config = load(file.path()).unwrap();
+        let vhost = &config.vhosts["api.example.com"];
+        let group = &vhost.routes[0].backend_groups[0];
+
+        assert!(group.backend_tls.is_some());
+        let tls = group.backend_tls.as_ref().unwrap();
+        assert_eq!(tls.hostname, "api.internal.example.com");
+    }
+
+    #[test]
+    fn test_backend_tls_absent() {
+        let file = write_config(
+            r#"{
+                "version": 2,
+                "vhosts": {
+                    "api.example.com": {
+                        "routes": [
+                            {
+                                "path_match": {"type": "PathPrefix", "value": "/"},
+                                "backend_groups": [
+                                    {
+                                        "weight": 100,
+                                        "backends": [
+                                            {"address": "10.0.0.1", "port": 8080}
+                                        ]
+                                    }
+                                ],
+                                "priority": 100
+                            }
+                        ]
+                    }
+                }
+            }"#,
+        );
+
+        let config = load(file.path()).unwrap();
+        let group = &config.vhosts["api.example.com"].routes[0].backend_groups[0];
+        assert!(group.backend_tls.is_none());
     }
 }

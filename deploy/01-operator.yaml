@@ -39,6 +39,12 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["referencegrants"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["backendtlspolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["backendtlspolicies/status"]
+    verbs: ["get", "update", "patch"]
   # Our custom resources
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["gatewayclassparameters"]

@@ -22,6 +22,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/ghost"
@@ -579,6 +580,9 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	// Attach VarnishCachePolicy to each route
 	r.attachCachePolicies(ctx, collectedRoutes, filteredRoutes, gateway)
 
+	// Attach BackendTLSPolicy to each route
+	r.attachBackendTLS(ctx, collectedRoutes)
+
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)
 	for _, route := range collectedRoutes {
@@ -657,6 +661,116 @@ func (r *HTTPRouteReconciler) attachCachePolicies(ctx context.Context, collected
 			cr.CachePolicy = cp
 		}
 	}
+}
+
+// attachBackendTLS resolves BackendTLSPolicies for each collected route.
+// It looks up policies targeting the route's backend Service and attaches TLS config.
+func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRoutes []ghost.Route) {
+	// Collect unique namespaces from routes
+	namespaces := make(map[string]struct{})
+	for _, route := range collectedRoutes {
+		namespaces[route.Namespace] = struct{}{}
+	}
+
+	// Build lookup: "namespace/serviceName" → BackendTLSPolicy
+	policyMap := make(map[string]*gatewayv1alpha3.BackendTLSPolicy)
+	for ns := range namespaces {
+		var policyList gatewayv1alpha3.BackendTLSPolicyList
+		if err := r.List(ctx, &policyList, client.InNamespace(ns)); err != nil {
+			r.Logger.Error("failed to list BackendTLSPolicies", "namespace", ns, "error", err)
+			continue
+		}
+		for i := range policyList.Items {
+			policy := &policyList.Items[i]
+
+			// Only support wellKnownCACertificates: System for now
+			if policy.Spec.Validation.WellKnownCACertificates == nil ||
+				*policy.Spec.Validation.WellKnownCACertificates != gatewayv1alpha3.WellKnownCACertificatesSystem {
+				if len(policy.Spec.Validation.CACertificateRefs) > 0 {
+					r.Logger.Warn("BackendTLSPolicy with caCertificateRefs is not supported, skipping",
+						"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name))
+				} else {
+					r.Logger.Warn("BackendTLSPolicy must set wellKnownCACertificates: System, skipping",
+						"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name))
+				}
+				continue
+			}
+
+			for _, targetRef := range policy.Spec.TargetRefs {
+				// Only handle Service targets
+				if targetRef.Group != "" || targetRef.Kind != "Service" {
+					continue
+				}
+				key := ns + "/" + string(targetRef.Name)
+				policyMap[key] = policy
+			}
+		}
+	}
+
+	// Attach TLS config to routes whose backends match a policy
+	for i := range collectedRoutes {
+		cr := &collectedRoutes[i]
+		key := cr.Namespace + "/" + cr.Service
+		policy, ok := policyMap[key]
+		if !ok {
+			continue
+		}
+		cr.BackendTLS = &ghost.BackendTLS{
+			Hostname: string(policy.Spec.Validation.Hostname),
+		}
+	}
+}
+
+// findHTTPRoutesForBackendTLSPolicy returns reconcile requests for HTTPRoutes
+// whose backend Services are targeted by the given BackendTLSPolicy.
+func (r *HTTPRouteReconciler) findHTTPRoutesForBackendTLSPolicy(ctx context.Context, obj client.Object) []reconcile.Request {
+	policy, ok := obj.(*gatewayv1alpha3.BackendTLSPolicy)
+	if !ok {
+		return nil
+	}
+
+	// Collect service names targeted by this policy
+	serviceNames := make(map[string]struct{})
+	for _, targetRef := range policy.Spec.TargetRefs {
+		if targetRef.Group != "" || targetRef.Kind != "Service" {
+			continue
+		}
+		serviceNames[string(targetRef.Name)] = struct{}{}
+	}
+
+	if len(serviceNames) == 0 {
+		return nil
+	}
+
+	// Find HTTPRoutes referencing any of these services
+	var routeList gatewayv1.HTTPRouteList
+	if err := r.List(ctx, &routeList); err != nil {
+		r.Logger.Error("failed to list HTTPRoutes for BackendTLSPolicy watch", "error", err)
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, route := range routeList.Items {
+		for svcName := range serviceNames {
+			if routeReferencesService(&route, svcName, policy.Namespace) {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      route.Name,
+						Namespace: route.Namespace,
+					},
+				})
+				break // avoid duplicate requests for the same route
+			}
+		}
+	}
+
+	if len(requests) > 0 {
+		r.Logger.Debug("BackendTLSPolicy changed, re-reconciling referencing HTTPRoutes",
+			"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name),
+			"routes", len(requests))
+	}
+
+	return requests
 }
 
 // buildServicePortMap iterates all BackendRefs across routes, fetches each Service,
@@ -1152,6 +1266,10 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&gatewayparamsv1alpha1.VarnishCachePolicy{},
 			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForVCP),
+		).
+		Watches(
+			&gatewayv1alpha3.BackendTLSPolicy{},
+			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForBackendTLSPolicy),
 		).
 		Complete(r)
 }

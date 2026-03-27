@@ -22,8 +22,9 @@ type Backend struct {
 // the service group (not individual pods), and selection is two-level:
 // (1) pick a group by weight, (2) pick a random pod within the group.
 type BackendGroup struct {
-	Weight   int       `json:"weight"`
-	Backends []Backend `json:"backends"`
+	Weight     int        `json:"weight"`
+	Backends   []Backend  `json:"backends"`
+	BackendTLS *BackendTLS `json:"backend_tls,omitempty"`
 }
 
 // RoutingRule defines which Kubernetes service handles a vhost.
@@ -158,6 +159,13 @@ type BypassHeaderConfig struct {
 	ValueRegex string `json:"value_regex,omitempty"`
 }
 
+// BackendTLS holds TLS configuration for backend connections.
+// Derived from BackendTLSPolicy targeting the backend's Service.
+type BackendTLS struct {
+	// Hostname is used as the SNI server name and for certificate validation.
+	Hostname string `json:"hostname"`
+}
+
 // Route represents a path-based routing rule.
 type Route struct {
 	Hostname    string            `json:"hostname,omitempty"` // Used when collecting from HTTPRoutes
@@ -177,6 +185,7 @@ type Route struct {
 	Priority    int               `json:"priority"`
 	RuleIndex   int               `json:"rule_index"`             // Original rule ordering for tiebreaking
 	CachePolicy *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
+	BackendTLS  *BackendTLS       `json:"backend_tls,omitempty"`  // TLS config from BackendTLSPolicy
 }
 
 // VHostRouting represents routing configuration for a vhost with path-based rules.

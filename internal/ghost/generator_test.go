@@ -565,3 +565,124 @@ func TestMethodMatchingConformancePipeline(t *testing.T) {
 			parsedPathRoute.Priority, parsedMethodRoute.Priority)
 	}
 }
+
+func TestBackendTLSPropagation(t *testing.T) {
+	tls := &BackendTLS{Hostname: "api.internal.example.com"}
+
+	routingConfig := &RoutingConfig{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
+			"api.example.com": {
+				Routes: []Route{
+					{
+						PathMatch:  &PathMatch{Type: PathMatchPathPrefix, Value: "/"},
+						Service:    "api-service",
+						Namespace:  "default",
+						Port:       8080,
+						Weight:     100,
+						Priority:   100,
+						BackendTLS: tls,
+					},
+					{
+						PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/public"},
+						Service:   "public-service",
+						Namespace: "default",
+						Port:      80,
+						Weight:    100,
+						Priority:  200,
+					},
+				},
+			},
+		},
+	}
+
+	endpoints := ServiceEndpoints{
+		"default/api-service":    {{IP: "10.0.0.1", Port: 8080}},
+		"default/public-service": {{IP: "10.0.0.2", Port: 80}},
+	}
+
+	config := Generate(routingConfig, endpoints)
+
+	vhost, ok := config.VHosts["api.example.com"]
+	if !ok {
+		t.Fatal("missing vhost api.example.com")
+	}
+
+	// Find routes and verify TLS propagation
+	var tlsRoute, plainRoute *RouteBackends
+	for i := range vhost.Routes {
+		r := &vhost.Routes[i]
+		if r.PathMatch != nil && r.PathMatch.Value == "/" {
+			tlsRoute = r
+		} else if r.PathMatch != nil && r.PathMatch.Value == "/public" {
+			plainRoute = r
+		}
+	}
+
+	if tlsRoute == nil {
+		t.Fatal("missing TLS route")
+	}
+	if len(tlsRoute.BackendGroups) != 1 {
+		t.Fatalf("expected 1 backend group, got %d", len(tlsRoute.BackendGroups))
+	}
+	if tlsRoute.BackendGroups[0].BackendTLS == nil {
+		t.Fatal("BackendTLS not propagated to BackendGroup")
+	}
+	if tlsRoute.BackendGroups[0].BackendTLS.Hostname != "api.internal.example.com" {
+		t.Errorf("unexpected hostname: %s", tlsRoute.BackendGroups[0].BackendTLS.Hostname)
+	}
+
+	if plainRoute == nil {
+		t.Fatal("missing plain route")
+	}
+	if len(plainRoute.BackendGroups) != 1 {
+		t.Fatalf("expected 1 backend group, got %d", len(plainRoute.BackendGroups))
+	}
+	if plainRoute.BackendGroups[0].BackendTLS != nil {
+		t.Error("plain route should not have BackendTLS")
+	}
+}
+
+func TestBackendTLSPreventsMerging(t *testing.T) {
+	// Two routes with identical match criteria but different TLS configs
+	// should NOT be merged into one route
+	routingConfig := &RoutingConfig{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
+			"api.example.com": {
+				Routes: []Route{
+					{
+						PathMatch:  &PathMatch{Type: PathMatchPathPrefix, Value: "/"},
+						Service:    "tls-service",
+						Namespace:  "default",
+						Port:       8443,
+						Weight:     80,
+						Priority:   100,
+						BackendTLS: &BackendTLS{Hostname: "internal.example.com"},
+					},
+					{
+						PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/"},
+						Service:   "plain-service",
+						Namespace: "default",
+						Port:      8080,
+						Weight:    20,
+						Priority:  100,
+					},
+				},
+			},
+		},
+	}
+
+	endpoints := ServiceEndpoints{
+		"default/tls-service":   {{IP: "10.0.0.1", Port: 8443}},
+		"default/plain-service": {{IP: "10.0.0.2", Port: 8080}},
+	}
+
+	config := Generate(routingConfig, endpoints)
+	vhost := config.VHosts["api.example.com"]
+
+	// Routes with different TLS configs must remain separate
+	if len(vhost.Routes) != 2 {
+		t.Fatalf("expected 2 separate routes (TLS prevents merging), got %d", len(vhost.Routes))
+	}
+}

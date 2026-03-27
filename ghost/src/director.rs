@@ -263,7 +263,12 @@ pub fn build_vhost_directors(
             for group in &route.backend_groups {
                 let mut backend_keys = Vec::new();
                 for backend in &group.backends {
-                    let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
+                    let key = backend_pool.get_or_create(
+                        ctx,
+                        &backend.address,
+                        backend.port,
+                        group.backend_tls.as_ref(),
+                    )?;
                     backend_keys.push(key);
                 }
                 groups.push(WeightedBackendGroup {
@@ -358,7 +363,12 @@ pub fn build_vhost_directors(
             for group in &vhost.default_backends {
                 let mut backend_keys = Vec::new();
                 for backend in &group.backends {
-                    let key = backend_pool.get_or_create(ctx, &backend.address, backend.port)?;
+                    let key = backend_pool.get_or_create(
+                        ctx,
+                        &backend.address,
+                        backend.port,
+                        group.backend_tls.as_ref(),
+                    )?;
                     backend_keys.push(key);
                 }
                 default_groups.push(WeightedBackendGroup {
