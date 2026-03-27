@@ -6,6 +6,10 @@ This Helm chart installs the Varnish Gateway operator, which implements the Kube
 
 - Kubernetes 1.26+
 - Helm 3.8+
+- [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/#installing-gateway-api) installed in your cluster:
+  ```bash
+  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+  ```
 
 ## Installation
 
@@ -63,7 +67,6 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 | `namespace` | Namespace for operator deployment | `varnish-gateway-system` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `serviceAccount.create` | Create service account | `true` |
-| `installGatewayAPICRDs` | Install Gateway API CRDs | `true` |
 
 ## Examples
 
@@ -73,15 +76,6 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --set operator.image.tag=v0.x.y \
   --set chaperone.image.tag=v0.x.y
-```
-
-### Install without Gateway API CRDs
-
-If you've already installed Gateway API CRDs cluster-wide:
-
-```bash
-helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
-  --set installGatewayAPICRDs=false
 ```
 
 ### Customize VCL configuration

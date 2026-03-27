@@ -33,6 +33,9 @@ operator:
       cpu: 10m
       memory: 64Mi
 
+  # Node selector (empty by default to schedule on any architecture)
+  nodeSelector: {}
+
   # Security context
   securityContext:
     allowPrivilegeEscalation: false
@@ -144,10 +147,6 @@ serviceAccount:
   annotations: {}
   # The name of the service account to use (if not creating)
   # name: ""
-
-# Install Gateway API CRDs
-# Set to false if you've already installed them cluster-wide
-installGatewayAPICRDs: true
 
 # Additional labels to add to all resources
 commonLabels: {}

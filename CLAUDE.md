@@ -460,10 +460,11 @@ helm install varnish-gateway ./charts/varnish-gateway \
 ```
 
 The Helm chart includes:
-- Gateway API CRDs (GatewayClass, Gateway, HTTPRoute, etc.)
-- Varnish-specific CRD (GatewayClassParameters)
+- Varnish-specific CRDs (GatewayClassParameters, VarnishCacheInvalidation, VarnishCachePolicy)
 - Operator deployment with RBAC
 - Default GatewayClass configuration
+
+**Note:** Gateway API CRDs must be installed separately as a prerequisite.
 
 See [INSTALL.md](INSTALL.md) for detailed installation instructions and [charts/varnish-gateway/README.md](charts/varnish-gateway/README.md) for configuration options.
 

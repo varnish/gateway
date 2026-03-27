@@ -7,6 +7,10 @@ This guide covers different installation methods for Varnish Gateway.
 - Kubernetes 1.26+
 - kubectl configured to access your cluster
 - Helm 3.8+ (for Helm installation method)
+- [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/#installing-gateway-api) installed in your cluster:
+  ```bash
+  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+  ```
 
 ## Installation Methods
 
@@ -22,20 +26,12 @@ helm install varnish-gateway ./charts/varnish-gateway \
 ```
 
 This will:
-- Install Gateway API CRDs (GatewayClass, Gateway, HTTPRoute)
-- Install Varnish-specific CRD (GatewayClassParameters)
+- Install Varnish-specific CRDs (GatewayClassParameters, VarnishCacheInvalidation, VarnishCachePolicy)
 - Deploy the operator
 - Create RBAC resources
 - Create a default GatewayClass named "varnish"
 
 #### Helm Installation Options
-
-**Install without Gateway API CRDs** (if already installed cluster-wide):
-
-```bash
-helm install varnish-gateway ./charts/varnish-gateway \
-  --set installGatewayAPICRDs=false
-```
 
 **Install with custom values**:
 
@@ -59,10 +55,7 @@ See [charts/varnish-gateway/README.md](charts/varnish-gateway/README.md) for all
 If you prefer not to use Helm, you can install using kubectl:
 
 ```bash
-# Install Gateway API CRDs
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
-
-# Install Varnish Gateway
+# Install Varnish Gateway (Gateway API CRDs must already be installed, see Prerequisites)
 kubectl apply -f deploy/
 ```
 
@@ -199,7 +192,7 @@ kubectl describe httproute my-route -n default
 ### Helm
 
 ```bash
-# Upgrade CRDs first (Helm doesn't auto-upgrade CRDs)
+# Upgrade Varnish-specific CRDs first (Helm doesn't auto-upgrade CRDs)
 kubectl apply -f charts/varnish-gateway/crds/
 
 # Upgrade the chart
