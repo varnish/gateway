@@ -4,16 +4,12 @@
 # - HTTPRoutes can reference backend Services in any namespace (cross-namespace routing)
 # - The chaperone watches EndpointSlices cluster-wide to discover backend pod IPs
 #
-# The operator creates a ServiceAccount for each Gateway ({gateway-name}-chaperone),
-# but the ClusterRoleBinding below grants permissions to all service accounts in
-# the varnish-gateway-system namespace.
+# The operator creates a per-Gateway ClusterRoleBinding for each Gateway's
+# ServiceAccount, so Gateways in any namespace get the correct permissions
+# automatically.
 #
-# If you deploy Gateways in other namespaces, add additional ClusterRoleBindings
-# for those namespaces, e.g.:
-#
-#   kubectl create clusterrolebinding varnish-gateway-chaperone-{namespace} \
-#     --clusterrole=varnish-gateway-chaperone \
-#     --group=system:serviceaccounts:{namespace}
+# The ClusterRoleBinding below is a convenience for the varnish-gateway-system
+# namespace and is not strictly required.
 
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
