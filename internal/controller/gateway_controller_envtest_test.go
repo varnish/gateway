@@ -86,22 +86,8 @@ func TestReconcile_CreatesResources_Envtest(t *testing.T) {
 	// Create reconciler with envtest client
 	r := NewEnvtestGatewayReconciler(testEnv)
 
-	// First reconcile adds finalizer
+	// Reconcile creates resources (using SSA)
 	result, err := r.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-gateway-envtest", Namespace: "default"},
-	})
-	if err != nil {
-		t.Fatalf("first reconcile failed: %v", err)
-	}
-	if !result.Requeue {
-		t.Error("expected requeue after adding finalizer")
-	}
-
-	// Wait a bit for API server to process
-	time.Sleep(100 * time.Millisecond)
-
-	// Second reconcile creates resources (using SSA)
-	result, err = r.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-gateway-envtest", Namespace: "default"},
 	})
 	if err != nil {
@@ -269,17 +255,8 @@ func TestHTTPSListener_MissingSecret_ProgrammedFalse(t *testing.T) {
 		Logger: slog.Default(),
 	}
 
-	// First reconcile adds finalizer
+	// Reconcile creates resources and sets status
 	_, err := r.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-gw-tls-missing", Namespace: "default"},
-	})
-	if err != nil {
-		t.Fatalf("first reconcile failed: %v", err)
-	}
-	time.Sleep(100 * time.Millisecond)
-
-	// Second reconcile creates resources and sets status
-	_, err = r.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-gw-tls-missing", Namespace: "default"},
 	})
 	if err != nil {

@@ -18,7 +18,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -2203,73 +2203,82 @@ func TestCollectTLSCertData(t *testing.T) {
 	})
 }
 
-func TestReconcileDelete(t *testing.T) {
+func TestCleanupOrphanedCRBs(t *testing.T) {
 	scheme := newTestScheme()
 	ctx := context.Background()
 
-	t.Run("gateway with finalizer and existing CRB", func(t *testing.T) {
+	t.Run("deletes CRB when gateway is gone", func(t *testing.T) {
+		// CRB exists but its owning Gateway does not
 		crb := &rbacv1.ClusterRoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "default-gw-chaperone"},
-		}
-		gateway := &gatewayv1.Gateway{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:       "gw",
-				Namespace:  "default",
-				Finalizers: []string{FinalizerName},
+				Name: "default-gw-chaperone",
+				Labels: map[string]string{
+					LabelManagedBy:        ManagedByValue,
+					LabelGatewayName:      "gw",
+					LabelGatewayNamespace: "default",
+				},
 			},
-			Spec: gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
 		}
-		r := newTestReconciler(scheme, gateway, crb)
+		r := newTestReconciler(scheme, crb) // No Gateway
 
-		result, err := r.reconcileDelete(ctx, gateway)
-		if err != nil {
+		if err := r.cleanupOrphanedCRBs(ctx); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result.Requeue {
-			t.Error("expected no requeue")
-		}
 
-		// CRB should be deleted
 		var checkCRB rbacv1.ClusterRoleBinding
 		if err := r.Get(ctx, types.NamespacedName{Name: "default-gw-chaperone"}, &checkCRB); err == nil {
-			t.Error("expected CRB to be deleted")
-		}
-
-		// Finalizer should be removed
-		var checkGW gatewayv1.Gateway
-		if err := r.Get(ctx, types.NamespacedName{Name: "gw", Namespace: "default"}, &checkGW); err != nil {
-			t.Fatalf("failed to get gateway: %v", err)
-		}
-		if controllerutil.ContainsFinalizer(&checkGW, FinalizerName) {
-			t.Error("expected finalizer to be removed")
+			t.Error("expected orphaned CRB to be deleted")
 		}
 	})
 
-	t.Run("gateway with finalizer but CRB already gone", func(t *testing.T) {
+	t.Run("keeps CRB when gateway exists", func(t *testing.T) {
 		gateway := &gatewayv1.Gateway{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:       "gw",
-				Namespace:  "default",
-				Finalizers: []string{FinalizerName},
+				Name:      "gw",
+				Namespace: "default",
 			},
 			Spec: gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
 		}
-		r := newTestReconciler(scheme, gateway) // No CRB
+		crb := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "default-gw-chaperone",
+				Labels: map[string]string{
+					LabelManagedBy:        ManagedByValue,
+					LabelGatewayName:      "gw",
+					LabelGatewayNamespace: "default",
+				},
+			},
+		}
+		r := newTestReconciler(scheme, gateway, crb)
 
-		result, err := r.reconcileDelete(ctx, gateway)
-		if err != nil {
+		if err := r.cleanupOrphanedCRBs(ctx); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if result.Requeue {
-			t.Error("expected no requeue")
+
+		var checkCRB rbacv1.ClusterRoleBinding
+		if err := r.Get(ctx, types.NamespacedName{Name: "default-gw-chaperone"}, &checkCRB); err != nil {
+			t.Error("expected CRB to still exist")
+		}
+	})
+
+	t.Run("skips CRBs without gateway labels", func(t *testing.T) {
+		crb := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "other-crb",
+				Labels: map[string]string{
+					LabelManagedBy: ManagedByValue,
+				},
+			},
+		}
+		r := newTestReconciler(scheme, crb)
+
+		if err := r.cleanupOrphanedCRBs(ctx); err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
 
-		var checkGW gatewayv1.Gateway
-		if err := r.Get(ctx, types.NamespacedName{Name: "gw", Namespace: "default"}, &checkGW); err != nil {
-			t.Fatalf("failed to get gateway: %v", err)
-		}
-		if controllerutil.ContainsFinalizer(&checkGW, FinalizerName) {
-			t.Error("expected finalizer to be removed")
+		var checkCRB rbacv1.ClusterRoleBinding
+		if err := r.Get(ctx, types.NamespacedName{Name: "other-crb"}, &checkCRB); err != nil {
+			t.Error("expected CRB without gateway labels to be kept")
 		}
 	})
 }

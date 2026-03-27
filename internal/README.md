@@ -28,7 +28,7 @@ This is the heart of the operator. Contains two Kubernetes controllers:
 - GatewayReconciler - Watches `Gateway` resources and reconciles child resources:
   - Creates/updates Deployment, Service, ConfigMap, Secret, ServiceAccount
   - Sets Gateway status conditions (Accepted/Programmed)
-  - Handles Gateway deletion via finalizers
+  - Cleans up orphaned ClusterRoleBindings from deleted Gateways
 
 - HTTPRouteReconciler - Watches `HTTPRoute` resources and updates routing:
   - Generates `routing.json` from HTTPRoute specs

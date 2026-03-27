@@ -63,18 +63,8 @@ func TestHTTPRouteReconcile_GatewayControllerUpdatesAttachedRoutes_Envtest(t *te
 	// Create Gateway reconciler
 	gwReconciler := NewEnvtestGatewayReconciler(testEnv)
 
-	// Reconcile Gateway to add finalizer
-	_, err := gwReconciler.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-gateway-httproute", Namespace: "default"},
-	})
-	if err != nil {
-		t.Fatalf("gateway reconcile (finalizer) failed: %v", err)
-	}
-
-	time.Sleep(100 * time.Millisecond)
-
 	// Reconcile Gateway to create resources and set initial status
-	_, err = gwReconciler.Reconcile(ctx, ctrl.Request{
+	_, err := gwReconciler.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-gateway-httproute", Namespace: "default"},
 	})
 	if err != nil {
@@ -292,15 +282,7 @@ func TestHTTPRouteReconcile_DeletionUpdatesRoutingJSON_Envtest(t *testing.T) {
 		Logger: slog.Default(),
 	}
 
-	// First reconcile adds finalizer
-	if _, err := gwReconciler.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "test-gw-del", Namespace: "default"},
-	}); err != nil {
-		t.Fatalf("gateway reconcile (finalizer) failed: %v", err)
-	}
-	time.Sleep(100 * time.Millisecond)
-
-	// Second reconcile creates resources
+	// Reconcile creates resources
 	if _, err := gwReconciler.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-gw-del", Namespace: "default"},
 	}); err != nil {

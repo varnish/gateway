@@ -33,9 +33,6 @@ const (
 	// ControllerName is the name of this controller for GatewayClass matching.
 	ControllerName = "varnish-software.com/gateway"
 
-	// FinalizerName is added to Gateways managed by this controller.
-	FinalizerName = "gateway.varnish-software.com/finalizer"
-
 	// LabelManagedBy identifies resources created by this operator.
 	LabelManagedBy = "app.kubernetes.io/managed-by"
 
@@ -94,19 +91,17 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Handle deletion
+	// 3. If being deleted, nothing to do — owned resources are cleaned up by GC,
+	// and orphaned CRBs are cleaned up by cleanupOrphanedCRBs on next reconcile.
 	if !gateway.DeletionTimestamp.IsZero() {
-		return r.reconcileDelete(ctx, &gateway)
+		return ctrl.Result{}, nil
 	}
 
-	// 4. Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(&gateway, FinalizerName) {
-		patch := client.MergeFrom(gateway.DeepCopy())
-		controllerutil.AddFinalizer(&gateway, FinalizerName)
-		if err := r.Patch(ctx, &gateway, patch); err != nil {
-			return ctrl.Result{}, fmt.Errorf("r.Patch (add finalizer): %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
+	// 4. Clean up orphaned ClusterRoleBindings from deleted Gateways.
+	// CRBs are cluster-scoped and can't use owner references, so we garbage-collect
+	// them here instead of using finalizers (which cause stuck namespaces).
+	if err := r.cleanupOrphanedCRBs(ctx); err != nil {
+		log.Error("failed to clean up orphaned CRBs", "error", err)
 	}
 
 	// 5. Reconcile child resources
@@ -128,40 +123,43 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	return ctrl.Result{}, nil
 }
 
-// reconcileDelete handles Gateway deletion.
-func (r *GatewayReconciler) reconcileDelete(ctx context.Context, gateway *gatewayv1.Gateway) (ctrl.Result, error) {
-	log := r.Logger.With("gateway", types.NamespacedName{Name: gateway.Name, Namespace: gateway.Namespace})
-	log.Info("handling gateway deletion")
+// cleanupOrphanedCRBs lists all ClusterRoleBindings created by this operator and deletes
+// any whose owning Gateway no longer exists. This replaces the finalizer-based approach
+// which caused namespaces to get stuck in Terminating state when the operator was deleted
+// before the Gateway.
+func (r *GatewayReconciler) cleanupOrphanedCRBs(ctx context.Context) error {
+	var crbList rbacv1.ClusterRoleBindingList
+	if err := r.List(ctx, &crbList, client.MatchingLabels{LabelManagedBy: ManagedByValue}); err != nil {
+		return fmt.Errorf("r.List(ClusterRoleBindings): %w", err)
+	}
 
-	// Clean up cluster-scoped resources (not handled by owner references)
-	crbName := fmt.Sprintf("%s-%s-chaperone", gateway.Namespace, gateway.Name)
-	crb := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, types.NamespacedName{Name: crbName}, crb)
-	if err == nil {
+	for i := range crbList.Items {
+		crb := &crbList.Items[i]
+		gwName := crb.Labels[LabelGatewayName]
+		gwNamespace := crb.Labels[LabelGatewayNamespace]
+		if gwName == "" || gwNamespace == "" {
+			continue
+		}
+
+		// Check if the owning Gateway still exists
+		var gw gatewayv1.Gateway
+		err := r.Get(ctx, types.NamespacedName{Name: gwName, Namespace: gwNamespace}, &gw)
+		if err == nil {
+			continue // Gateway exists, keep the CRB
+		}
+		if !apierrors.IsNotFound(err) {
+			return fmt.Errorf("r.Get(Gateway %s/%s): %w", gwNamespace, gwName, err)
+		}
+
+		// Gateway is gone — delete the orphaned CRB
+		r.Logger.Info("deleting orphaned ClusterRoleBinding", "name", crb.Name,
+			"gateway", gwNamespace+"/"+gwName)
 		if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, fmt.Errorf("r.Delete(ClusterRoleBinding): %w", err)
-		}
-		log.Info("deleted ClusterRoleBinding", "name", crbName)
-	} else if !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, fmt.Errorf("r.Get(ClusterRoleBinding): %w", err)
-	}
-
-	// Remove finalizer to allow deletion
-	if controllerutil.ContainsFinalizer(gateway, FinalizerName) {
-		patch := client.MergeFrom(gateway.DeepCopy())
-		controllerutil.RemoveFinalizer(gateway, FinalizerName)
-		if err := r.Patch(ctx, gateway, patch); err != nil {
-			// If the namespace is being deleted, we can't update the Gateway.
-			// That's fine - the resource will be garbage collected with the namespace.
-			if apierrors.IsNotFound(err) {
-				log.Info("namespace being deleted, skipping finalizer removal")
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("r.Patch (remove finalizer): %w", err)
+			return fmt.Errorf("r.Delete(ClusterRoleBinding %s): %w", crb.Name, err)
 		}
 	}
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // reconcileResources creates or updates all child resources for a Gateway.
