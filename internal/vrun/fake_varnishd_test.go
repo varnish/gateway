@@ -73,9 +73,13 @@ func fakeVarnishCmd() (cmd string, args []string) {
 // isContextError returns true if the error is caused by context cancellation or deadline.
 // exec.CommandContext.Wait() returns the context's error when the context is done
 // before the process exits on its own, even if the process then exits cleanly.
+// When our Cancel func sends SIGTERM, the process may be killed by the signal
+// before it handles it, resulting in "signal: terminated" instead of exit 0.
 func isContextError(err error) bool {
 	msg := err.Error()
-	return strings.Contains(msg, "context canceled") || strings.Contains(msg, "context deadline exceeded")
+	return strings.Contains(msg, "context canceled") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "signal: terminated")
 }
 
 func TestMockStartAndReady(t *testing.T) {
