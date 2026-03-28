@@ -9,7 +9,7 @@ This guide covers different installation methods for Varnish Gateway.
 - Helm 3.8+ (for Helm installation method)
 - [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/#installing-gateway-api) installed in your cluster:
   ```bash
-  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
   ```
 
 ## Installation Methods
@@ -226,7 +226,7 @@ kubectl delete -f charts/varnish-gateway/crds/
 kubectl delete -f deploy/
 
 # Optionally delete Gateway API CRDs
-kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
 ```
 
 ## Next Steps

@@ -173,7 +173,7 @@ helm install varnish-gateway \
 
 ```bash
 # Install Gateway API CRDs
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
 
 # Deploy the operator
 kubectl apply -f deploy/

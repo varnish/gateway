@@ -87,7 +87,7 @@ func TestReconcile_CreatesResources_Envtest(t *testing.T) {
 	r := NewEnvtestGatewayReconciler(testEnv)
 
 	// Reconcile creates resources (using SSA)
-	result, err := r.Reconcile(ctx, ctrl.Request{
+	_, err := r.Reconcile(ctx, ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "test-gateway-envtest", Namespace: "default"},
 	})
 	if err != nil {
@@ -228,7 +228,7 @@ func TestHTTPSListener_MissingSecret_ProgrammedFalse(t *testing.T) {
 					Name:     "https",
 					Port:     443,
 					Protocol: gatewayv1.HTTPSProtocolType,
-					TLS: &gatewayv1.GatewayTLSConfig{
+					TLS: &gatewayv1.ListenerTLSConfig{
 						Mode: &tlsMode,
 						CertificateRefs: []gatewayv1.SecretObjectReference{
 							{Name: "nonexistent-secret"},

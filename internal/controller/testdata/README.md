@@ -13,8 +13,8 @@ These CRDs are required for envtest to function properly, as envtest runs a real
 If you need to update to a newer version of the Gateway API:
 
 ```bash
-# Replace v1.2.0 with the desired version
-curl -sL https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml \
+# Replace v1.4.0 with the desired version
+curl -sL https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml \
   -o internal/controller/testdata/gateway-api-crds.yaml
 ```
 

@@ -22,7 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
-	gatewayv1alpha3 "sigs.k8s.io/gateway-api/apis/v1alpha3"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/ghost"
@@ -673,9 +672,9 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 	}
 
 	// Build lookup: "namespace/serviceName" → BackendTLSPolicy
-	policyMap := make(map[string]*gatewayv1alpha3.BackendTLSPolicy)
+	policyMap := make(map[string]*gatewayv1.BackendTLSPolicy)
 	for ns := range namespaces {
-		var policyList gatewayv1alpha3.BackendTLSPolicyList
+		var policyList gatewayv1.BackendTLSPolicyList
 		if err := r.List(ctx, &policyList, client.InNamespace(ns)); err != nil {
 			r.Logger.Error("failed to list BackendTLSPolicies", "namespace", ns, "error", err)
 			continue
@@ -685,7 +684,7 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 
 			// Only support wellKnownCACertificates: System for now
 			if policy.Spec.Validation.WellKnownCACertificates == nil ||
-				*policy.Spec.Validation.WellKnownCACertificates != gatewayv1alpha3.WellKnownCACertificatesSystem {
+				*policy.Spec.Validation.WellKnownCACertificates != gatewayv1.WellKnownCACertificatesSystem {
 				if len(policy.Spec.Validation.CACertificateRefs) > 0 {
 					r.Logger.Warn("BackendTLSPolicy with caCertificateRefs is not supported, skipping",
 						"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name))
@@ -724,7 +723,7 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 // findHTTPRoutesForBackendTLSPolicy returns reconcile requests for HTTPRoutes
 // whose backend Services are targeted by the given BackendTLSPolicy.
 func (r *HTTPRouteReconciler) findHTTPRoutesForBackendTLSPolicy(ctx context.Context, obj client.Object) []reconcile.Request {
-	policy, ok := obj.(*gatewayv1alpha3.BackendTLSPolicy)
+	policy, ok := obj.(*gatewayv1.BackendTLSPolicy)
 	if !ok {
 		return nil
 	}
@@ -1268,7 +1267,7 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForVCP),
 		).
 		Watches(
-			&gatewayv1alpha3.BackendTLSPolicy{},
+			&gatewayv1.BackendTLSPolicy{},
 			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForBackendTLSPolicy),
 		).
 		Complete(r)

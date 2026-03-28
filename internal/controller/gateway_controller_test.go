@@ -490,7 +490,7 @@ func TestValidateListenerTLSRefs_CrossNamespace_NoReferenceGrant(t *testing.T) {
 		Name:     "https",
 		Port:     443,
 		Protocol: gatewayv1.HTTPSProtocolType,
-		TLS: &gatewayv1.GatewayTLSConfig{
+		TLS: &gatewayv1.ListenerTLSConfig{
 			Mode: &tlsMode,
 			CertificateRefs: []gatewayv1.SecretObjectReference{
 				{
@@ -555,7 +555,7 @@ func TestValidateListenerTLSRefs_CrossNamespace_WithReferenceGrant(t *testing.T)
 		Name:     "https",
 		Port:     443,
 		Protocol: gatewayv1.HTTPSProtocolType,
-		TLS: &gatewayv1.GatewayTLSConfig{
+		TLS: &gatewayv1.ListenerTLSConfig{
 			Mode: &tlsMode,
 			CertificateRefs: []gatewayv1.SecretObjectReference{
 				{
@@ -595,7 +595,7 @@ func TestValidateListenerTLSRefs_SameNamespace(t *testing.T) {
 		Name:     "https",
 		Port:     443,
 		Protocol: gatewayv1.HTTPSProtocolType,
-		TLS: &gatewayv1.GatewayTLSConfig{
+		TLS: &gatewayv1.ListenerTLSConfig{
 			Mode: &tlsMode,
 			CertificateRefs: []gatewayv1.SecretObjectReference{
 				{
@@ -632,7 +632,7 @@ func TestGatewayReferencesSecret_CrossNamespace(t *testing.T) {
 					Name:     "https",
 					Port:     443,
 					Protocol: gatewayv1.HTTPSProtocolType,
-					TLS: &gatewayv1.GatewayTLSConfig{
+					TLS: &gatewayv1.ListenerTLSConfig{
 						Mode: &tlsMode,
 						CertificateRefs: []gatewayv1.SecretObjectReference{
 							{
@@ -674,7 +674,7 @@ func TestGatewayHasCrossNSCertRefTo(t *testing.T) {
 					Name:     "https",
 					Port:     443,
 					Protocol: gatewayv1.HTTPSProtocolType,
-					TLS: &gatewayv1.GatewayTLSConfig{
+					TLS: &gatewayv1.ListenerTLSConfig{
 						Mode: &tlsMode,
 						CertificateRefs: []gatewayv1.SecretObjectReference{
 							{Name: "cert", Namespace: &certNS},
@@ -787,7 +787,7 @@ func TestTLSBundleSecretCreatedWithMissingCerts(t *testing.T) {
 			Listeners: []gatewayv1.Listener{
 				{
 					Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-					TLS: &gatewayv1.GatewayTLSConfig{
+					TLS: &gatewayv1.ListenerTLSConfig{
 						Mode:            &tlsMode,
 						CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "not-yet-created"}},
 					},
@@ -2044,7 +2044,7 @@ func TestCollectTLSCertData(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "my-cert"}},
 						},
@@ -2082,7 +2082,7 @@ func TestCollectTLSCertData(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "cross-cert", Namespace: &certNS}},
 						},
@@ -2109,7 +2109,7 @@ func TestCollectTLSCertData(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "cross-cert", Namespace: &certNS}},
 						},
@@ -2131,7 +2131,7 @@ func TestCollectTLSCertData(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "nonexistent"}},
 						},
@@ -2158,7 +2158,7 @@ func TestCollectTLSCertData(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "opaque-secret"}},
 						},
@@ -2181,14 +2181,14 @@ func TestCollectTLSCertData(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https1", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "dup-cert"}},
 						},
 					},
 					{
 						Name: "https2", Port: 8443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "dup-cert"}},
 						},
@@ -2644,7 +2644,7 @@ func TestSetListenerStatusesForPatch(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "my-cert"}},
 						},
@@ -2672,7 +2672,7 @@ func TestSetListenerStatusesForPatch(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "missing-cert"}},
 						},
@@ -2779,7 +2779,7 @@ func TestEnqueueGatewaysForTLSSecret(t *testing.T) {
 			Listeners: []gatewayv1.Listener{
 				{
 					Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-					TLS: &gatewayv1.GatewayTLSConfig{
+					TLS: &gatewayv1.ListenerTLSConfig{
 						Mode:            &tlsMode,
 						CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "my-tls"}},
 					},
@@ -2962,7 +2962,7 @@ func TestEnqueueGatewaysForReferenceGrant(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "cert", Namespace: &certNS}},
 						},
@@ -2998,7 +2998,7 @@ func TestEnqueueGatewaysForReferenceGrant(t *testing.T) {
 				Listeners: []gatewayv1.Listener{
 					{
 						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
-						TLS: &gatewayv1.GatewayTLSConfig{
+						TLS: &gatewayv1.ListenerTLSConfig{
 							Mode:            &tlsMode,
 							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "cert", Namespace: &certNS}},
 						},

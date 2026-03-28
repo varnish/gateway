@@ -80,6 +80,9 @@ const (
 	// This option indicates support for multiple RequestMirror filters within the same HTTPRoute rule (extended conformance).
 	SupportHTTPRouteRequestMultipleMirrors FeatureName = "HTTPRouteRequestMultipleMirrors"
 
+	// This option indicates support for HTTPRoute request mirror filter with percentage based mirroring (extended conformance).
+	SupportHTTPRouteRequestPercentageMirror FeatureName = "HTTPRouteRequestPercentageMirror"
+
 	// This option indicates support for HTTPRoute request timeouts (extended conformance).
 	SupportHTTPRouteRequestTimeout FeatureName = "HTTPRouteRequestTimeout"
 
@@ -92,8 +95,14 @@ const (
 	// This option indicates support for HTTPRoute with a backendref with an appProtocol 'kubernetes.io/h2c' (extended conformance)
 	SupportHTTPRouteBackendProtocolH2C FeatureName = "HTTPRouteBackendProtocolH2C"
 
-	// This option indicates support for HTTPRoute with a backendref with an appProtoocol 'kubernetes.io/ws' (extended conformance)
+	// This option indicates support for HTTPRoute with a backendref with an appProtocol 'kubernetes.io/ws' (extended conformance)
 	SupportHTTPRouteBackendProtocolWebSocket FeatureName = "HTTPRouteBackendProtocolWebSocket"
+
+	// This option indicates support for the name field in the HTTPRouteRule (extended conformance)
+	SupportHTTPRouteNamedRouteRule FeatureName = "HTTPRouteNamedRouteRule"
+
+	// This option indicates support for the cors filter in the HTTPRouteFilter (extended conformance)
+	SupportHTTPRouteCORS FeatureName = "HTTPRouteCORS"
 )
 
 var (
@@ -157,6 +166,11 @@ var (
 		Name:    SupportHTTPRouteRequestMultipleMirrors,
 		Channel: FeatureChannelStandard,
 	}
+	// HTTPRouteRequestPercentageMirrorFeature contains metadata for the HTTPRouteRequestMultipleMirrors feature.
+	HTTPRouteRequestPercentageMirrorFeature = Feature{
+		Name:    SupportHTTPRouteRequestPercentageMirror,
+		Channel: FeatureChannelStandard,
+	}
 	// HTTPRouteRequestTimeoutFeature contains metadata for the HTTPRouteRequestTimeout feature.
 	HTTPRouteRequestTimeoutFeature = Feature{
 		Name:    SupportHTTPRouteRequestTimeout,
@@ -182,6 +196,16 @@ var (
 		Name:    SupportHTTPRouteBackendProtocolWebSocket,
 		Channel: FeatureChannelStandard,
 	}
+	// HTTPRouteNamedRouteRule contains metadata for the SupportHTTPRouteNamedRouteRule feature.
+	HTTPRouteNamedRouteRule = Feature{
+		Name:    SupportHTTPRouteNamedRouteRule,
+		Channel: FeatureChannelStandard,
+	}
+	// HTTPRouteCORS contains metadata for the SupportHTTPRouteCORS feature.
+	HTTPRouteCORS = Feature{
+		Name:    SupportHTTPRouteCORS,
+		Channel: FeatureChannelExperimental,
+	}
 )
 
 // HTTPRouteExtendedFeatures includes all extended features for HTTPRoute
@@ -200,9 +224,12 @@ var HTTPRouteExtendedFeatures = sets.New(
 	HTTPRoutePathRewriteFeature,
 	HTTPRouteRequestMirrorFeature,
 	HTTPRouteRequestMultipleMirrorsFeature,
+	HTTPRouteRequestPercentageMirrorFeature,
 	HTTPRouteRequestTimeoutFeature,
 	HTTPRouteBackendTimeoutFeature,
 	HTTPRouteParentRefPortFeature,
 	HTTPRouteBackendProtocolH2CFeature,
 	HTTPRouteBackendProtocolWebSocketFeature,
+	HTTPRouteNamedRouteRule,
+	HTTPRouteCORS,
 )
