@@ -3,12 +3,8 @@ extern crate core;
 // FIXME: `improper_ctypes` should be `expected`
 //    but a nightly version is having issues with it
 #[allow(improper_ctypes)]
-#[expect(
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals,
-    unused_qualifications
-)]
+#[allow(non_snake_case)]
+#[expect(non_camel_case_types, non_upper_case_globals, unused_qualifications)]
 #[expect(
     clippy::approx_constant,
     clippy::pedantic,
