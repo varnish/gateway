@@ -163,7 +163,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", nil, nil, nil, nil)
+	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", nil, nil, nil, nil, false)
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -233,7 +233,7 @@ func TestBuildDeployment_WithExtras(t *testing.T) {
 		{Name: "vmod-loader", Image: "busybox:latest", Command: []string{"cp", "/src/libvmod.so", "/dst/"}},
 	}
 
-	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil)
+	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil, false)
 
 	// Verify extra volumes
 	foundVol := false
@@ -816,7 +816,7 @@ func TestTLSBundleSecretCreatedWithMissingCerts(t *testing.T) {
 	}
 
 	// Verify buildVolumes includes the tls-certs volume
-	volumes := r.buildVolumes(gateway, nil)
+	volumes := r.buildVolumes(gateway, nil, false)
 	hasTLSVolume := false
 	for _, v := range volumes {
 		if v.Name == volumeTLSCerts {
@@ -1057,7 +1057,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 				},
 			}
 
-			container := r.buildGatewayContainer(tc.gateway, "test-image:latest", tc.varnishdExtraArgs, tc.extraVolumeMounts, nil)
+			container := r.buildGatewayContainer(tc.gateway, "test-image:latest", tc.varnishdExtraArgs, tc.extraVolumeMounts, nil, false)
 
 			if len(container.Ports) != tc.expectPorts {
 				t.Errorf("expected %d ports, got %d", tc.expectPorts, len(container.Ports))
@@ -1176,7 +1176,7 @@ func TestBuildVolumes(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &GatewayReconciler{Config: Config{}}
-			volumes := r.buildVolumes(tc.gateway, tc.extra)
+			volumes := r.buildVolumes(tc.gateway, tc.extra, false)
 			if len(volumes) != tc.expect {
 				t.Errorf("expected %d volumes, got %d", tc.expect, len(volumes))
 			}
@@ -1214,7 +1214,7 @@ func TestBuildContainers(t *testing.T) {
 	}
 
 	t.Run("without logging", func(t *testing.T) {
-		containers := r.buildContainers(gateway, "test-image:latest", nil, nil, nil, nil)
+		containers := r.buildContainers(gateway, "test-image:latest", nil, nil, nil, nil, false)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container, got %d", len(containers))
 		}
@@ -1225,7 +1225,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("with logging", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishlog"}
-		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil)
+		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil, false)
 		if len(containers) != 2 {
 			t.Errorf("expected 2 containers, got %d", len(containers))
 		}
@@ -1236,7 +1236,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("logging with empty mode is not added", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: ""}
-		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil)
+		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil, false)
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container when logging mode is empty, got %d", len(containers))
 		}

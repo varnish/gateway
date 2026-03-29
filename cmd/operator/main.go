@@ -126,6 +126,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Setup BackendTLSPolicy controller
+	if err := (&controller.BackendTLSPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Logger: logger.With("controller", "BackendTLSPolicy"),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create controller", "controller", "BackendTLSPolicy", "error", err)
+		os.Exit(1)
+	}
+
 	// Setup VarnishCachePolicy controller
 	if err := (&controller.VarnishCachePolicyReconciler{
 		Client: mgr.GetClient(),

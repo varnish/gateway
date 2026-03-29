@@ -198,6 +198,10 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	tlsCertData := r.collectTLSCertData(ctx, gateway)
 	hasTLS := hasHTTPSListener(gateway)
 
+	// Collect backend CA certificates from BackendTLSPolicies
+	backendCACerts := r.collectBackendCACerts(ctx, gateway)
+	hasBackendTLS := len(backendCACerts) > 0
+
 	// Compute infrastructure hash for pod restart detection
 	infraConfig := InfrastructureConfig{
 		GatewayImage:        effectiveImage,
@@ -208,6 +212,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		ExtraVolumes:        extraVolumes,
 		ExtraVolumeMounts:   extraVolumeMounts,
 		ExtraInitContainers: extraInitContainers,
+		HasBackendTLS:       hasBackendTLS,
 	}
 	infraHash := infraConfig.ComputeHash()
 
@@ -221,10 +226,14 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	if hasTLS {
 		resources = append(resources, r.buildTLSSecret(gateway, tlsCertData))
 	}
+	// Add backend CA cert Secret if any BackendTLSPolicies reference CA certs
+	if hasBackendTLS {
+		resources = append(resources, r.buildBackendCASecret(gateway, backendCACerts))
+	}
 	resources = append(resources,
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
-		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources),
+		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources, hasBackendTLS),
 		r.buildService(gateway),
 	)
 
@@ -1009,6 +1018,112 @@ func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gat
 	return certData
 }
 
+// collectBackendCACerts collects CA certificates from BackendTLSPolicies that
+// target Services referenced by HTTPRoutes attached to this Gateway.
+// Returns the concatenated PEM bundle, or nil if no backend CA certs are configured.
+func (r *GatewayReconciler) collectBackendCACerts(ctx context.Context, gateway *gatewayv1.Gateway) []byte {
+	// List all HTTPRoutes attached to this Gateway
+	routes, err := listAcceptedRoutesForGateway(ctx, r.Client, gateway)
+	if err != nil {
+		r.Logger.Error("failed to list routes for backend CA cert collection", "error", err)
+		return nil
+	}
+
+	// Collect unique service names from route backends
+	type svcKey struct{ ns, name string }
+	services := make(map[svcKey]struct{})
+	for _, route := range routes {
+		routeNS := route.Namespace
+		if routeNS == "" {
+			routeNS = gateway.Namespace
+		}
+		for _, rule := range route.Spec.Rules {
+			for _, backend := range rule.BackendRefs {
+				if backend.Kind != nil && *backend.Kind != "Service" {
+					continue
+				}
+				if backend.Group != nil && *backend.Group != "" {
+					continue
+				}
+				ns := routeNS
+				if backend.Namespace != nil {
+					ns = string(*backend.Namespace)
+				}
+				services[svcKey{ns, string(backend.Name)}] = struct{}{}
+			}
+		}
+	}
+
+	if len(services) == 0 {
+		return nil
+	}
+
+	// List BackendTLSPolicies once per namespace (not per service)
+	nsPolicies := make(map[string][]gatewayv1.BackendTLSPolicy)
+	for svc := range services {
+		if _, ok := nsPolicies[svc.ns]; ok {
+			continue
+		}
+		var policyList gatewayv1.BackendTLSPolicyList
+		if err := r.List(ctx, &policyList, client.InNamespace(svc.ns)); err != nil {
+			r.Logger.Error("failed to list BackendTLSPolicies", "namespace", svc.ns, "error", err)
+			nsPolicies[svc.ns] = nil
+			continue
+		}
+		nsPolicies[svc.ns] = policyList.Items
+	}
+
+	// Find policies targeting our services and collect their CA certs
+	seen := make(map[string]struct{})
+	var bundle []byte
+
+	for svc := range services {
+		for _, policy := range nsPolicies[svc.ns] {
+			for _, targetRef := range policy.Spec.TargetRefs {
+				if targetRef.Group != "" || targetRef.Kind != "Service" {
+					continue
+				}
+				if string(targetRef.Name) != svc.name {
+					continue
+				}
+
+				for _, ref := range policy.Spec.Validation.CACertificateRefs {
+					if ref.Group != "" || ref.Kind != "ConfigMap" {
+						continue
+					}
+					cmKey := svc.ns + "/" + string(ref.Name)
+					if _, dup := seen[cmKey]; dup {
+						continue
+					}
+					seen[cmKey] = struct{}{}
+
+					var cm corev1.ConfigMap
+					if err := r.Get(ctx, types.NamespacedName{
+						Name:      string(ref.Name),
+						Namespace: svc.ns,
+					}, &cm); err != nil {
+						r.Logger.Warn("failed to get CA cert ConfigMap",
+							"configmap", cmKey, "error", err)
+						continue
+					}
+
+					caCert, ok := cm.Data[caCertKey]
+					if !ok || caCert == "" {
+						continue
+					}
+
+					bundle = append(bundle, []byte(caCert)...)
+					if caCert[len(caCert)-1] != '\n' {
+						bundle = append(bundle, '\n')
+					}
+				}
+			}
+		}
+	}
+
+	return bundle
+}
+
 // buildLabels returns labels for resources owned by a Gateway.
 func (r *GatewayReconciler) buildLabels(gateway *gatewayv1.Gateway) map[string]string {
 	return map[string]string{
@@ -1370,6 +1485,68 @@ func (r *GatewayReconciler) enqueueGatewaysForHTTPRoute() handler.EventHandler {
 	})
 }
 
+// enqueueGatewaysForBackendTLSPolicy returns an EventHandler that enqueues
+// Gateways when a BackendTLSPolicy changes, so the CA cert bundle can be updated.
+func (r *GatewayReconciler) enqueueGatewaysForBackendTLSPolicy() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+		policy, ok := obj.(*gatewayv1.BackendTLSPolicy)
+		if !ok {
+			return nil
+		}
+
+		// Only care about policies with CA cert refs (not wellKnownCACertificates)
+		if len(policy.Spec.Validation.CACertificateRefs) == 0 {
+			return nil
+		}
+
+		serviceNames := serviceNamesFromPolicy(policy)
+		if len(serviceNames) == 0 {
+			return nil
+		}
+
+		// Find HTTPRoutes referencing these services
+		var routeList gatewayv1.HTTPRouteList
+		if err := r.List(ctx, &routeList); err != nil {
+			r.Logger.Error("failed to list HTTPRoutes for BackendTLSPolicy->Gateway watch", "error", err)
+			return nil
+		}
+
+		// Collect unique Gateways
+		seen := make(map[types.NamespacedName]bool)
+		var requests []ctrl.Request
+		for _, route := range routeList.Items {
+			refsTarget := false
+			for svcName := range serviceNames {
+				if routeReferencesService(&route, svcName, policy.Namespace) {
+					refsTarget = true
+					break
+				}
+			}
+			if !refsTarget {
+				continue
+			}
+
+			for _, parentRef := range route.Spec.ParentRefs {
+				if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+					continue
+				}
+				ns := route.Namespace
+				if parentRef.Namespace != nil {
+					ns = string(*parentRef.Namespace)
+				}
+				nn := types.NamespacedName{Name: string(parentRef.Name), Namespace: ns}
+				if seen[nn] {
+					continue
+				}
+				seen[nn] = true
+				requests = append(requests, ctrl.Request{NamespacedName: nn})
+			}
+		}
+
+		return requests
+	})
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -1402,6 +1579,10 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&gatewayv1beta1.ReferenceGrant{},
 			r.enqueueGatewaysForReferenceGrant(),
+		).
+		Watches(
+			&gatewayv1.BackendTLSPolicy{},
+			r.enqueueGatewaysForBackendTLSPolicy(),
 		).
 		Complete(r)
 }

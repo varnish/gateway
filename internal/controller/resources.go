@@ -23,6 +23,7 @@ const (
 	volumeVCLConfig  = "vcl-config"
 	volumeVarnishRun = "varnish-run"
 	volumeTLSCerts   = "tls-certs"
+	volumeBackendCA  = "backend-ca"
 
 	// Chaperone health port
 	chaperoneHealthPort = 8081
@@ -144,6 +145,26 @@ func (r *GatewayReconciler) buildTLSSecret(gateway *gatewayv1.Gateway, certData 
 	}
 }
 
+// buildBackendCASecret creates a Secret containing the bundled CA certificates
+// from BackendTLSPolicies, used for backend TLS verification.
+func (r *GatewayReconciler) buildBackendCASecret(gateway *gatewayv1.Gateway, caCerts []byte) *corev1.Secret {
+	return &corev1.Secret{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Secret",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-backend-tls", gateway.Name),
+			Namespace: gateway.Namespace,
+			Labels:    r.buildLabels(gateway),
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			"ca-bundle.crt": caCerts,
+		},
+	}
+}
+
 // buildServiceAccount creates the ServiceAccount for the chaperone.
 func (r *GatewayReconciler) buildServiceAccount(gateway *gatewayv1.Gateway) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
@@ -191,7 +212,7 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements) *appsv1.Deployment {
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements, hasBackendTLS bool) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 	replicas := int32(1) // TODO: get from GatewayClassParameters
 
@@ -243,8 +264,8 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiv
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
 					InitContainers: extraInitContainers,
-					Containers:     r.buildContainers(gateway, effectiveImage, varnishdExtraArgs, logging, extraVolumeMounts, resources),
-					Volumes:        r.buildVolumes(gateway, extraVolumes),
+					Containers:     r.buildContainers(gateway, effectiveImage, varnishdExtraArgs, logging, extraVolumeMounts, resources, hasBackendTLS),
+					Volumes:        r.buildVolumes(gateway, extraVolumes, hasBackendTLS),
 				},
 			},
 		},
@@ -252,7 +273,7 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiv
 }
 
 // buildVolumes creates the pod volumes, including TLS cert volume if HTTPS is enabled.
-func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, extra []corev1.Volume) []corev1.Volume {
+func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, extra []corev1.Volume, hasBackendTLS bool) []corev1.Volume {
 	hasTLS := hasHTTPSListener(gateway)
 	volumes := []corev1.Volume{
 		{
@@ -284,15 +305,26 @@ func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, extra []cor
 		})
 	}
 
+	if hasBackendTLS {
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeBackendCA,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: fmt.Sprintf("%s-backend-tls", gateway.Name),
+				},
+			},
+		})
+	}
+
 	volumes = append(volumes, extra...)
 
 	return volumes
 }
 
 // buildContainers creates the pod containers: main gateway container and optional logging sidecar.
-func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) []corev1.Container {
+func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements, hasBackendTLS bool) []corev1.Container {
 	containers := []corev1.Container{
-		r.buildGatewayContainer(gateway, effectiveImage, varnishdExtraArgs, extraVolumeMounts, resources),
+		r.buildGatewayContainer(gateway, effectiveImage, varnishdExtraArgs, extraVolumeMounts, resources, hasBackendTLS),
 	}
 
 	// Add logging sidecar if configured
@@ -305,7 +337,7 @@ func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, effectiv
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
 // This container runs chaperone which manages varnishd internally.
-func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements) corev1.Container {
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements, hasBackendTLS bool) corev1.Container {
 	hasTLS := hasHTTPSListener(gateway)
 
 	// Build VARNISH_LISTEN from all listeners, deduplicating by port.
@@ -396,6 +428,13 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 		)
 	}
 
+	// Set SSL_CERT_FILE for backend TLS verification (used by Varnish/OpenSSL)
+	if hasBackendTLS {
+		env = append(env,
+			corev1.EnvVar{Name: "SSL_CERT_FILE", Value: "/etc/varnish/backend-ca/ca-bundle.crt"},
+		)
+	}
+
 	// Generate container ports dynamically from unique listener ports
 	ports := []corev1.ContainerPort{
 		{
@@ -432,6 +471,13 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      volumeTLSCerts,
 			MountPath: "/etc/varnish/tls",
+			ReadOnly:  true,
+		})
+	}
+	if hasBackendTLS {
+		volumeMounts = append(volumeMounts, corev1.VolumeMount{
+			Name:      volumeBackendCA,
+			MountPath: "/etc/varnish/backend-ca",
 			ReadOnly:  true,
 		})
 	}

@@ -46,6 +46,10 @@ type InfrastructureConfig struct {
 
 	// ExtraInitContainers are additional init containers to run before the main container
 	ExtraInitContainers []corev1.Container
+
+	// HasBackendTLS indicates whether backend TLS (via BackendTLSPolicy) is configured.
+	// Changes to this trigger a pod restart to add/remove the CA cert volume and SSL_CERT_FILE env.
+	HasBackendTLS bool
 }
 
 // ComputeHash returns a deterministic SHA256 hash of the infrastructure configuration
@@ -106,6 +110,12 @@ func (c *InfrastructureConfig) ComputeHash() string {
 	if len(c.ExtraInitContainers) > 0 {
 		data, _ := json.Marshal(c.ExtraInitContainers)
 		h.Write(data)
+	}
+	h.Write([]byte{0})
+
+	// Include backend TLS state
+	if c.HasBackendTLS {
+		h.Write([]byte("backend-tls"))
 	}
 
 	return hex.EncodeToString(h.Sum(nil))

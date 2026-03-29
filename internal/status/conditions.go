@@ -5,16 +5,16 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// boolToStatus converts a bool to a metav1.ConditionStatus.
-func boolToStatus(val bool) metav1.ConditionStatus {
+// BoolToStatus converts a bool to a metav1.ConditionStatus.
+func BoolToStatus(val bool) metav1.ConditionStatus {
 	if val {
 		return metav1.ConditionTrue
 	}
 	return metav1.ConditionFalse
 }
 
-// newCondition builds a metav1.Condition with the given fields.
-func newCondition(condType string, status metav1.ConditionStatus, generation int64, reason, message string) metav1.Condition {
+// NewCondition builds a metav1.Condition with the given fields.
+func NewCondition(condType string, status metav1.ConditionStatus, generation int64, reason, message string) metav1.Condition {
 	return metav1.Condition{
 		Type:               condType,
 		Status:             status,
@@ -27,26 +27,26 @@ func newCondition(condType string, status metav1.ConditionStatus, generation int
 
 // SetGatewayClassAccepted sets the Accepted condition on a GatewayClass.
 func SetGatewayClassAccepted(gc *gatewayv1.GatewayClass, accepted bool, reason, message string) {
-	cond := newCondition(string(gatewayv1.GatewayClassConditionStatusAccepted), boolToStatus(accepted), gc.Generation, reason, message)
-	setCondition(&gc.Status.Conditions, cond)
+	cond := NewCondition(string(gatewayv1.GatewayClassConditionStatusAccepted), BoolToStatus(accepted), gc.Generation, reason, message)
+	SetCondition(&gc.Status.Conditions, cond)
 }
 
 // SetGatewayAccepted sets the Accepted condition on a Gateway.
 func SetGatewayAccepted(gateway *gatewayv1.Gateway, accepted bool, reason, message string) {
-	cond := newCondition(string(gatewayv1.GatewayConditionAccepted), boolToStatus(accepted), gateway.Generation, reason, message)
-	setCondition(&gateway.Status.Conditions, cond)
+	cond := NewCondition(string(gatewayv1.GatewayConditionAccepted), BoolToStatus(accepted), gateway.Generation, reason, message)
+	SetCondition(&gateway.Status.Conditions, cond)
 }
 
 // SetGatewayProgrammed sets the Programmed condition on a Gateway.
 func SetGatewayProgrammed(gateway *gatewayv1.Gateway, programmed bool, reason, message string) {
-	cond := newCondition(string(gatewayv1.GatewayConditionProgrammed), boolToStatus(programmed), gateway.Generation, reason, message)
-	setCondition(&gateway.Status.Conditions, cond)
+	cond := NewCondition(string(gatewayv1.GatewayConditionProgrammed), BoolToStatus(programmed), gateway.Generation, reason, message)
+	SetCondition(&gateway.Status.Conditions, cond)
 }
 
-// setCondition updates or adds a condition in the slice.
+// SetCondition updates or adds a condition in the slice.
 // If a condition with the same Type already exists, it is updated.
 // Only updates LastTransitionTime if the Status has changed.
-func setCondition(conditions *[]metav1.Condition, newCondition metav1.Condition) {
+func SetCondition(conditions *[]metav1.Condition, newCondition metav1.Condition) {
 	for i, existing := range *conditions {
 		if existing.Type == newCondition.Type {
 			// Only update LastTransitionTime if status changed
@@ -65,18 +65,18 @@ func setCondition(conditions *[]metav1.Condition, newCondition metav1.Condition)
 func SetHTTPRouteAccepted(route *gatewayv1.HTTPRoute, parentRef gatewayv1.ParentReference,
 	controllerName string, accepted bool, reason, message string) {
 
-	cond := newCondition(string(gatewayv1.RouteConditionAccepted), boolToStatus(accepted), route.Generation, reason, message)
+	cond := NewCondition(string(gatewayv1.RouteConditionAccepted), BoolToStatus(accepted), route.Generation, reason, message)
 	parentStatus := findOrCreateRouteParentStatus(route, parentRef, controllerName)
-	setCondition(&parentStatus.Conditions, cond)
+	SetCondition(&parentStatus.Conditions, cond)
 }
 
 // SetHTTPRouteResolvedRefs sets the ResolvedRefs condition on an HTTPRoute for a specific parent Gateway.
 func SetHTTPRouteResolvedRefs(route *gatewayv1.HTTPRoute, parentRef gatewayv1.ParentReference,
 	controllerName string, resolved bool, reason, message string) {
 
-	cond := newCondition(string(gatewayv1.RouteConditionResolvedRefs), boolToStatus(resolved), route.Generation, reason, message)
+	cond := NewCondition(string(gatewayv1.RouteConditionResolvedRefs), BoolToStatus(resolved), route.Generation, reason, message)
 	parentStatus := findOrCreateRouteParentStatus(route, parentRef, controllerName)
-	setCondition(&parentStatus.Conditions, cond)
+	SetCondition(&parentStatus.Conditions, cond)
 }
 
 // findOrCreateRouteParentStatus finds or creates a RouteParentStatus entry for the given parentRef.

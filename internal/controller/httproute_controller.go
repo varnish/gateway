@@ -672,6 +672,8 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 	}
 
 	// Build lookup: "namespace/serviceName" → BackendTLSPolicy
+	// Only include policies that have valid CA cert configuration (either
+	// wellKnownCACertificates: System or valid caCertificateRefs).
 	policyMap := make(map[string]*gatewayv1.BackendTLSPolicy)
 	for ns := range namespaces {
 		var policyList gatewayv1.BackendTLSPolicyList
@@ -682,16 +684,14 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 		for i := range policyList.Items {
 			policy := &policyList.Items[i]
 
-			// Only support wellKnownCACertificates: System for now
-			if policy.Spec.Validation.WellKnownCACertificates == nil ||
-				*policy.Spec.Validation.WellKnownCACertificates != gatewayv1.WellKnownCACertificatesSystem {
-				if len(policy.Spec.Validation.CACertificateRefs) > 0 {
-					r.Logger.Warn("BackendTLSPolicy with caCertificateRefs is not supported, skipping",
-						"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name))
-				} else {
-					r.Logger.Warn("BackendTLSPolicy must set wellKnownCACertificates: System, skipping",
-						"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name))
-				}
+			// Accept policies with wellKnownCACertificates: System or caCertificateRefs
+			hasWellKnown := policy.Spec.Validation.WellKnownCACertificates != nil &&
+				*policy.Spec.Validation.WellKnownCACertificates == gatewayv1.WellKnownCACertificatesSystem
+			hasCertRefs := len(policy.Spec.Validation.CACertificateRefs) > 0
+
+			if !hasWellKnown && !hasCertRefs {
+				r.Logger.Warn("BackendTLSPolicy has no CA certificate configuration, skipping",
+					"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name))
 				continue
 			}
 
@@ -728,15 +728,7 @@ func (r *HTTPRouteReconciler) findHTTPRoutesForBackendTLSPolicy(ctx context.Cont
 		return nil
 	}
 
-	// Collect service names targeted by this policy
-	serviceNames := make(map[string]struct{})
-	for _, targetRef := range policy.Spec.TargetRefs {
-		if targetRef.Group != "" || targetRef.Kind != "Service" {
-			continue
-		}
-		serviceNames[string(targetRef.Name)] = struct{}{}
-	}
-
+	serviceNames := serviceNamesFromPolicy(policy)
 	if len(serviceNames) == 0 {
 		return nil
 	}
