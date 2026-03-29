@@ -1335,7 +1335,7 @@ func TestNeedsDeploymentUpdate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := needsDeploymentUpdate(tc.existing, tc.desired)
+			result, _ := needsDeploymentUpdate(tc.existing, tc.desired)
 			if result != tc.expectUpdate {
 				t.Errorf("expected %v, got %v", tc.expectUpdate, result)
 			}

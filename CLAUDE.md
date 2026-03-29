@@ -451,13 +451,15 @@ Multiple GatewayClasses can coexist, each with different GatewayClassParameters 
 
 ### Helm (Recommended)
 
-The easiest way to install Varnish Gateway is using the Helm chart:
+The easiest way to install Varnish Gateway is using the Helm chart from the OCI registry:
 
 ```bash
-helm install varnish-gateway ./charts/varnish-gateway \
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --namespace varnish-gateway-system \
   --create-namespace
 ```
+
+**Important:** Always use the published OCI chart, not `./charts/varnish-gateway`. The local chart has `appVersion: 0.0.0-dev` placeholder values — CI substitutes the real version at publish time. Using the local chart will deploy with wrong image tags.
 
 The Helm chart includes:
 - Varnish-specific CRDs (GatewayClassParameters, VarnishCacheInvalidation, VarnishCachePolicy)

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
+	"golang.org/x/time/rate"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -15,9 +17,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -301,7 +305,8 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 	// For Deployments, check if image needs updating (supports rolling updates)
 	if desiredDeploy, ok := desired.(*appsv1.Deployment); ok {
 		existingDeploy := existing.(*appsv1.Deployment)
-		if needsDeploymentUpdate(existingDeploy, desiredDeploy) {
+		update, reason := needsDeploymentUpdate(existingDeploy, desiredDeploy)
+		if update {
 			// Update the pod template spec to trigger a rolling update
 			existingDeploy.Spec.Template = desiredDeploy.Spec.Template
 			existingDeploy.Spec.Strategy = desiredDeploy.Spec.Strategy
@@ -310,7 +315,7 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 			}
 			r.Logger.Info("updated deployment",
 				"name", desired.GetName(),
-				"image", desiredDeploy.Spec.Template.Spec.Containers[0].Image)
+				"reason", reason)
 			return nil
 		}
 	}
@@ -350,16 +355,19 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 }
 
 // needsDeploymentUpdate checks if the Deployment needs to be updated.
-func needsDeploymentUpdate(existing, desired *appsv1.Deployment) bool {
+// Returns whether an update is needed and a reason string for logging.
+func needsDeploymentUpdate(existing, desired *appsv1.Deployment) (bool, string) {
 	if len(existing.Spec.Template.Spec.Containers) == 0 ||
 		len(desired.Spec.Template.Spec.Containers) == 0 {
-		return false
+		return false, ""
 	}
 
 	// Check if image changed
 	if existing.Spec.Template.Spec.Containers[0].Image !=
 		desired.Spec.Template.Spec.Containers[0].Image {
-		return true
+		return true, fmt.Sprintf("image changed: %s -> %s",
+			existing.Spec.Template.Spec.Containers[0].Image,
+			desired.Spec.Template.Spec.Containers[0].Image)
 	}
 
 	// Check if infrastructure hash changed (triggers pod restart)
@@ -372,7 +380,11 @@ func needsDeploymentUpdate(existing, desired *appsv1.Deployment) bool {
 		desiredHash = desired.Spec.Template.Annotations[AnnotationInfraHash]
 	}
 
-	return existingHash != desiredHash
+	if existingHash != desiredHash {
+		return true, fmt.Sprintf("infra-hash changed: %s -> %s", existingHash, desiredHash)
+	}
+
+	return false, ""
 }
 
 // needsServiceUpdate checks if the Service ports need to be updated.
@@ -1550,6 +1562,15 @@ func (r *GatewayReconciler) enqueueGatewaysForBackendTLSPolicy() handler.EventHa
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		// Rate limit reconciles to prevent API server storms from runaway reconcile loops.
+		// Added after an incident where a reconcile loop overwhelmed the API server.
+		// Per-item: exponential backoff 1s → 5min. Global: 2 req/s with burst of 5.
+		WithOptions(controller.Options{
+			RateLimiter: workqueue.NewTypedMaxOfRateLimiter(
+				workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](time.Second, 5*time.Minute),
+				&workqueue.TypedBucketRateLimiter[ctrl.Request]{Limiter: rate.NewLimiter(rate.Limit(2), 5)},
+			),
+		}).
 		For(&gatewayv1.Gateway{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
