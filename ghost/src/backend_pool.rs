@@ -84,11 +84,16 @@ impl BackendPool {
         // Configure TLS if BackendTLSPolicy applies to this backend.
         // Uses a Cargo patch for varnish-sys to fix .tls() return type.
         // TODO: Remove patch once varnish-sys > 0.6.0 is released with the fix.
+        // hostname_cstr must outlive builder since hosthdr() borrows it.
         #[cfg(varnishsys_90_sslflags)]
-        let builder = if let Some(tls_config) = tls {
-            let hostname_cstr = CString::new(tls_config.hostname.as_str())
-                .map_err(|e| VclError::new(format!("Invalid TLS hostname: {}", e)))?;
-            let builder = builder.hosthdr(&hostname_cstr);
+        let hostname_cstr = tls
+            .as_ref()
+            .map(|t| CString::new(t.hostname.as_str()))
+            .transpose()
+            .map_err(|e| VclError::new(format!("Invalid TLS hostname: {}", e)))?;
+        #[cfg(varnishsys_90_sslflags)]
+        let builder = if tls.is_some() {
+            let builder = builder.hosthdr(hostname_cstr.as_ref().unwrap());
             builder.tls(true, true)
         } else {
             builder

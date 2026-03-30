@@ -20,6 +20,8 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 
 [build-dependencies]
 cc = "1"
+pkg-config = "0.3.30"
+semver = "1"
 
 [dev-dependencies]
 tempfile = "3.0"
