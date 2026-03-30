@@ -33,7 +33,11 @@ func TestConformance(t *testing.T) {
 		features.SupportHTTPRouteHostRewrite,
 		features.SupportHTTPRoutePathRewrite,
 		features.SupportGatewayHTTPListenerIsolation,
-		features.SupportBackendTLSPolicy,
+		// BackendTLSPolicy: Varnish 9.0 does not expose a backend API field for
+		// specifying the CA certificate used to verify backend TLS certs. Backend
+		// TLS works on a best-effort basis (system CA store / SSL_CERT_FILE) but
+		// cannot pass conformance until the Varnish C API adds CA cert support.
+		// features.SupportBackendTLSPolicy,
 	)
 
 	version := os.Getenv("GATEWAY_VERSION")
