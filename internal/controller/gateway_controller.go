@@ -1571,11 +1571,11 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// Rate limit reconciles to prevent API server storms from runaway reconcile loops.
 		// Added after an incident where a reconcile loop overwhelmed the API server.
-		// Per-item: exponential backoff 1s → 5min. Global: 2 req/s with burst of 5.
+		// Per-item: exponential backoff 1s → 5min. Global: 10 req/s with burst of 20.
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewTypedMaxOfRateLimiter(
 				workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](time.Second, 5*time.Minute),
-				&workqueue.TypedBucketRateLimiter[ctrl.Request]{Limiter: rate.NewLimiter(rate.Limit(2), 5)},
+				&workqueue.TypedBucketRateLimiter[ctrl.Request]{Limiter: rate.NewLimiter(rate.Limit(10), 20)},
 			),
 		}).
 		For(&gatewayv1.Gateway{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
