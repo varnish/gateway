@@ -110,7 +110,14 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// 5. Reconcile child resources
 	if err := r.reconcileResources(ctx, &gateway); err != nil {
-		// Update status to reflect error
+		// Conflict errors are transient — just requeue without poisoning Gateway status.
+		// Setting Invalid status on conflicts causes the Gateway to appear broken until
+		// the next successful reconcile, which can cascade into conformance test timeouts.
+		if apierrors.IsConflict(err) {
+			log.Debug("conflict during resource reconciliation, requeueing", "error", err)
+			return ctrl.Result{Requeue: true}, nil
+		}
+		// Update status to reflect real errors
 		if statusErr := r.updateGatewayStatus(ctx, &gateway, false, err.Error()); statusErr != nil {
 			log.Error("failed to update status", "error", statusErr)
 		}
