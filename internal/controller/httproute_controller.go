@@ -1253,6 +1253,9 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Service{},
 			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForService),
+			// Only trigger on spec changes (generation bump), ignore status-only updates
+			// (e.g., endpoint readiness) to avoid unnecessary cluster-wide HTTPRoute lists.
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
 		Watches(
 			&gatewayparamsv1alpha1.VarnishCachePolicy{},
