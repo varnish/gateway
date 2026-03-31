@@ -115,7 +115,11 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		// the next successful reconcile, which can cascade into conformance test timeouts.
 		if apierrors.IsConflict(err) {
 			log.Debug("conflict during resource reconciliation, requeueing", "error", err)
-			return ctrl.Result{Requeue: true}, nil
+			// Use RequeueAfter instead of Requeue to avoid exponential backoff.
+			// Requeue: true calls AddRateLimited() without Forget(), so the
+			// ItemExponentialFailureRateLimiter accumulates: 1s, 2s, 4s, 8s...
+			// RequeueAfter calls Forget() first, resetting the backoff counter.
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		// Update status to reflect real errors
 		if statusErr := r.updateGatewayStatus(ctx, &gateway, false, err.Error()); statusErr != nil {
@@ -1570,11 +1574,11 @@ func (r *GatewayReconciler) enqueueGatewaysForBackendTLSPolicy() handler.EventHa
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		// Rate limit reconciles to prevent API server storms from runaway reconcile loops.
-		// Added after an incident where a reconcile loop overwhelmed the API server.
-		// Per-item: exponential backoff 1s → 5min. Global: 10 req/s with burst of 20.
+		// Per-item: exponential backoff 1s → 8s. Global: 10 req/s with burst of 20.
+		// Keep the cap low — persistent errors need operator attention, not long backoff.
 		WithOptions(controller.Options{
 			RateLimiter: workqueue.NewTypedMaxOfRateLimiter(
-				workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](time.Second, 5*time.Minute),
+				workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](time.Second, 8*time.Second),
 				&workqueue.TypedBucketRateLimiter[ctrl.Request]{Limiter: rate.NewLimiter(rate.Limit(10), 20)},
 			),
 		}).
