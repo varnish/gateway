@@ -83,8 +83,8 @@ func TestListenerSpecs(t *testing.T) {
 		{
 			name: "deduplicates same port",
 			listeners: []gatewayv1.Listener{
-				{Name: "web1", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: ptrTo(gatewayv1.Hostname("a.example.com"))},
-				{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: ptrTo(gatewayv1.Hostname("b.example.com"))},
+				{Name: "web1", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("a.example.com"))},
+				{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("b.example.com"))},
 			},
 			want: "http-80",
 		},
@@ -286,8 +286,8 @@ func TestBuildService_MultipleListeners(t *testing.T) {
 func TestBuildService_DeduplicatesPorts(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default",
-		gatewayv1.Listener{Name: "web1", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: ptrTo(gatewayv1.Hostname("a.example.com"))},
-		gatewayv1.Listener{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: ptrTo(gatewayv1.Hostname("b.example.com"))},
+		gatewayv1.Listener{Name: "web1", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("a.example.com"))},
+		gatewayv1.Listener{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("b.example.com"))},
 	)
 
 	svc := r.buildService(gw)
@@ -609,8 +609,8 @@ func TestBuildGatewayContainer_Ports(t *testing.T) {
 func TestBuildGatewayContainer_DeduplicatesListenerPorts(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default",
-		gatewayv1.Listener{Name: "web1", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: ptrTo(gatewayv1.Hostname("a.example.com"))},
-		gatewayv1.Listener{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: ptrTo(gatewayv1.Hostname("b.example.com"))},
+		gatewayv1.Listener{Name: "web1", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("a.example.com"))},
+		gatewayv1.Listener{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("b.example.com"))},
 	)
 
 	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, false)

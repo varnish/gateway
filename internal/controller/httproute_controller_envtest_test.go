@@ -136,7 +136,7 @@ func TestHTTPRouteReconcile_GatewayControllerUpdatesAttachedRoutes_Envtest(t *te
 							BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "test-service",
-									Port: ptrTo(gatewayv1.PortNumber(8080)),
+									Port: new(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -318,7 +318,7 @@ func TestHTTPRouteReconcile_DeletionUpdatesRoutingJSON_Envtest(t *testing.T) {
 				BackendRefs: []gatewayv1.HTTPBackendRef{{
 					BackendRef: gatewayv1.BackendRef{
 						BackendObjectReference: gatewayv1.BackendObjectReference{
-							Name: "svc-a", Port: ptrTo(gatewayv1.PortNumber(8080)),
+							Name: "svc-a", Port: new(gatewayv1.PortNumber(8080)),
 						},
 					},
 				}},
@@ -336,7 +336,7 @@ func TestHTTPRouteReconcile_DeletionUpdatesRoutingJSON_Envtest(t *testing.T) {
 				BackendRefs: []gatewayv1.HTTPBackendRef{{
 					BackendRef: gatewayv1.BackendRef{
 						BackendObjectReference: gatewayv1.BackendObjectReference{
-							Name: "svc-b", Port: ptrTo(gatewayv1.PortNumber(8080)),
+							Name: "svc-b", Port: new(gatewayv1.PortNumber(8080)),
 						},
 					},
 				}},
@@ -424,8 +424,4 @@ func TestHTTPRouteReconcile_DeletionUpdatesRoutingJSON_Envtest(t *testing.T) {
 		t.Errorf("expected routing.json to still contain b.example.com after deletion, got: %s", routingJSON)
 	}
 	t.Logf("After deletion: routing.json correctly contains only b.example.com")
-}
-
-func ptrTo[T any](v T) *T {
-	return &v
 }

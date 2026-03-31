@@ -29,10 +29,6 @@ HKRXRfbUE6v5gLP8HBgFGKMo0mIRn8oCIHyjk+aIKEjVJGSGFDt2MqXVpvGjj+xB
 -----END CERTIFICATE-----
 `
 
-func ptrTo[T any](v T) *T {
-	return &v
-}
-
 func newBackendTLSPolicyReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *BackendTLSPolicyReconciler {
 	allObjs := append([]runtime.Object{newTestGatewayClass("varnish")}, objs...)
 	fakeClient := fake.NewClientBuilder().
@@ -132,11 +128,11 @@ func TestTargetRefsConflict(t *testing.T) {
 			name: "same service, same section names, conflict",
 			a: gatewayv1.LocalPolicyTargetReferenceWithSectionName{
 				LocalPolicyTargetReference: gatewayv1.LocalPolicyTargetReference{Name: "svc-a"},
-				SectionName:                ptrTo(gatewayv1.SectionName("port-80")),
+				SectionName:                new(gatewayv1.SectionName("port-80")),
 			},
 			b: gatewayv1.LocalPolicyTargetReferenceWithSectionName{
 				LocalPolicyTargetReference: gatewayv1.LocalPolicyTargetReference{Name: "svc-a"},
-				SectionName:                ptrTo(gatewayv1.SectionName("port-80")),
+				SectionName:                new(gatewayv1.SectionName("port-80")),
 			},
 			conflict: true,
 		},
@@ -144,11 +140,11 @@ func TestTargetRefsConflict(t *testing.T) {
 			name: "same service, different section names, no conflict",
 			a: gatewayv1.LocalPolicyTargetReferenceWithSectionName{
 				LocalPolicyTargetReference: gatewayv1.LocalPolicyTargetReference{Name: "svc-a"},
-				SectionName:                ptrTo(gatewayv1.SectionName("port-80")),
+				SectionName:                new(gatewayv1.SectionName("port-80")),
 			},
 			b: gatewayv1.LocalPolicyTargetReferenceWithSectionName{
 				LocalPolicyTargetReference: gatewayv1.LocalPolicyTargetReference{Name: "svc-a"},
-				SectionName:                ptrTo(gatewayv1.SectionName("port-443")),
+				SectionName:                new(gatewayv1.SectionName("port-443")),
 			},
 			conflict: false,
 		},
@@ -156,7 +152,7 @@ func TestTargetRefsConflict(t *testing.T) {
 			name: "same service, one has section name, no conflict",
 			a: gatewayv1.LocalPolicyTargetReferenceWithSectionName{
 				LocalPolicyTargetReference: gatewayv1.LocalPolicyTargetReference{Name: "svc-a"},
-				SectionName:                ptrTo(gatewayv1.SectionName("port-80")),
+				SectionName:                new(gatewayv1.SectionName("port-80")),
 			},
 			b: gatewayv1.LocalPolicyTargetReferenceWithSectionName{
 				LocalPolicyTargetReference: gatewayv1.LocalPolicyTargetReference{Name: "svc-a"},
@@ -248,7 +244,7 @@ func TestValidateCACertificateRefs_WellKnownSystem(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 		Spec: gatewayv1.BackendTLSPolicySpec{
 			Validation: gatewayv1.BackendTLSPolicyValidation{
-				WellKnownCACertificates: ptrTo(gatewayv1.WellKnownCACertificatesSystem),
+				WellKnownCACertificates: new(gatewayv1.WellKnownCACertificatesSystem),
 				Hostname:                "example.com",
 			},
 		},
@@ -537,7 +533,7 @@ func TestReconcile_NoAncestorGateways_ClearsStatus(t *testing.T) {
 				{LocalPolicyTargetReference: gatewayv1.LocalPolicyTargetReference{Kind: "Service", Name: "svc-a"}},
 			},
 			Validation: gatewayv1.BackendTLSPolicyValidation{
-				WellKnownCACertificates: ptrTo(gatewayv1.WellKnownCACertificatesSystem),
+				WellKnownCACertificates: new(gatewayv1.WellKnownCACertificatesSystem),
 				Hostname:                "example.com",
 			},
 		},
@@ -597,7 +593,7 @@ func TestReconcile_AcceptedWithValidCACert(t *testing.T) {
 				{
 					BackendRefs: []gatewayv1.HTTPBackendRef{
 						{BackendRef: gatewayv1.BackendRef{
-							BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-a", Port: ptrTo(gatewayv1.PortNumber(8080))},
+							BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-a", Port: new(gatewayv1.PortNumber(8080))},
 						}},
 					},
 				},
@@ -691,7 +687,7 @@ func TestReconcile_RejectedInvalidCACert(t *testing.T) {
 			},
 			Rules: []gatewayv1.HTTPRouteRule{
 				{BackendRefs: []gatewayv1.HTTPBackendRef{
-					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-a", Port: ptrTo(gatewayv1.PortNumber(8080))}}},
+					{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-a", Port: new(gatewayv1.PortNumber(8080))}}},
 				}},
 			},
 		},
