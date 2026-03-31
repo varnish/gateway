@@ -15,12 +15,16 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/invalidation"
 	"github.com/varnish/gateway/internal/k8sutil"
 	vtls "github.com/varnish/gateway/internal/tls"
 	"github.com/varnish/gateway/internal/varnishadm"
+	"github.com/varnish/gateway/internal/varnishstat"
 	"github.com/varnish/gateway/internal/vcl"
 	"github.com/varnish/gateway/internal/vrun"
 	"golang.org/x/sync/errgroup"
@@ -311,11 +315,19 @@ func run() error {
 		return fmt.Errorf("varnishMgr.Start: %w", err)
 	}
 
+	// Set up Prometheus metrics
+	promReg := prometheus.NewRegistry()
+	promReg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	promReg.MustRegister(collectors.NewGoCollector())
+	promReg.MustRegister(varnishstat.NewCollector(cfg.VarnishDir, logger.With("component", "varnishstat")))
+	chapMetrics := newChaperoneMetrics(promReg)
+
 	// Start health server with drain endpoint for graceful shutdown
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", makeHealthHandler(dashState))
 	mux.HandleFunc("/drain", makeDrainHandler(dashState))
 	mux.HandleFunc("/debug/backends", makeBackendsHandler(vadm))
+	mux.Handle("/metrics", promhttp.HandlerFor(promReg, promhttp.HandlerOpts{}))
 
 	healthServer := &http.Server{
 		Addr:    cfg.HealthAddr,
@@ -458,6 +470,11 @@ func run() error {
 		case <-gctx.Done():
 		}
 		return nil
+	})
+
+	// Metrics updater: subscribes to dashboard events and increments Prometheus counters
+	g.Go(func() error {
+		return runMetricsUpdater(gctx, dashBus, chapMetrics)
 	})
 
 	// Start dashboard server (if configured)
