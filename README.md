@@ -158,6 +158,10 @@ The dashboard updates every second and highlights changes as they happen. It is 
 }
 ```
 
+## Known Limitations
+
+- **BackendTLSPolicy** is currently non-functional. Varnish lacks per-backend CA certificate configuration, so backend TLS verification cannot be implemented correctly. The conformance tests for BackendTLSPolicy are skipped. This will be resolved when [varnish/varnish#26](https://github.com/varnish/varnish/issues/26) is fixed.
+
 ## Installation
 
 **Helm (Recommended):**
