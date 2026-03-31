@@ -8,12 +8,10 @@ import (
 	"sort"
 	"time"
 
-	"golang.org/x/time/rate"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -305,14 +303,7 @@ func (r *VarnishCachePolicyReconciler) findVCPsForGateway(ctx context.Context, o
 // SetupWithManager sets up the VCP controller with the Manager.
 func (r *VarnishCachePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		// Rate limit reconciles to prevent API server storms from runaway reconcile loops.
-		// Per-item: exponential backoff 1s → 8s. Global: 10 req/s with burst of 20.
-		WithOptions(controller.Options{
-			RateLimiter: workqueue.NewTypedMaxOfRateLimiter(
-				workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](time.Second, 8*time.Second),
-				&workqueue.TypedBucketRateLimiter[ctrl.Request]{Limiter: rate.NewLimiter(rate.Limit(10), 20)},
-			),
-		}).
+		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
 		For(&gatewayparamsv1alpha1.VarnishCachePolicy{}).
 		Watches(
 			&gatewayv1.HTTPRoute{},
