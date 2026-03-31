@@ -695,6 +695,226 @@
     .header-meta { gap: 10px; }
     .meta-item { display: none; }
   }
+
+  /* ─── VARNISH LOG VIEWER ─── */
+  .vlog-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 14px 16px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    align-items: center;
+  }
+
+  .vlog-input, .vlog-select {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--surface);
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  .vlog-input:focus, .vlog-select:focus {
+    border-color: var(--blue);
+    box-shadow: 0 0 0 2px var(--blue-glow);
+  }
+
+  .vlog-input::placeholder {
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+
+  .vlog-select {
+    cursor: pointer;
+    min-width: 100px;
+  }
+
+  .vlog-btn {
+    font-family: var(--font-display);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    padding: 7px 18px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .vlog-btn.start {
+    background: var(--blue);
+    color: #fff;
+  }
+
+  .vlog-btn.start:hover {
+    background: var(--blue-dark);
+  }
+
+  .vlog-btn.stop {
+    background: var(--rose);
+    color: #fff;
+  }
+
+  .vlog-btn.stop:hover {
+    background: var(--rose-light);
+  }
+
+  .vlog-btn.clear {
+    background: var(--surface3);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+
+  .vlog-btn.clear:hover {
+    background: var(--border);
+  }
+
+  .vlog-viewer {
+    max-height: 520px;
+    overflow-y: auto;
+    background: #111827;
+    scrollbar-width: thin;
+    scrollbar-color: #374151 #111827;
+  }
+
+  .vlog-viewer .empty {
+    color: #6b7280;
+    background: transparent;
+  }
+
+  .vlog-entry {
+    border-bottom: 1px solid #1f2937;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+
+  .vlog-entry:hover {
+    background: #1f2937;
+  }
+
+  .vlog-summary {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 14px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: #d1d5db;
+    line-height: 1.6;
+  }
+
+  .vlog-time {
+    color: #6b7280;
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .vlog-method {
+    font-weight: 700;
+    flex-shrink: 0;
+    min-width: 48px;
+  }
+
+  .vlog-method.get { color: #34d399; }
+  .vlog-method.post { color: #60a5fa; }
+  .vlog-method.put { color: #fbbf24; }
+  .vlog-method.delete { color: #f87171; }
+  .vlog-method.patch { color: #c084fc; }
+  .vlog-method.head { color: #a78bfa; }
+
+  .vlog-url {
+    color: #e5e7eb;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .vlog-status {
+    font-weight: 700;
+    flex-shrink: 0;
+    min-width: 32px;
+    text-align: right;
+  }
+
+  .vlog-status.s2xx { color: #34d399; }
+  .vlog-status.s3xx { color: #60a5fa; }
+  .vlog-status.s4xx { color: #fbbf24; }
+  .vlog-status.s5xx { color: #f87171; }
+
+  .vlog-duration {
+    color: #9ca3af;
+    flex-shrink: 0;
+    min-width: 64px;
+    text-align: right;
+  }
+
+  .vlog-detail {
+    display: none;
+    padding: 8px 14px 12px;
+    border-top: 1px solid #1f2937;
+    background: #0d1117;
+    overflow-x: auto;
+  }
+
+  .vlog-detail pre {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.55;
+    color: #d1d5db;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .vlog-detail .jk { color: #7dd3fc; }
+  .vlog-detail .js { color: #86efac; }
+  .vlog-detail .jn { color: #fbbf24; }
+  .vlog-detail .jb { color: #c084fc; }
+  .vlog-detail .jnull { color: #6b7280; }
+
+  .vlog-status-bar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 16px;
+    background: var(--surface2);
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+
+  .vlog-status-bar label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    margin-left: auto;
+  }
+
+  .vlog-status-bar input[type="checkbox"] {
+    accent-color: var(--blue);
+  }
+
+  .vlog-error {
+    padding: 10px 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--rose-light);
+    background: rgba(192, 57, 43, 0.1);
+  }
+
+  @media (max-width: 900px) {
+    .vlog-toolbar { flex-direction: column; }
+    .vlog-input, .vlog-select { width: 100% !important; flex: unset !important; }
+  }
 </style>
 </head>
 <body>
@@ -793,6 +1013,38 @@
       <div class="panel-body">
         <div class="svc-grid" id="serviceGrid">
           <div class="empty">Waiting for endpoint discovery</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- VARNISH LOG -->
+    <div class="panel panel-full">
+      <div class="panel-head">
+        <span class="panel-title">Varnish Log</span>
+        <span class="panel-badge" id="vlogCount">0</span>
+      </div>
+      <div class="panel-body" style="padding:0">
+        <div class="vlog-toolbar">
+          <input type="text" id="vlogQuery" class="vlog-input" placeholder="VSL query, e.g. ReqURL ~ /api" style="flex:2;min-width:180px">
+          <input type="text" id="vlogInclude" class="vlog-input" placeholder="Include tags (-i)" style="flex:1;min-width:120px">
+          <input type="text" id="vlogExclude" class="vlog-input" placeholder="Exclude tags (-x)" style="flex:1;min-width:120px">
+          <select id="vlogGroup" class="vlog-select">
+            <option value="request">-g request</option>
+            <option value="vxid">-g vxid</option>
+            <option value="session">-g session</option>
+            <option value="raw">-g raw</option>
+          </select>
+          <input type="text" id="vlogRate" class="vlog-input" placeholder="-R 10/s" style="width:80px">
+          <button id="vlogStartBtn" class="vlog-btn start">Start</button>
+          <button id="vlogClearBtn" class="vlog-btn clear">Clear</button>
+        </div>
+        <div class="vlog-viewer" id="vlogViewer">
+          <div class="empty">Press Start to begin streaming</div>
+        </div>
+        <div class="vlog-status-bar" id="vlogStatusBar">
+          <span id="vlogEntryCount">0 entries</span>
+          <span id="vlogDuration"></span>
+          <label><input type="checkbox" id="vlogAutoScroll" checked> Auto-scroll</label>
         </div>
       </div>
     </div>
@@ -1110,6 +1362,225 @@
       connect();
     })
     .catch(() => connect());
+
+  // ─── Varnish Log Viewer ───
+  (function() {
+    let vlogSource = null;
+    let vlogEntries = 0;
+    let vlogStartTime = null;
+    let vlogTimer = null;
+    const MAX_VLOG = 1000;
+
+    const startBtn = document.getElementById('vlogStartBtn');
+    const clearBtn = document.getElementById('vlogClearBtn');
+    const viewer = document.getElementById('vlogViewer');
+
+    startBtn.addEventListener('click', function() {
+      if (vlogSource) { stopVlog(); } else { startVlog(); }
+    });
+    clearBtn.addEventListener('click', clearVlog);
+
+    // Allow Enter key in query input to start/stop
+    document.getElementById('vlogQuery').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (vlogSource) { stopVlog(); } else { startVlog(); }
+      }
+    });
+
+    function startVlog() {
+      const params = new URLSearchParams();
+      const q = document.getElementById('vlogQuery').value.trim();
+      const i = document.getElementById('vlogInclude').value.trim();
+      const x = document.getElementById('vlogExclude').value.trim();
+      const g = document.getElementById('vlogGroup').value;
+      const R = document.getElementById('vlogRate').value.trim();
+      if (q) params.set('q', q);
+      if (i) params.set('i', i);
+      if (x) params.set('x', x);
+      if (g) params.set('g', g);
+      if (R) params.set('R', R);
+
+      viewer.innerHTML = '';
+      vlogEntries = 0;
+      updateVlogCount();
+
+      vlogSource = new EventSource('/api/varnishlog?' + params.toString());
+
+      vlogSource.onmessage = function(e) {
+        addVlogEntry(e.data);
+      };
+
+      vlogSource.addEventListener('done', function(e) {
+        try {
+          const d = JSON.parse(e.data);
+          showVlogMessage('Stream ended: ' + (d.reason || 'unknown'));
+        } catch(_) {
+          showVlogMessage('Stream ended');
+        }
+        stopVlog();
+      });
+
+      vlogSource.onerror = function() {
+        showVlogMessage('Connection lost');
+        stopVlog();
+      };
+
+      startBtn.textContent = 'Stop';
+      startBtn.classList.remove('start');
+      startBtn.classList.add('stop');
+      vlogStartTime = Date.now();
+      vlogTimer = setInterval(updateVlogDuration, 1000);
+      updateVlogDuration();
+    }
+
+    function stopVlog() {
+      if (vlogSource) { vlogSource.close(); vlogSource = null; }
+      if (vlogTimer) { clearInterval(vlogTimer); vlogTimer = null; }
+      startBtn.textContent = 'Start';
+      startBtn.classList.remove('stop');
+      startBtn.classList.add('start');
+    }
+
+    function clearVlog() {
+      stopVlog();
+      viewer.innerHTML = '<div class="empty">Press Start to begin streaming</div>';
+      vlogEntries = 0;
+      updateVlogCount();
+      document.getElementById('vlogDuration').textContent = '';
+    }
+
+    function updateVlogCount() {
+      document.getElementById('vlogCount').textContent = vlogEntries;
+      document.getElementById('vlogEntryCount').textContent = vlogEntries + ' entries';
+    }
+
+    function updateVlogDuration() {
+      if (!vlogStartTime) return;
+      const sec = Math.floor((Date.now() - vlogStartTime) / 1000);
+      const m = Math.floor(sec / 60);
+      const s = sec % 60;
+      document.getElementById('vlogDuration').textContent = m + ':' + (s < 10 ? '0' : '') + s;
+    }
+
+    function showVlogMessage(msg) {
+      const el = document.createElement('div');
+      el.className = 'vlog-error';
+      el.textContent = msg;
+      viewer.appendChild(el);
+    }
+
+    function addVlogEntry(raw) {
+      vlogEntries++;
+      updateVlogCount();
+
+      const entry = document.createElement('div');
+      entry.className = 'vlog-entry';
+
+      try {
+        const obj = JSON.parse(raw);
+        const summary = buildVlogSummary(obj);
+        const detail = document.createElement('div');
+        detail.className = 'vlog-detail';
+        detail.innerHTML = '<pre>' + highlightJSON(JSON.stringify(obj, null, 2)) + '</pre>';
+
+        const sumEl = document.createElement('div');
+        sumEl.className = 'vlog-summary';
+        sumEl.innerHTML = summary;
+
+        entry.appendChild(sumEl);
+        entry.appendChild(detail);
+        entry.addEventListener('click', function() {
+          detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
+        });
+      } catch(_) {
+        // Not valid JSON — show raw line
+        const sumEl = document.createElement('div');
+        sumEl.className = 'vlog-summary';
+        sumEl.textContent = raw;
+        entry.appendChild(sumEl);
+      }
+
+      viewer.appendChild(entry);
+
+      while (viewer.children.length > MAX_VLOG) {
+        viewer.removeChild(viewer.firstChild);
+      }
+
+      if (document.getElementById('vlogAutoScroll').checked) {
+        viewer.scrollTop = viewer.scrollHeight;
+      }
+    }
+
+    function buildVlogSummary(obj) {
+      // varnishlog -S JSON: look for common fields
+      // The structure varies, so extract what we can
+      const ts = obj.timestamp || obj.t || '';
+      let timeStr = '';
+      if (ts) {
+        try { timeStr = new Date(ts * 1000).toLocaleTimeString('en-GB', {hour12:false}); } catch(_) { timeStr = String(ts); }
+      } else {
+        timeStr = new Date().toLocaleTimeString('en-GB', {hour12:false});
+      }
+
+      // Try to find method, URL, status from the log records
+      let method = '', url = '', status = '', duration = '';
+      const records = obj.log || obj.records || [];
+
+      for (let i = 0; i < records.length; i++) {
+        const rec = records[i];
+        const tag = rec.tag || rec[0] || '';
+        const val = rec.value || rec.detail || rec[2] || rec[1] || '';
+
+        if (tag === 'ReqMethod' || tag === 'BereqMethod') method = val;
+        else if (tag === 'ReqURL' || tag === 'BereqURL') url = val;
+        else if (tag === 'RespStatus' || tag === 'BerespStatus') status = val;
+        else if (tag === 'Timestamp' && typeof val === 'string' && val.startsWith('Resp')) {
+          // "Resp: 1234567890.123 0.001 0.001" — third field is total time
+          const parts = val.split(/\s+/);
+          if (parts.length >= 4) {
+            const d = parseFloat(parts[3]);
+            if (!isNaN(d)) duration = d < 1 ? (d * 1000).toFixed(1) + 'ms' : d.toFixed(3) + 's';
+          }
+        }
+      }
+
+      // If no records parsed, try top-level fields
+      if (!method && obj.method) method = obj.method;
+      if (!url && obj.url) url = obj.url;
+      if (!status && obj.status) status = String(obj.status);
+
+      const mCls = method ? ' ' + method.toLowerCase() : '';
+      const sCls = status ? ' s' + status.charAt(0) + 'xx' : '';
+
+      return '<span class="vlog-time">' + esc(timeStr) + '</span>' +
+             '<span class="vlog-method' + mCls + '">' + esc(method || '-') + '</span>' +
+             '<span class="vlog-url">' + esc(url || '(no URL)') + '</span>' +
+             '<span class="vlog-status' + sCls + '">' + esc(status || '-') + '</span>' +
+             '<span class="vlog-duration">' + esc(duration) + '</span>';
+    }
+
+    function highlightJSON(json) {
+      // HTML-escape first, then apply syntax highlighting
+      const escaped = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return escaped.replace(
+        /("(?:\\.|[^"\\])*")\s*:/g,
+        '<span class="jk">$1</span>:'
+      ).replace(
+        /:\s*("(?:\\.|[^"\\])*")/g,
+        ': <span class="js">$1</span>'
+      ).replace(
+        /:\s*(-?\d+\.?\d*(?:[eE][+-]?\d+)?)/g,
+        ': <span class="jn">$1</span>'
+      ).replace(
+        /:\s*(true|false)/g,
+        ': <span class="jb">$1</span>'
+      ).replace(
+        /:\s*(null)/g,
+        ': <span class="jnull">$1</span>'
+      );
+    }
+  })();
 })();
 </script>
 </body>

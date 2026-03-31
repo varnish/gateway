@@ -15,7 +15,7 @@ func newTestServer(t *testing.T) (*Server, *EventBus, *StateTracker) {
 	t.Helper()
 	bus := NewEventBus(256)
 	state := NewStateTracker(bus, "v1.0.0-test")
-	srv := NewServer(":0", state, bus, nil)
+	srv := NewServer(":0", state, bus, nil, "")
 	return srv, bus, state
 }
 
@@ -200,7 +200,7 @@ func TestHandleSSE_Heartbeat(t *testing.T) {
 func TestServer_Run_Shutdown(t *testing.T) {
 	bus := NewEventBus(10)
 	state := NewStateTracker(bus, "v1.0.0")
-	srv := NewServer("127.0.0.1:0", state, bus, nil)
+	srv := NewServer("127.0.0.1:0", state, bus, nil, "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 

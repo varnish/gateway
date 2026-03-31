@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,22 +16,26 @@ var dashboardFS embed.FS
 
 // Server serves the real-time dashboard UI and SSE stream.
 type Server struct {
-	state  *StateTracker
-	bus    *EventBus
-	addr   string
-	logger *slog.Logger
+	state      *StateTracker
+	bus        *EventBus
+	addr       string
+	logger     *slog.Logger
+	varnishDir string
+	activeSessions atomic.Int32
 }
 
 // NewServer creates a dashboard server.
-func NewServer(addr string, state *StateTracker, bus *EventBus, logger *slog.Logger) *Server {
+// varnishDir is the Varnish instance directory (passed as -n to varnishlog); empty means default.
+func NewServer(addr string, state *StateTracker, bus *EventBus, logger *slog.Logger, varnishDir string) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Server{
-		state:  state,
-		bus:    bus,
-		addr:   addr,
-		logger: logger,
+		state:      state,
+		bus:        bus,
+		addr:       addr,
+		logger:     logger,
+		varnishDir: varnishDir,
 	}
 }
 
@@ -40,6 +45,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/", s.handleDashboard)
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/events", s.handleSSE)
+	mux.HandleFunc("/api/varnishlog", s.handleVarnishlog)
 
 	srv := &http.Server{
 		Addr:    s.addr,
