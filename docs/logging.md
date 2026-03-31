@@ -12,18 +12,18 @@ The Varnish Gateway supports streaming varnish logs via a sidecar container that
 ┌─────────────────────────────────────────┐
 │ Gateway Pod                             │
 │                                         │
-│ ┌─────────────────┐ ┌─────────────────┐│
-│ │ varnish-gateway │ │  varnish-log    ││
-│ │                 │ │  (sidecar)      ││
-│ │ ┌─────────────┐ │ │                 ││
-│ │ │  varnishd   │─┼─┼─► varnishlog/  ││
-│ │ │ (via chaper)│ │ │   varnishncsa   ││
-│ │ └─────────────┘ │ │        │        ││
-│ │                 │ │        ▼        ││
-│ └─────────────────┘ │     stdout      ││
-│                     │        │        ││
-│                     └────────┼────────┘│
-└──────────────────────────────┼─────────┘
+│ ┌─────────────────┐ ┌─────────────────┐ │
+│ │ varnish-gateway │ │  varnish-log    │ │
+│ │                 │ │  (sidecar)      │ │
+│ │ ┌─────────────┐ │ │                 │ │
+│ │ │  varnishd   │─┼─┼─► varnishlog/   │ │
+│ │ │ (via chaper)│ │ │   varnishncsa   │ │
+│ │ └─────────────┘ │ │        │        │ │
+│ │                 │ │        ▼        │ │
+│ └─────────────────┘ │     stdout      │ │
+│                     │        │        │ │
+│                     └────────┼────────┘ │
+└──────────────────────────────┼──────────┘
                                │
                                ▼
                     Kubernetes logging system
@@ -216,6 +216,64 @@ kubectl logs -f <pod-name> -c varnish-log
 # View both containers
 kubectl logs <pod-name> --all-containers=true
 ```
+
+### On-demand varnishlog via kubectl exec
+
+The logging sidecar provides steady-state logs, but for ad-hoc debugging you can run `varnishlog` directly inside the chaperone container. This gives you full access to the VSL query language and all filtering flags without changing any configuration.
+
+The chaperone container has varnish tools installed and the VSM (shared memory) mounted at `/var/run/varnish/vsm`.
+
+```bash
+# Basic varnishlog - all traffic
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm
+
+# Filter by URL pattern
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm -q "ReqURL ~ '^/api'"
+
+# Only show specific tags (request and response headers)
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm -i ReqHeader,RespHeader
+
+# Combine query filter with tag selection
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm -q "ReqURL ~ '^/api'" -i ReqHeader,RespHeader,ReqURL,RespStatus
+
+# Rate-limit output on busy systems
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm -R 10/s
+
+# Debug 503 errors
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm -q "RespStatus == 503" -g request
+
+# Exclude health check noise
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm -q "ReqURL !~ '^/health'"
+
+# Show backend-side transactions (useful for debugging upstream issues)
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishlog -n /var/run/varnish/vsm -g request -q "BerespStatus >= 500"
+
+# Run varnishncsa for a quick access log view
+kubectl exec -it <pod-name> -c chaperone -- \
+  varnishncsa -n /var/run/varnish/vsm
+```
+
+**Key flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-q` | VSL query expression (see `vsl-query(7)`) |
+| `-i` | Include only these tags |
+| `-I` | Include tags matching a regex |
+| `-x` | Exclude these tags |
+| `-X` | Exclude tags matching a regex |
+| `-g` | Grouping mode: `raw`, `vxid`, `request`, `session` |
+| `-R` | Rate limit output (e.g., `10/s`, `100/m`) |
+
+**Tip:** Use `-g request` to group related log lines by request transaction. This makes it much easier to follow a single request through Varnish.
 
 ### Send to log aggregator
 
