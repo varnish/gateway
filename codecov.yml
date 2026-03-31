@@ -10,3 +10,5 @@ coverage:
 ignore:
   - "vendor/**"
   - "**/*_test.go"
+  - "api/**"
+  - "cmd/**"
