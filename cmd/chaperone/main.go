@@ -234,6 +234,15 @@ func run() error {
 		// Set draining state - health endpoint will return 503
 		dashState.SetDraining()
 
+		// Wait for k8s to propagate endpoint removal so no new connections arrive.
+		time.Sleep(2 * time.Second)
+
+		// Lower timeout_idle so keep-alive sessions close quickly after their
+		// last request completes, allowing sess_closed to converge.
+		if _, err := vadm.ParamSet("timeout_idle", "1"); err != nil {
+			slog.Warn("failed to set timeout_idle", "error", err)
+		}
+
 		// Use a dedicated context with timeout for draining, independent of the
 		// main ctx. Leave headroom before k8s terminationGracePeriodSeconds (30s).
 		drainCtx, drainCancel := context.WithTimeout(context.Background(), 25*time.Second)
@@ -512,6 +521,7 @@ func run() error {
 		dashServer := dashboard.NewServer(
 			cfg.DashboardAddr, dashState, dashBus,
 			logger.With("component", "dashboard"),
+			cfg.VarnishDir,
 		)
 		g.Go(func() error {
 			if err := dashServer.Run(gctx); err != nil {
