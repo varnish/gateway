@@ -1251,6 +1251,12 @@ func (r *GatewayReconciler) enqueueGatewaysForConfigMap() handler.EventHandler {
 			return nil
 		}
 
+		// Skip ConfigMaps managed by us — those are already handled by Owns().
+		// This avoids expensive list cascades for every operator-managed ConfigMap update.
+		if cm.Labels[LabelManagedBy] == ManagedByValue {
+			return nil
+		}
+
 		// Find all GatewayClassParameters that reference this ConfigMap
 		var paramsList gatewayparamsv1alpha1.GatewayClassParametersList
 		if err := r.List(ctx, &paramsList); err != nil {

@@ -66,9 +66,12 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// 3. Process each parentRef
+	// Cache route lists per gateway to avoid redundant cluster-wide List calls
+	// when multiple parentRefs target the same (or different) gateways.
+	routeCache := make(map[types.NamespacedName][]gatewayv1.HTTPRoute)
 	var processErr error
 	for _, parentRef := range route.Spec.ParentRefs {
-		if err := r.processParentRef(ctx, &route, parentRef); err != nil {
+		if err := r.processParentRef(ctx, &route, parentRef, routeCache); err != nil {
 			// Log but continue processing other parentRefs
 			log.Error("failed to process parentRef",
 				"parentRef", parentRef.Name,
@@ -104,7 +107,8 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 }
 
 // processParentRef handles a single parentRef for an HTTPRoute.
-func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatewayv1.HTTPRoute, parentRef gatewayv1.ParentReference) error {
+// routeCache avoids redundant cluster-wide HTTPRoute List calls across parentRefs.
+func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatewayv1.HTTPRoute, parentRef gatewayv1.ParentReference, routeCache map[types.NamespacedName][]gatewayv1.HTTPRoute) error {
 	log := r.Logger.With("httproute", types.NamespacedName{Name: route.Name, Namespace: route.Namespace},
 		"parentRef", parentRef.Name)
 
@@ -199,16 +203,22 @@ func (r *HTTPRouteReconciler) processParentRef(ctx context.Context, route *gatew
 		return nil
 	}
 
-	// List all HTTPRoutes attached to this Gateway
-	routes, err := r.listRoutesForGateway(ctx, gateway)
-	if err != nil {
-		status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
-			string(gatewayv1.RouteReasonPending),
-			fmt.Sprintf("Failed to list routes for Gateway: %v", err))
-		status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
-			string(gatewayv1.RouteReasonResolvedRefs),
-			"References resolved")
-		return fmt.Errorf("r.listRoutesForGateway: %w", err)
+	// List all HTTPRoutes attached to this Gateway (cached per reconciliation)
+	gwKey := types.NamespacedName{Name: gateway.Name, Namespace: gateway.Namespace}
+	routes, ok := routeCache[gwKey]
+	if !ok {
+		var err error
+		routes, err = r.listRoutesForGateway(ctx, gateway)
+		if err != nil {
+			status.SetHTTPRouteAccepted(route, parentRef, ControllerName, false,
+				string(gatewayv1.RouteReasonPending),
+				fmt.Sprintf("Failed to list routes for Gateway: %v", err))
+			status.SetHTTPRouteResolvedRefs(route, parentRef, ControllerName, true,
+				string(gatewayv1.RouteReasonResolvedRefs),
+				"References resolved")
+			return fmt.Errorf("r.listRoutesForGateway: %w", err)
+		}
+		routeCache[gwKey] = routes
 	}
 
 	// Update Gateway's ConfigMap with generated VCL
