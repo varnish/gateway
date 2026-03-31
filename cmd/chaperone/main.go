@@ -210,25 +210,6 @@ func run() error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Drain wait period for graceful shutdown
-	const drainWait = 10 * time.Second
-
-	go func() {
-		sig := <-sigCh
-		slog.Info("received signal, initiating graceful shutdown", "signal", sig)
-
-		// Set draining state - health endpoint will return 503
-		dashState.SetDraining()
-
-		// Wait for drain period to allow load balancer to stop sending traffic
-		// and existing requests to complete
-		slog.Info("waiting for connections to drain", "duration", drainWait)
-		time.Sleep(drainWait)
-
-		slog.Info("drain complete, shutting down")
-		cancel()
-	}()
-
 	// Create vrun manager to prepare workspace and start Varnish
 	logger := slog.Default()
 	varnishMgr := vrun.New(cfg.WorkDir, logger.With("component", "vrun"), cfg.VarnishDir)
@@ -244,6 +225,55 @@ func run() error {
 	// Create components
 	// 1. varnishadm server - listens for connections from Varnish
 	vadm := varnishadm.New(uint16(cfg.AdminPort), secret, logger.With("component", "varnishadm"))
+
+	// Start graceful shutdown goroutine (needs vadm + varnishDir)
+	go func() {
+		sig := <-sigCh
+		slog.Info("received signal, initiating graceful shutdown", "signal", sig)
+
+		// Set draining state - health endpoint will return 503
+		dashState.SetDraining()
+
+		// Use a dedicated context with timeout for draining, independent of the
+		// main ctx. Leave headroom before k8s terminationGracePeriodSeconds (30s).
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer drainCancel()
+
+		// Poll active sessions every second until drained or deadline
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		var lastActive int64 = -1
+		for {
+			select {
+			case <-drainCtx.Done():
+				slog.Warn("drain deadline exceeded, forcing shutdown")
+				goto shutdown
+			case <-ticker.C:
+			}
+			active, err := varnishstat.ActiveSessions(drainCtx, cfg.VarnishDir)
+			if err != nil {
+				slog.Warn("failed to fetch session count, proceeding with shutdown", "error", err)
+				break
+			}
+			if active != lastActive {
+				slog.Info("draining connections", "active_sessions", active)
+				lastActive = active
+			}
+			if active == 0 {
+				break
+			}
+		}
+
+	shutdown:
+		// Stop varnish child process cleanly
+		slog.Info("connections drained, stopping varnish child process")
+		if _, err := vadm.Stop(); err != nil {
+			slog.Warn("varnishadm stop failed", "error", err)
+		}
+
+		slog.Info("drain complete, shutting down")
+		cancel()
+	}()
 
 	// 2. ghost watcher - watches routing config and EndpointSlices
 	ghostWatcher := ghost.NewWatcher(

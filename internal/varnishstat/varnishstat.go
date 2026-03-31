@@ -53,6 +53,44 @@ func Fetch(ctx context.Context, varnishDir string) ([]Stat, error) {
 	return parseOutput(out)
 }
 
+// ActiveSessions returns the number of currently active sessions by computing
+// sess_conn - sess_closed - sess_dropped. Returns -1 if any required counter
+// is missing (e.g., varnishd not yet started).
+func ActiveSessions(ctx context.Context, varnishDir string) (int64, error) {
+	stats, err := Fetch(ctx, varnishDir)
+	if err != nil {
+		return -1, err
+	}
+	return activeSessions(stats)
+}
+
+// activeSessions computes active sessions from a slice of stats.
+func activeSessions(stats []Stat) (int64, error) {
+	var conn, closed, dropped float64
+	var found int
+	for _, s := range stats {
+		switch s.Name {
+		case "MAIN.sess_conn":
+			conn = s.Value
+			found++
+		case "MAIN.sess_closed":
+			closed = s.Value
+			found++
+		case "MAIN.sess_dropped":
+			dropped = s.Value
+			found++
+		}
+	}
+	if found < 3 {
+		return -1, fmt.Errorf("missing session counters (found %d/3)", found)
+	}
+	active := int64(conn - closed - dropped)
+	if active < 0 {
+		active = 0
+	}
+	return active, nil
+}
+
 // parseOutput parses raw varnishstat JSON into a slice of Stat.
 func parseOutput(data []byte) ([]Stat, error) {
 	var raw varnishstatOutput

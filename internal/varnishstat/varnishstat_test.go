@@ -115,6 +115,84 @@ func TestParseOutputInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestActiveSessions(t *testing.T) {
+	tests := []struct {
+		name    string
+		stats   []Stat
+		want    int64
+		wantErr bool
+	}{
+		{
+			name: "active connections",
+			stats: []Stat{
+				{Name: "MAIN.sess_conn", Value: 100},
+				{Name: "MAIN.sess_closed", Value: 80},
+				{Name: "MAIN.sess_dropped", Value: 5},
+			},
+			want: 15,
+		},
+		{
+			name: "fully drained",
+			stats: []Stat{
+				{Name: "MAIN.sess_conn", Value: 100},
+				{Name: "MAIN.sess_closed", Value: 97},
+				{Name: "MAIN.sess_dropped", Value: 3},
+			},
+			want: 0,
+		},
+		{
+			name: "negative clamped to zero",
+			stats: []Stat{
+				{Name: "MAIN.sess_conn", Value: 10},
+				{Name: "MAIN.sess_closed", Value: 8},
+				{Name: "MAIN.sess_dropped", Value: 5},
+			},
+			want: 0,
+		},
+		{
+			name: "missing counters",
+			stats: []Stat{
+				{Name: "MAIN.sess_conn", Value: 100},
+			},
+			wantErr: true,
+		},
+		{
+			name:    "empty stats",
+			stats:   []Stat{},
+			wantErr: true,
+		},
+		{
+			name: "extra stats ignored",
+			stats: []Stat{
+				{Name: "MAIN.cache_hit", Value: 9999},
+				{Name: "MAIN.sess_conn", Value: 50},
+				{Name: "MAIN.sess_closed", Value: 30},
+				{Name: "MAIN.sess_dropped", Value: 10},
+				{Name: "MAIN.cache_miss", Value: 1234},
+			},
+			want: 10,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := activeSessions(tt.stats)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("activeSessions = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseOutputLargeValues(t *testing.T) {
 	input := []byte(`{
 		"version": 1,
