@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -40,9 +41,9 @@ func validateRateLimit(r string) bool {
 	return rateLimitRe.MatchString(r)
 }
 
-// buildVarnishlogArgs constructs the argument list for varnishlog.
+// buildVarnishlogArgs constructs the argument list for varnishlog-json.
 func buildVarnishlogArgs(varnishDir, query, grouping, rateLimit string, includeTags, excludeTags []string) []string {
-	args := []string{"-S"}
+	var args []string
 
 	if varnishDir != "" {
 		args = append(args, "-n", varnishDir)
@@ -129,13 +130,15 @@ func (s *Server) handleVarnishlog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args := buildVarnishlogArgs(s.varnishDir, query, grouping, rateLimit, includeTags, excludeTags)
-	s.logger.Info("starting varnishlog session", "args", args)
+	s.logger.Info("starting varnishlog-json session", "args", args)
 
 	// Create context with timeout; also cancelled on client disconnect.
 	ctx, cancel := context.WithTimeout(r.Context(), defaultSessionTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "varnishlog", args...)
+	cmd := exec.CommandContext(ctx, "varnishlog-json", args...)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to create stdout pipe: %v", err), http.StatusInternalServerError)
@@ -166,7 +169,10 @@ func (s *Server) handleVarnishlog(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Determine exit reason.
+	// Reap the process and inspect exit status.
+	cancel()
+	waitErr := cmd.Wait()
+
 	reason := "process exited"
 	if ctx.Err() == context.DeadlineExceeded {
 		reason = "session timeout"
@@ -174,12 +180,19 @@ func (s *Server) handleVarnishlog(w http.ResponseWriter, r *http.Request) {
 		reason = "client disconnected"
 	}
 
+	if waitErr != nil && ctx.Err() == nil {
+		// Process failed on its own (not due to timeout or client disconnect).
+		stderr := strings.TrimSpace(stderrBuf.String())
+		s.logger.Error("varnishlog-json exited with error", "error", waitErr, "stderr", stderr, "args", args)
+		if stderr != "" {
+			reason = stderr
+		} else {
+			reason = fmt.Sprintf("varnishlog-json error: %v", waitErr)
+		}
+	} else {
+		s.logger.Info("varnishlog-json session ended", "reason", reason)
+	}
+
 	fmt.Fprintf(w, "event: done\ndata: {\"reason\":%q}\n\n", reason)
 	flusher.Flush()
-
-	// Ensure process is cleaned up.
-	cancel()
-	_ = cmd.Wait()
-
-	s.logger.Info("varnishlog session ended", "reason", reason)
 }

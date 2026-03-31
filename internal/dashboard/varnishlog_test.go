@@ -63,37 +63,37 @@ func TestBuildVarnishlogArgs(t *testing.T) {
 	}{
 		{
 			name: "minimal",
-			want: []string{"-S"},
+			want: nil,
 		},
 		{
 			name:       "with varnish dir",
 			varnishDir: "/var/lib/varnish/gw",
-			want:       []string{"-S", "-n", "/var/lib/varnish/gw"},
+			want:       []string{"-n", "/var/lib/varnish/gw"},
 		},
 		{
 			name:     "with grouping",
 			grouping: "request",
-			want:     []string{"-S", "-g", "request"},
+			want:     []string{"-g", "request"},
 		},
 		{
 			name:  "with query",
 			query: "ReqURL ~ /api",
-			want:  []string{"-S", "-q", "ReqURL ~ /api"},
+			want:  []string{"-q", "ReqURL ~ /api"},
 		},
 		{
 			name:      "with rate limit",
 			rateLimit: "10/s",
-			want:      []string{"-S", "-R", "10/s"},
+			want:      []string{"-R", "10/s"},
 		},
 		{
 			name:        "with include tags",
 			includeTags: []string{"ReqURL", "RespStatus"},
-			want:        []string{"-S", "-i", "ReqURL", "-i", "RespStatus"},
+			want:        []string{"-i", "ReqURL", "-i", "RespStatus"},
 		},
 		{
 			name:        "with exclude tags",
 			excludeTags: []string{"VCL_Log"},
-			want:        []string{"-S", "-x", "VCL_Log"},
+			want:        []string{"-x", "VCL_Log"},
 		},
 		{
 			name:        "full",
@@ -103,7 +103,7 @@ func TestBuildVarnishlogArgs(t *testing.T) {
 			rateLimit:   "5/s",
 			includeTags: []string{"ReqURL"},
 			excludeTags: []string{"Debug"},
-			want:        []string{"-S", "-n", "/tmp/vsm", "-g", "request", "-q", "RespStatus == 503", "-R", "5/s", "-i", "ReqURL", "-x", "Debug"},
+			want:        []string{"-n", "/tmp/vsm", "-g", "request", "-q", "RespStatus == 503", "-R", "5/s", "-i", "ReqURL", "-x", "Debug"},
 		},
 	}
 
