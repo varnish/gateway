@@ -204,6 +204,11 @@ deploy-update:
 deploy: deploy-update
 	kubectl apply -f deploy/00-prereqs.yaml -f deploy/01-operator.yaml -f deploy/02-chaperone-rbac.yaml -f deploy/03-gatewayclass.yaml
 
+dev-deploy:
+	$(MAKE) docker VERSION=dev
+	$(MAKE) deploy VERSION=dev
+	kubectl rollout restart deployment/varnish-gateway-operator -n varnish-gateway-system
+
 # ============================================================================
 # Helm
 # ============================================================================
