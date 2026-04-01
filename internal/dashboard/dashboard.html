@@ -1471,18 +1471,25 @@
     }
 
     function addVlogEntry(raw) {
-      vlogEntries++;
-      updateVlogCount();
-
-      const entry = document.createElement('div');
-      entry.className = 'vlog-entry';
-
       try {
-        const obj = JSON.parse(raw);
-        const summary = buildVlogSummary(obj);
+        const parsed = JSON.parse(raw);
+        // varnishlog-json outputs a JSON array per line: each element is a
+        // transaction (client-side, backend-side, etc.) grouped together.
+        const txns = Array.isArray(parsed) ? parsed : [parsed];
+
+        // Find the client-side transaction for the summary line; fall back to first.
+        const clientTxn = txns.find(function(t) { return t.side === 'client'; }) || txns[0];
+
+        vlogEntries++;
+        updateVlogCount();
+
+        const entry = document.createElement('div');
+        entry.className = 'vlog-entry';
+
+        const summary = buildVlogSummary(clientTxn);
         const detail = document.createElement('div');
         detail.className = 'vlog-detail';
-        detail.innerHTML = '<pre>' + highlightJSON(JSON.stringify(obj, null, 2)) + '</pre>';
+        detail.innerHTML = '<pre>' + highlightJSON(JSON.stringify(txns, null, 2)) + '</pre>';
 
         const sumEl = document.createElement('div');
         sumEl.className = 'vlog-summary';
@@ -1493,15 +1500,21 @@
         entry.addEventListener('click', function() {
           detail.style.display = detail.style.display === 'none' ? 'block' : 'none';
         });
+
+        viewer.appendChild(entry);
       } catch(_) {
         // Not valid JSON — show raw line
+        vlogEntries++;
+        updateVlogCount();
+
+        const entry = document.createElement('div');
+        entry.className = 'vlog-entry';
         const sumEl = document.createElement('div');
         sumEl.className = 'vlog-summary';
         sumEl.textContent = raw;
         entry.appendChild(sumEl);
+        viewer.appendChild(entry);
       }
-
-      viewer.appendChild(entry);
 
       while (viewer.children.length > MAX_VLOG) {
         viewer.removeChild(viewer.firstChild);
@@ -1512,43 +1525,39 @@
       }
     }
 
-    function buildVlogSummary(obj) {
-      // varnishlog -S JSON: look for common fields
-      // The structure varies, so extract what we can
-      const ts = obj.timestamp || obj.t || '';
+    function buildVlogSummary(txn) {
+      // varnishlog-json transaction object structure:
+      //   txn.req.method, txn.req.url
+      //   txn.resp.status, txn.resp.reason
+      //   txn.timeline[]: {name, timestamp}
+      //   txn.client.sock, txn.handling
+
+      // Timestamp from timeline
       let timeStr = '';
-      if (ts) {
-        try { timeStr = new Date(ts * 1000).toLocaleTimeString('en-GB', {hour12:false}); } catch(_) { timeStr = String(ts); }
-      } else {
-        timeStr = new Date().toLocaleTimeString('en-GB', {hour12:false});
+      const timeline = txn.timeline || [];
+      if (timeline.length > 0) {
+        try {
+          timeStr = new Date(timeline[0].timestamp * 1000).toLocaleTimeString('en-GB', {hour12: false});
+        } catch(_) { /* fall through */ }
+      }
+      if (!timeStr) {
+        timeStr = new Date().toLocaleTimeString('en-GB', {hour12: false});
       }
 
-      // Try to find method, URL, status from the log records
-      let method = '', url = '', status = '', duration = '';
-      const records = obj.log || obj.records || [];
+      const req = txn.req || {};
+      const resp = txn.resp || {};
+      const method = req.method || '';
+      const url = req.url || '';
+      const status = resp.status ? String(resp.status) : '';
 
-      for (let i = 0; i < records.length; i++) {
-        const rec = records[i];
-        const tag = rec.tag || rec[0] || '';
-        const val = rec.value || rec.detail || rec[2] || rec[1] || '';
-
-        if (tag === 'ReqMethod' || tag === 'BereqMethod') method = val;
-        else if (tag === 'ReqURL' || tag === 'BereqURL') url = val;
-        else if (tag === 'RespStatus' || tag === 'BerespStatus') status = val;
-        else if (tag === 'Timestamp' && typeof val === 'string' && val.startsWith('Resp')) {
-          // "Resp: 1234567890.123 0.001 0.001" — third field is total time
-          const parts = val.split(/\s+/);
-          if (parts.length >= 4) {
-            const d = parseFloat(parts[3]);
-            if (!isNaN(d)) duration = d < 1 ? (d * 1000).toFixed(1) + 'ms' : d.toFixed(3) + 's';
-          }
+      // Duration: difference between last and first timeline entries
+      let duration = '';
+      if (timeline.length >= 2) {
+        const d = timeline[timeline.length - 1].timestamp - timeline[0].timestamp;
+        if (!isNaN(d) && d >= 0) {
+          duration = d < 1 ? (d * 1000).toFixed(1) + 'ms' : d.toFixed(3) + 's';
         }
       }
-
-      // If no records parsed, try top-level fields
-      if (!method && obj.method) method = obj.method;
-      if (!url && obj.url) url = obj.url;
-      if (!status && obj.status) status = String(obj.status);
 
       const mCls = method ? ' ' + method.toLowerCase() : '';
       const sCls = status ? ' s' + status.charAt(0) + 'xx' : '';
