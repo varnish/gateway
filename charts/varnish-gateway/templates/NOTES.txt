@@ -55,6 +55,14 @@ To get started:
 
    kubectl logs -n {{ include "varnish-gateway.namespace" . }} -l app.kubernetes.io/component=operator -f
 
+{{- if .Values.gatewayClass.defaultParams.userVCL.enabled }}
+5. (Optional) Create a ConfigMap for custom user VCL:
+
+   kubectl create configmap {{ .Values.gatewayClass.defaultParams.userVCL.configMap.name }} \
+     -n {{ include "varnish-gateway.namespace" . }} \
+     --from-file={{ .Values.gatewayClass.defaultParams.userVCL.configMap.key }}=user.vcl
+{{- end }}
+
 For more information, visit:
   - Documentation: https://github.com/varnish/gateway
   - Issues: https://github.com/varnish/gateway/issues
