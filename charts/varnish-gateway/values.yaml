@@ -84,11 +84,6 @@ gatewayClass:
       configMap:
         name: varnish-user-vcl
         key: user.vcl
-      # Default content for initial install (Helm will not overwrite on upgrades)
-      content: |
-        # Add custom VCL here.
-        # Note: routes without a VarnishCachePolicy are automatically
-        # passed (not cached). No need for an explicit return(pass).
 
     # Logging configuration
     logging:
