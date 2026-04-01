@@ -212,7 +212,7 @@ func (r *Reloader) loadAndActivate(name string, loadFn func(string) (varnishadm.
 		return err
 	}
 
-	r.logger.Debug("VCL reload complete", "name", name)
+	r.logger.Info("VCL reload complete", "name", name)
 	dashboard.PublishVCLReload(r.dashBus, name)
 
 	if err := r.garbageCollect(); err != nil {

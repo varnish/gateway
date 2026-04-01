@@ -1,10 +1,10 @@
 {{- if .Values.gatewayClass.createDefaultParams }}
 {{- if .Values.gatewayClass.defaultParams.userVCL.enabled }}
+{{- $vclKey := .Values.gatewayClass.defaultParams.userVCL.configMap.key }}
 {{- $existing := lookup "v1" "ConfigMap" (include "varnish-gateway.namespace" .) .Values.gatewayClass.defaultParams.userVCL.configMap.name }}
-{{- if not $existing }}
 ---
-# User VCL ConfigMap — created on initial install only.
-# Modify this ConfigMap directly via kubectl; Helm will not touch it after creation.
+# User VCL ConfigMap — managed by the user, not by Helm.
+# Helm creates it on install and preserves existing content on upgrades.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -12,9 +12,15 @@ metadata:
   namespace: {{ include "varnish-gateway.namespace" . }}
   labels:
     {{- include "varnish-gateway.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
 data:
-  {{ .Values.gatewayClass.defaultParams.userVCL.configMap.key }}: ""
-{{- end }}
+  {{- if and $existing $existing.data (index $existing.data $vclKey) }}
+  {{ $vclKey }}: |
+{{ index $existing.data $vclKey | nindent 4 }}
+  {{- else }}
+  {{ $vclKey }}: ""
+  {{- end }}
 {{- end }}
 ---
 # GatewayClassParameters for Varnish configuration
