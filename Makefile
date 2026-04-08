@@ -198,8 +198,8 @@ endif
 
 deploy-update:
 	@echo "Updating deploy/01-operator.yaml to version $(VERSION)"
-	@sed -i '' 's|gateway-operator:[v0-9.]*|gateway-operator:$(VERSION)|' deploy/01-operator.yaml
-	@sed -i '' 's|gateway-chaperone:[v0-9.]*"|gateway-chaperone:$(VERSION)"|' deploy/01-operator.yaml
+	@sed -i '' 's|gateway-operator:[a-zA-Z0-9._-]*|gateway-operator:$(VERSION)|' deploy/01-operator.yaml
+	@sed -i '' 's|gateway-chaperone:[a-zA-Z0-9._-]*|gateway-chaperone:$(VERSION)|' deploy/01-operator.yaml
 
 deploy: deploy-update
 	kubectl apply -f deploy/00-prereqs.yaml -f deploy/01-operator.yaml -f deploy/02-chaperone-rbac.yaml -f deploy/03-gatewayclass.yaml
@@ -208,6 +208,9 @@ dev-deploy:
 	$(MAKE) docker VERSION=dev
 	$(MAKE) deploy VERSION=dev
 	kubectl rollout restart deployment/varnish-gateway-operator -n varnish-gateway-system
+	@if kubectl get deployment/varnish-gateway -n varnish-gateway-system >/dev/null 2>&1; then \
+		kubectl rollout restart deployment/varnish-gateway -n varnish-gateway-system; \
+	fi
 
 # ============================================================================
 # Helm
