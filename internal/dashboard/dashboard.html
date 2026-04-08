@@ -828,6 +828,15 @@
   .vlog-method.patch { color: #c084fc; }
   .vlog-method.head { color: #a78bfa; }
 
+  .vlog-host {
+    color: #93c5fd;
+    flex-shrink: 0;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .vlog-url {
     color: #e5e7eb;
     overflow: hidden;
@@ -836,6 +845,22 @@
     flex: 1;
     min-width: 0;
   }
+
+  .vlog-handling {
+    flex-shrink: 0;
+    min-width: 36px;
+    text-transform: lowercase;
+    font-weight: 700;
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+  }
+
+  .vlog-handling.h-hit { color: #34d399; }
+  .vlog-handling.h-miss { color: #fbbf24; }
+  .vlog-handling.h-pass { color: #60a5fa; }
+  .vlog-handling.h-pipe { color: #c084fc; }
+  .vlog-handling.h-synth { color: #2dd4bf; }
+  .vlog-handling.h-error { color: #f87171; }
 
   .vlog-status {
     font-weight: 700;
@@ -1677,7 +1702,7 @@
 
     function buildVlogSummary(txn) {
       // varnishlog-json transaction object structure:
-      //   txn.req.method, txn.req.url
+      //   txn.req.method, txn.req.url, txn.req.headers{}
       //   txn.resp.status, txn.resp.reason
       //   txn.timeline[]: {name, timestamp}
       //   txn.client.sock, txn.handling
@@ -1700,6 +1725,11 @@
       const url = req.url || '';
       const status = resp.status ? String(resp.status) : '';
 
+      const hdrs = req.headers || {};
+      const hostKey = Object.keys(hdrs).find(function(k) { return k.toLowerCase() === 'host'; });
+      const host = hostKey ? hdrs[hostKey] : '';
+      const handling = txn.handling || '';
+
       // Duration: difference between last and first timeline entries
       let duration = '';
       if (timeline.length >= 2) {
@@ -1711,10 +1741,13 @@
 
       const mCls = method ? ' ' + method.toLowerCase() : '';
       const sCls = status ? ' s' + status.charAt(0) + 'xx' : '';
+      const hCls = handling ? ' h-' + handling.toLowerCase() : '';
 
       return '<span class="vlog-time">' + esc(timeStr) + '</span>' +
              '<span class="vlog-method' + mCls + '">' + esc(method || '-') + '</span>' +
+             '<span class="vlog-host">' + esc(host || '-') + '</span>' +
              '<span class="vlog-url">' + esc(url || '(no URL)') + '</span>' +
+             '<span class="vlog-handling' + hCls + '">' + esc(handling || '-') + '</span>' +
              '<span class="vlog-status' + sCls + '">' + esc(status || '-') + '</span>' +
              '<span class="vlog-duration">' + esc(duration) + '</span>';
     }
