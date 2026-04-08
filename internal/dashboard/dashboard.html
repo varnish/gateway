@@ -903,6 +903,51 @@
     accent-color: var(--blue);
   }
 
+  .vlog-filter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 16px;
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .vlog-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 12px;
+    border: 1px solid;
+    line-height: 1.4;
+  }
+
+  .vlog-chip.include {
+    background: rgba(46, 160, 67, 0.12);
+    border-color: rgba(46, 160, 67, 0.35);
+    color: #3fb950;
+  }
+
+  .vlog-chip.exclude {
+    background: rgba(192, 57, 43, 0.12);
+    border-color: rgba(192, 57, 43, 0.35);
+    color: var(--rose-light);
+  }
+
+  .vlog-chip .chip-remove {
+    cursor: pointer;
+    opacity: 0.6;
+    font-size: 13px;
+    line-height: 1;
+    margin-left: 2px;
+  }
+
+  .vlog-chip .chip-remove:hover {
+    opacity: 1;
+  }
+
   .vlog-error {
     padding: 10px 14px;
     font-family: var(--font-mono);
@@ -1026,8 +1071,21 @@
       <div class="panel-body" style="padding:0">
         <div class="vlog-toolbar">
           <input type="text" id="vlogQuery" class="vlog-input" placeholder="VSL query, e.g. ReqURL ~ /api" style="flex:2;min-width:180px">
-          <input type="text" id="vlogInclude" class="vlog-input" placeholder="Include tags (-i)" style="flex:1;min-width:120px">
-          <input type="text" id="vlogExclude" class="vlog-input" placeholder="Exclude tags (-x)" style="flex:1;min-width:120px">
+          <div style="display:flex;gap:0;flex:1;min-width:200px">
+            <select id="vlogFilterType" class="vlog-select" style="min-width:auto;width:56px;border-radius:5px 0 0 5px;border-right:0" title="-i include tag, -x exclude tag, -I include tag:regex, -X exclude tag:regex">
+              <option value="i">-i</option>
+              <option value="x">-x</option>
+              <option value="I">-I</option>
+              <option value="X">-X</option>
+            </select>
+            <input type="text" id="vlogFilterValue" class="vlog-input" list="vslTagList" placeholder="Tag or Tag:regex" style="flex:1;border-radius:0;border-right:0">
+            <button id="vlogFilterAddBtn" class="vlog-btn start" style="border-radius:0 5px 5px 0;padding:7px 12px" title="Add filter">+</button>
+          </div>
+          <select id="vlogMode" class="vlog-select" title="Traffic direction: both, client-side only (-c), or backend-side only (-b)">
+            <option value="">Both</option>
+            <option value="c">Client (-c)</option>
+            <option value="b">Backend (-b)</option>
+          </select>
           <select id="vlogGroup" class="vlog-select">
             <option value="request">-g request</option>
             <option value="vxid">-g vxid</option>
@@ -1038,6 +1096,7 @@
           <button id="vlogStartBtn" class="vlog-btn start">Start</button>
           <button id="vlogClearBtn" class="vlog-btn clear">Clear</button>
         </div>
+        <div id="vlogFilterChips" class="vlog-filter-chips" style="display:none"></div>
         <div class="vlog-viewer" id="vlogViewer">
           <div class="empty">Press Start to begin streaming</div>
         </div>
@@ -1365,6 +1424,35 @@
 
   // ─── Varnish Log Viewer ───
   (function() {
+    // Core VSL tags supported by varnishlog (sorted alphabetically)
+    const VSL_TAGS = [
+      'Backend_health','BackendClose','BackendOpen','BackendSSL',
+      'Begin','BereqAcct','BereqHeader','BereqMethod','BereqProtocol','BereqURL',
+      'BerespHeader','BerespProtocol','BerespReason','BerespStatus',
+      'BogoHeader','CLI','Debug','ESI_xmlerror','End','Error','ExpBan','ExpKill',
+      'FetchError','Fetch_Body','Filters','Gzip',
+      'H2RxBody','H2RxHdr','H2TxBody','H2TxHdr','Hash','Hit','HitMiss','HitPass',
+      'HttpGarbage','Length','Link','LostHeader','Notice',
+      'ObjHeader','ObjProtocol','ObjReason','ObjStatus',
+      'PipeAcct','Proxy','ProxyGarbage',
+      'ReqAcct','ReqHeader','ReqMethod','ReqProtocol','ReqStart','ReqTarget','ReqURL',
+      'RespHeader','RespProtocol','RespReason','RespStatus',
+      'SessClose','SessError','SessOpen','Storage',
+      'TLS','TTL','Timestamp',
+      'VCL_Error','VCL_Log','VCL_acl','VCL_call','VCL_return','VCL_trace','VCL_use',
+      'VSL','VdpAcct','VfpAcct','Witness','WorkThread'
+    ];
+
+    // Build datalist for autocomplete
+    const datalist = document.createElement('datalist');
+    datalist.id = 'vslTagList';
+    VSL_TAGS.forEach(function(tag) {
+      const opt = document.createElement('option');
+      opt.value = tag;
+      datalist.appendChild(opt);
+    });
+    document.body.appendChild(datalist);
+
     let vlogSource = null;
     let vlogEntries = 0;
     let vlogStartTime = null;
@@ -1374,6 +1462,60 @@
     const startBtn = document.getElementById('vlogStartBtn');
     const clearBtn = document.getElementById('vlogClearBtn');
     const viewer = document.getElementById('vlogViewer');
+    const filterChipsEl = document.getElementById('vlogFilterChips');
+    const filterAddBtn = document.getElementById('vlogFilterAddBtn');
+    const filterValueInput = document.getElementById('vlogFilterValue');
+    const filterTypeSelect = document.getElementById('vlogFilterType');
+
+    // Active filters: [{type: 'i'|'x'|'I'|'X', value: 'Tag' or 'Tag:regex'}]
+    let vlogFilters = [];
+
+    function addFilter() {
+      const type = filterTypeSelect.value;
+      const value = filterValueInput.value.trim();
+      if (!value) return;
+      // Avoid exact duplicates
+      if (vlogFilters.some(function(f) { return f.type === type && f.value === value; })) {
+        filterValueInput.value = '';
+        return;
+      }
+      vlogFilters.push({type: type, value: value});
+      filterValueInput.value = '';
+      renderFilterChips();
+    }
+
+    function removeFilter(idx) {
+      vlogFilters.splice(idx, 1);
+      renderFilterChips();
+    }
+
+    function renderFilterChips() {
+      filterChipsEl.innerHTML = '';
+      if (vlogFilters.length === 0) {
+        filterChipsEl.style.display = 'none';
+        return;
+      }
+      filterChipsEl.style.display = '';
+      vlogFilters.forEach(function(f, idx) {
+        const isInclude = f.type === 'i' || f.type === 'I';
+        const chip = document.createElement('span');
+        chip.className = 'vlog-chip ' + (isInclude ? 'include' : 'exclude');
+        const label = document.createElement('span');
+        label.textContent = '-' + f.type + ' ' + f.value;
+        const remove = document.createElement('span');
+        remove.className = 'chip-remove';
+        remove.textContent = '\u00d7';
+        remove.onclick = function() { removeFilter(idx); };
+        chip.appendChild(label);
+        chip.appendChild(remove);
+        filterChipsEl.appendChild(chip);
+      });
+    }
+
+    filterAddBtn.addEventListener('click', addFilter);
+    filterValueInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); addFilter(); }
+    });
 
     startBtn.addEventListener('click', function() {
       if (vlogSource) { stopVlog(); } else { startVlog(); }
@@ -1391,15 +1533,23 @@
     function startVlog() {
       const params = new URLSearchParams();
       const q = document.getElementById('vlogQuery').value.trim();
-      const i = document.getElementById('vlogInclude').value.trim();
-      const x = document.getElementById('vlogExclude').value.trim();
       const g = document.getElementById('vlogGroup').value;
       const R = document.getElementById('vlogRate').value.trim();
+      const mode = document.getElementById('vlogMode').value;
       if (q) params.set('q', q);
-      if (i) params.set('i', i);
-      if (x) params.set('x', x);
       if (g) params.set('g', g);
       if (R) params.set('R', R);
+      if (mode) params.set('mode', mode);
+
+      // Group filters by type and join with commas
+      var grouped = {};
+      vlogFilters.forEach(function(f) {
+        if (!grouped[f.type]) grouped[f.type] = [];
+        grouped[f.type].push(f.value);
+      });
+      Object.keys(grouped).forEach(function(type) {
+        params.set(type, grouped[type].join(','));
+      });
 
       viewer.innerHTML = '';
       vlogEntries = 0;
