@@ -68,10 +68,12 @@ jobs:
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y curl gpg
+          apt-get install -y curl gpg dirmngr
           mkdir -p /etc/apt/keyrings
-          curl -fsSL https://packages.varnish-software.com/GPG-key.txt \
-            | gpg --dearmor -o /etc/apt/keyrings/varnish.gpg
+          gpg --batch --keyserver hkps://keys.openpgp.org \
+            --recv-keys 694566269779DFAC975ED9BDD0525EAE838B3344
+          gpg --batch --armor --export 694566269779DFAC975ED9BDD0525EAE838B3344 \
+            > /etc/apt/keyrings/varnish.gpg
           . /etc/os-release
           echo "deb [signed-by=/etc/apt/keyrings/varnish.gpg] https://packages.varnish-software.com/varnish/debian $VERSION_CODENAME main" \
             > /etc/apt/sources.list.d/varnish.list
