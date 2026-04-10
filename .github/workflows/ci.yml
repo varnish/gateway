@@ -61,13 +61,24 @@ jobs:
   test-rust:
     runs-on: ubuntu-latest
     container:
-      image: varnish:9.0
+      image: debian:trixie-slim
       options: --user root
     steps:
-      - name: Install build tools and git
+      - name: Install Varnish and build tools
         run: |
-          apt-get update && apt-get install -y \
-            curl build-essential pkg-config clang libclang-dev git varnish-dev
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y curl gpg
+          mkdir -p /etc/apt/keyrings
+          curl -fsSL https://packages.varnish-software.com/GPG-key.txt \
+            | gpg --dearmor -o /etc/apt/keyrings/varnish.gpg
+          . /etc/os-release
+          echo "deb [signed-by=/etc/apt/keyrings/varnish.gpg] https://packages.varnish-software.com/varnish/debian $VERSION_CODENAME main" \
+            > /etc/apt/sources.list.d/varnish.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang libclang-dev git \
+            varnish varnish-dev
 
       - name: Checkout
         uses: actions/checkout@v6
