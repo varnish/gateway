@@ -10,18 +10,26 @@ COPY internal/ internal/
 RUN CGO_ENABLED=0 go build -mod=vendor -o /chaperone ./cmd/chaperone
 
 # Stage 2: Build ghost VMOD (Rust)
-# Base on varnish image so headers match exactly at compile time
-FROM varnish:9.0 AS rust-builder
-USER root
+# Use debian base and install varnish + varnish-dev from the apt repo in one
+# transaction so they are always version-matched (the varnish:9.0 Docker image
+# can lag behind the apt repo, causing dependency conflicts).
+FROM debian:trixie-slim AS rust-builder
 
-# Install Rust toolchain and build dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    build-essential \
-    pkg-config \
-    clang \
-    libclang-dev \
-    varnish-dev \
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install -y curl gpg dirmngr \
+    && mkdir -p /etc/apt/keyrings \
+    && gpg --batch --keyserver hkps://keys.openpgp.org \
+         --recv-keys 694566269779DFAC975ED9BDD0525EAE838B3344 \
+    && gpg --batch --armor --export 694566269779DFAC975ED9BDD0525EAE838B3344 \
+         > /etc/apt/keyrings/varnish.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/varnish.gpg] https://packages.varnish-software.com/varnish/debian $VERSION_CODENAME main" \
+         > /etc/apt/sources.list.d/varnish.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+         build-essential pkg-config clang libclang-dev \
+         varnish varnish-dev \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -39,19 +47,26 @@ COPY ghost/patches ./patches
 # Build ghost vmod
 RUN cargo build --release
 
-# Stage 3: Runtime image based on Varnish
-FROM varnish:9.0
+# Stage 3: Runtime image based on Debian with Varnish from apt
+FROM debian:trixie-slim
 
-USER root
-
-# Install libcap2-bin for setcap, set file capabilities on varnishd.
-# Both caps must be file capabilities because any file cap causes the kernel to
-# clear ambient capabilities on execve() — so NET_BIND_SERVICE (from the
-# container security context) would be lost if only IPC_LOCK were set here.
-RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install -y curl gpg dirmngr \
+    && mkdir -p /etc/apt/keyrings \
+    && gpg --batch --keyserver hkps://keys.openpgp.org \
+         --recv-keys 694566269779DFAC975ED9BDD0525EAE838B3344 \
+    && gpg --batch --armor --export 694566269779DFAC975ED9BDD0525EAE838B3344 \
+         > /etc/apt/keyrings/varnish.gpg \
+    && . /etc/os-release \
+    && echo "deb [signed-by=/etc/apt/keyrings/varnish.gpg] https://packages.varnish-software.com/varnish/debian $VERSION_CODENAME main" \
+         > /etc/apt/sources.list.d/varnish.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends varnish libcap2-bin \
     && setcap cap_ipc_lock,cap_net_bind_service+ep /usr/sbin/varnishd \
-    && apt-get remove -y libcap2-bin && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get remove -y libcap2-bin curl gpg dirmngr && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* ~/.gnupg \
+    && adduser --uid 1000 --quiet --system --no-create-home --home /nonexistent --group varnish || true
 
 USER varnish
 
