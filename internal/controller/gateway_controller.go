@@ -662,7 +662,9 @@ func validateListenerRouteKinds(listener *gatewayv1.Listener) ([]gatewayv1.Route
 func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway *gatewayv1.Gateway, listener *gatewayv1.Listener) metav1.Condition {
 	now := metav1.Now()
 
-	if listener.TLS == nil || listener.TLS.Mode == nil || *listener.TLS.Mode != gatewayv1.TLSModeTerminate {
+	// Gateway API spec: default TLS mode for HTTPS listeners is Terminate.
+	// Skip validation only if mode is explicitly set to something other than Terminate.
+	if listener.TLS == nil || (listener.TLS.Mode != nil && *listener.TLS.Mode != gatewayv1.TLSModeTerminate) {
 		return metav1.Condition{
 			Type:               string(gatewayv1.ListenerConditionResolvedRefs),
 			Status:             metav1.ConditionTrue,
@@ -937,7 +939,9 @@ func (r *GatewayReconciler) collectTLSCertData(ctx context.Context, gateway *gat
 		if listener.Protocol != gatewayv1.HTTPSProtocolType {
 			continue
 		}
-		if listener.TLS == nil || listener.TLS.Mode == nil || *listener.TLS.Mode != gatewayv1.TLSModeTerminate {
+		// Gateway API spec: default TLS mode for HTTPS listeners is Terminate.
+		// Skip only if mode is explicitly set to something other than Terminate.
+		if listener.TLS == nil || (listener.TLS.Mode != nil && *listener.TLS.Mode != gatewayv1.TLSModeTerminate) {
 			continue
 		}
 

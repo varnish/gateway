@@ -2061,6 +2061,32 @@ func TestCollectTLSCertData(t *testing.T) {
 		}
 	})
 
+	t.Run("HTTPS listener with nil TLS mode defaults to Terminate", func(t *testing.T) {
+		secret := newTestTLSSecret("my-cert", "default")
+		r := newTestReconciler(scheme, secret)
+		gw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+			Spec: gatewayv1.GatewaySpec{
+				Listeners: []gatewayv1.Listener{
+					{
+						Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
+						TLS: &gatewayv1.ListenerTLSConfig{
+							// Mode intentionally omitted — spec default is Terminate
+							CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "my-cert"}},
+						},
+					},
+				},
+			},
+		}
+		result := r.collectTLSCertData(context.Background(), gw)
+		if len(result) != 1 {
+			t.Fatalf("expected 1 entry when TLS mode is nil (default Terminate), got %d", len(result))
+		}
+		if _, ok := result["my-cert.pem"]; !ok {
+			t.Error("expected key 'my-cert.pem'")
+		}
+	})
+
 	t.Run("cross-namespace with ReferenceGrant", func(t *testing.T) {
 		secret := newTestTLSSecret("cross-cert", "cert-ns")
 		grant := &gatewayv1beta1.ReferenceGrant{
