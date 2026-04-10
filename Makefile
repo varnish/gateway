@@ -9,6 +9,7 @@ CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
 .PHONY: helm-lint helm-template
 .PHONY: test-conformance test-conformance-report test-conformance-single
+.PHONY: kind-create kind-delete kind-load kind-deploy test-conformance-kind
 .PHONY: manifests generate verify-manifests
 
 help:
@@ -42,6 +43,13 @@ help:
 	@echo "  make test-conformance                             Run all conformance tests (requires live cluster)"
 	@echo "  make test-conformance-report                      Run conformance tests and generate report"
 	@echo "  make test-conformance-single TEST=TestShortName   Run a single conformance test"
+	@echo "  make test-conformance-kind                        Full cycle: kind cluster, build, deploy, test, teardown"
+	@echo ""
+	@echo "Kind cluster:"
+	@echo "  make kind-create      Create kind cluster and install Gateway API CRDs"
+	@echo "  make kind-delete      Delete kind cluster"
+	@echo "  make kind-load        Load Docker images into kind cluster"
+	@echo "  make kind-deploy      Deploy operator to kind cluster"
 	@echo ""
 	@echo "Deploy:"
 	@echo "  make deploy-update    Update deploy/ manifests with current version"
@@ -193,13 +201,46 @@ endif
 		-args --gateway-class=varnish --run-test=$(TEST)
 
 # ============================================================================
+# Kind cluster for conformance testing
+# ============================================================================
+
+GATEWAY_API_VERSION ?= v1.4.0
+KIND_CLUSTER_NAME ?= varnish-gw
+KIND := go tool kind
+
+kind-create:
+	$(KIND) create cluster --name $(KIND_CLUSTER_NAME) --wait 60s
+	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
+	./hack/kind-metallb.sh
+
+kind-delete:
+	$(KIND) delete cluster --name $(KIND_CLUSTER_NAME)
+
+kind-load:
+	$(KIND) load docker-image $(OPERATOR_IMAGE):$(VERSION) --name $(KIND_CLUSTER_NAME)
+	$(KIND) load docker-image $(CHAPERONE_IMAGE):$(VERSION) --name $(KIND_CLUSTER_NAME)
+
+kind-deploy: deploy-update
+	kubectl apply -f deploy/00-prereqs.yaml
+	kubectl wait --for=condition=Established crd/gatewayclassparameters.gateway.varnish-software.com --timeout=30s
+	kubectl apply -f deploy/01-operator.yaml -f deploy/02-chaperone-rbac.yaml -f deploy/03-gatewayclass.yaml
+	kubectl rollout status deployment/varnish-gateway-operator -n varnish-gateway-system --timeout=120s
+
+test-conformance-kind: KIND_VERSION = kind
+test-conformance-kind:
+	$(MAKE) kind-create
+	$(MAKE) docker VERSION=$(KIND_VERSION)
+	$(MAKE) kind-load VERSION=$(KIND_VERSION)
+	$(MAKE) kind-deploy VERSION=$(KIND_VERSION)
+	$(MAKE) test-conformance; rc=$$?; $(MAKE) kind-delete; exit $$rc
+
+# ============================================================================
 # Deploy
 # ============================================================================
 
 deploy-update:
 	@echo "Updating deploy/01-operator.yaml to version $(VERSION)"
-	@sed -i '' 's|gateway-operator:[a-zA-Z0-9._-]*|gateway-operator:$(VERSION)|' deploy/01-operator.yaml
-	@sed -i '' 's|gateway-chaperone:[a-zA-Z0-9._-]*|gateway-chaperone:$(VERSION)|' deploy/01-operator.yaml
+	@perl -pi -e 's|gateway-operator:[a-zA-Z0-9._-]+|gateway-operator:$(VERSION)|g; s|gateway-chaperone:[a-zA-Z0-9._-]+|gateway-chaperone:$(VERSION)|g' deploy/01-operator.yaml
 
 deploy: deploy-update
 	kubectl apply -f deploy/00-prereqs.yaml -f deploy/01-operator.yaml -f deploy/02-chaperone-rbac.yaml -f deploy/03-gatewayclass.yaml

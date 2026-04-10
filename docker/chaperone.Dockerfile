@@ -1,5 +1,5 @@
 # Stage 1: Build chaperone (Go)
-FROM golang:1-alpine AS go-builder
+FROM golang:1.26-alpine AS go-builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
