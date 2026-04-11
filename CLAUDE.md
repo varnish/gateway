@@ -57,7 +57,7 @@ The project passes the Gateway API conformance test suite (`make test-conformanc
 ### Install Gateway API CRDs
 
 ```bash
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/standard-install.yaml
 ```
 
 ### Local k8s development setup
@@ -487,7 +487,7 @@ Deploy to cluster:
 
 ```bash
 # Install Gateway API CRDs first
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.0/standard-install.yaml
 
 # Deploy the operator
 kubectl apply -f deploy/

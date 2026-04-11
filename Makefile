@@ -204,7 +204,7 @@ endif
 # Kind cluster for conformance testing
 # ============================================================================
 
-GATEWAY_API_VERSION ?= v1.4.0
+GATEWAY_API_VERSION ?= v1.5.0
 KIND_CLUSTER_NAME ?= varnish-gw
 KIND := go tool kind
 
