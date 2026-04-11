@@ -331,7 +331,7 @@ func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil, nil)
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -558,7 +558,7 @@ func TestMethodMatchingConformanceFullPipeline(t *testing.T) {
 	}
 
 	// Step 1: CollectHTTPRouteBackends (what the operator does)
-	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, nil, ns, nil)
+	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, nil, ns, nil, nil)
 
 	t.Logf("CollectHTTPRouteBackends produced %d routes:", len(collectedRoutes))
 	for i, r := range collectedRoutes {
@@ -745,7 +745,7 @@ func TestCollectHTTPRouteBackends_NoMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil, nil)
 
 	if len(collectedRoutes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(collectedRoutes))
@@ -809,7 +809,7 @@ func TestCollectHTTPRouteBackends_PortMapResolution(t *testing.T) {
 		"default/fallback-svc:8080": {Port: 9090}, // service port 8080 → target port 9090
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap, nil)
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -888,7 +888,7 @@ func TestCollectHTTPRouteBackends_PortMapPartialResolution(t *testing.T) {
 		// unmapped-svc:9090 not in map → falls through to service port
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap, nil)
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))

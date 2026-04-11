@@ -14,6 +14,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 )
 
 func newHTTPRouteTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *HTTPRouteReconciler {
@@ -1491,6 +1492,260 @@ func TestReconcile_HTTPSListenerMulti(t *testing.T) {
 	}
 	if !strings.Contains(routingJSON, "infra-backend-v2") {
 		t.Error("routing.json missing infra-backend-v2")
+	}
+}
+
+func TestValidateBackendRefs_CrossNamespace_NoGrant(t *testing.T) {
+	scheme := newTestScheme()
+
+	// Service in a different namespace
+	backendSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-svc",
+			Namespace: "other-ns",
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+
+	otherNS := gatewayv1.Namespace("other-ns")
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name:      "backend-svc",
+									Namespace: &otherNS,
+									Port:      ptr(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, backendSvc)
+	resolved, reason, _ := r.validateBackendRefs(context.Background(), route)
+
+	if resolved {
+		t.Error("expected resolved=false for cross-namespace ref without ReferenceGrant")
+	}
+	if reason != string(gatewayv1.RouteReasonRefNotPermitted) {
+		t.Errorf("expected reason %q, got %q", gatewayv1.RouteReasonRefNotPermitted, reason)
+	}
+}
+
+func TestValidateBackendRefs_CrossNamespace_WithGrant(t *testing.T) {
+	scheme := newTestScheme()
+
+	backendSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-svc",
+			Namespace: "other-ns",
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+
+	// ReferenceGrant in target namespace allowing HTTPRoute from "default"
+	grant := &gatewayv1beta1.ReferenceGrant{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "allow-from-default",
+			Namespace: "other-ns",
+		},
+		Spec: gatewayv1beta1.ReferenceGrantSpec{
+			From: []gatewayv1beta1.ReferenceGrantFrom{
+				{Group: "gateway.networking.k8s.io", Kind: "HTTPRoute", Namespace: "default"},
+			},
+			To: []gatewayv1beta1.ReferenceGrantTo{
+				{Group: "", Kind: "Service"},
+			},
+		},
+	}
+
+	otherNS := gatewayv1.Namespace("other-ns")
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name:      "backend-svc",
+									Namespace: &otherNS,
+									Port:      ptr(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, backendSvc, grant)
+	resolved, reason, _ := r.validateBackendRefs(context.Background(), route)
+
+	if !resolved {
+		t.Error("expected resolved=true for cross-namespace ref with valid ReferenceGrant")
+	}
+	if reason != string(gatewayv1.RouteReasonResolvedRefs) {
+		t.Errorf("expected reason %q, got %q", gatewayv1.RouteReasonResolvedRefs, reason)
+	}
+}
+
+func TestValidateBackendRefs_SameNamespace_NoGrantNeeded(t *testing.T) {
+	scheme := newTestScheme()
+
+	backendSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-svc",
+			Namespace: "default",
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name: "backend-svc",
+									Port: ptr(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, backendSvc)
+	resolved, reason, _ := r.validateBackendRefs(context.Background(), route)
+
+	if !resolved {
+		t.Error("expected resolved=true for same-namespace ref (no grant needed)")
+	}
+	if reason != string(gatewayv1.RouteReasonResolvedRefs) {
+		t.Errorf("expected reason %q, got %q", gatewayv1.RouteReasonResolvedRefs, reason)
+	}
+}
+
+func TestReconcile_CrossNamespace_BlockedBackendExcludedFromRouting(t *testing.T) {
+	scheme := newTestScheme()
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-gateway-vcl",
+			Namespace: "default",
+		},
+		Data: map[string]string{
+			"main.vcl":     "vcl 4.1;",
+			"routing.json": `{"version": 2, "vhosts": {}}`,
+		},
+	}
+
+	// Service in another namespace — no ReferenceGrant
+	backendSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "backend-svc",
+			Namespace: "other-ns",
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{Port: 8080}},
+		},
+	}
+
+	otherNS := gatewayv1.Namespace("other-ns")
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-route",
+			Namespace: "default",
+		},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Name: "test-gateway"},
+				},
+			},
+			Hostnames: []gatewayv1.Hostname{"example.com"},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					BackendRefs: []gatewayv1.HTTPBackendRef{
+						{
+							BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{
+									Name:      "backend-svc",
+									Namespace: &otherNS,
+									Port:      ptr(gatewayv1.PortNumber(8080)),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gateway, configMap, route, backendSvc)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-route", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	// The blocked backend should NOT appear in routing.json
+	var updatedCM corev1.ConfigMap
+	if err := r.Get(context.Background(),
+		types.NamespacedName{Name: "test-gateway-vcl", Namespace: "default"},
+		&updatedCM); err != nil {
+		t.Fatalf("failed to get ConfigMap: %v", err)
+	}
+
+	routingJSON := updatedCM.Data["routing.json"]
+	if strings.Contains(routingJSON, "backend-svc") {
+		t.Error("routing.json should NOT contain blocked cross-namespace backend")
 	}
 }
 

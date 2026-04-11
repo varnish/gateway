@@ -183,21 +183,21 @@ act:
 # ============================================================================
 
 test-conformance:
-	go test -tags=conformance -v -timeout 350s -count=1 ./conformance/ \
+	go test -tags=conformance -v -timeout 600s -count=1 ./conformance/ \
 		-args --gateway-class=varnish
 
 test-conformance-report:
-	@mkdir -p dist
-	CONFORMANCE_REPORT_PATH=dist/conformance-report.yaml \
+	@mkdir -p $(CURDIR)/dist
+	CONFORMANCE_REPORT_PATH=$(CURDIR)/dist/conformance-report.yaml \
 	GATEWAY_VERSION=$(VERSION) \
-	go test -tags=conformance -v -timeout 350s -count=1 ./conformance/ \
+	go test -tags=conformance -v -timeout 600s -count=1 ./conformance/ \
 		-args --gateway-class=varnish
 
 test-conformance-single:
 ifndef TEST
 	$(error TEST is required. Usage: make test-conformance-single TEST=HTTPRouteMethodMatching)
 endif
-	go test -tags=conformance -v -timeout 350s -count=1 ./conformance/ \
+	go test -tags=conformance -v -timeout 600s -count=1 ./conformance/ \
 		-args --gateway-class=varnish --run-test=$(TEST)
 
 # ============================================================================
@@ -232,7 +232,7 @@ test-conformance-kind:
 	$(MAKE) docker VERSION=$(KIND_VERSION)
 	$(MAKE) kind-load VERSION=$(KIND_VERSION)
 	$(MAKE) kind-deploy VERSION=$(KIND_VERSION)
-	$(MAKE) test-conformance; rc=$$?; $(MAKE) kind-delete; exit $$rc
+	$(MAKE) test-conformance-report; rc=$$?; $(MAKE) kind-delete; exit $$rc
 
 # ============================================================================
 # Deploy

@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/ghost"
@@ -584,8 +585,11 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	// Build port map to resolve service ports to target ports
 	portMap := r.buildServicePortMap(ctx, filteredRoutes, gateway.Namespace)
 
+	// Compute blocked cross-namespace backend refs (not permitted by ReferenceGrants)
+	blockedRefs := r.computeBlockedBackendRefs(ctx, filteredRoutes)
+
 	// Generate routing.json for ghost with path-based routing
-	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace, portMap)
+	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace, portMap, blockedRefs)
 
 	// Attach VarnishCachePolicy to each route
 	r.attachCachePolicies(ctx, collectedRoutes, filteredRoutes, gateway)
@@ -890,11 +894,24 @@ func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, route *ga
 				return false, string(gatewayv1.RouteReasonInvalidKind),
 					fmt.Sprintf("BackendRef group %q is not supported", *backendRef.Group)
 			}
-			// Check Service exists
+			// Check cross-namespace ReferenceGrant
 			namespace := route.Namespace
 			if backendRef.Namespace != nil {
 				namespace = string(*backendRef.Namespace)
 			}
+			if namespace != route.Namespace {
+				allowed, err := IsReferenceAllowed(ctx, r.Client, httpRouteServiceRef(route.Namespace, namespace, string(backendRef.Name)))
+				if err != nil {
+					return false, string(gatewayv1.RouteReasonRefNotPermitted),
+						fmt.Sprintf("Failed to check ReferenceGrant for Service %q in namespace %q: %v", backendRef.Name, namespace, err)
+				}
+				if !allowed {
+					return false, string(gatewayv1.RouteReasonRefNotPermitted),
+						fmt.Sprintf("Cross-namespace reference to Service %q in namespace %q not permitted by any ReferenceGrant", backendRef.Name, namespace)
+				}
+			}
+
+			// Check Service exists
 			var svc corev1.Service
 			if err := r.Get(ctx, types.NamespacedName{
 				Name:      string(backendRef.Name),
@@ -911,6 +928,48 @@ func (r *HTTPRouteReconciler) validateBackendRefs(ctx context.Context, route *ga
 		}
 	}
 	return true, string(gatewayv1.RouteReasonResolvedRefs), "All references resolved"
+}
+
+// httpRouteServiceRef builds a CrossNamespaceRef for an HTTPRoute referencing a Service.
+func httpRouteServiceRef(routeNamespace, targetNamespace, serviceName string) CrossNamespaceRef {
+	return CrossNamespaceRef{
+		FromGroup:     "gateway.networking.k8s.io",
+		FromKind:      "HTTPRoute",
+		FromNamespace: routeNamespace,
+		ToGroup:       "",
+		ToKind:        "Service",
+		ToNamespace:   targetNamespace,
+		ToName:        serviceName,
+	}
+}
+
+// computeBlockedBackendRefs returns the set of cross-namespace backend refs
+// that are not permitted by any ReferenceGrant.
+func (r *HTTPRouteReconciler) computeBlockedBackendRefs(ctx context.Context, routes []gatewayv1.HTTPRoute) map[string]bool {
+	blocked := make(map[string]bool)
+	for _, route := range routes {
+		routeNS := route.Namespace
+		for _, rule := range route.Spec.Rules {
+			for _, backendRef := range rule.BackendRefs {
+				ns := routeNS
+				if backendRef.Namespace != nil {
+					ns = string(*backendRef.Namespace)
+				}
+				if ns == routeNS {
+					continue
+				}
+				allowed, err := IsReferenceAllowed(ctx, r.Client, httpRouteServiceRef(routeNS, ns, string(backendRef.Name)))
+				if err != nil {
+					r.Logger.Error("failed to check ReferenceGrant", "error", err,
+						"route", routeNS+"/"+route.Name, "service", ns+"/"+string(backendRef.Name))
+				}
+				if !allowed {
+					blocked[vcl.BlockedBackendKey(routeNS, ns, string(backendRef.Name))] = true
+				}
+			}
+		}
+	}
+	return blocked
 }
 
 // countRoutesForListener counts how many routes attach to a specific listener.
@@ -1206,6 +1265,57 @@ func routeReferencesService(route *gatewayv1.HTTPRoute, serviceName, serviceName
 	return false
 }
 
+// findHTTPRoutesForReferenceGrant returns reconcile requests for all HTTPRoutes
+// that have cross-namespace backend refs into the ReferenceGrant's namespace.
+func (r *HTTPRouteReconciler) findHTTPRoutesForReferenceGrant(ctx context.Context, obj client.Object) []reconcile.Request {
+	grant, ok := obj.(*gatewayv1beta1.ReferenceGrant)
+	if !ok {
+		return nil
+	}
+
+	var routeList gatewayv1.HTTPRouteList
+	if err := r.List(ctx, &routeList); err != nil {
+		r.Logger.Error("failed to list HTTPRoutes for ReferenceGrant watch", "error", err)
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, route := range routeList.Items {
+		if routeHasCrossNamespaceRefTo(&route, grant.Namespace) {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name:      route.Name,
+					Namespace: route.Namespace,
+				},
+			})
+		}
+	}
+
+	if len(requests) > 0 {
+		r.Logger.Debug("ReferenceGrant changed, re-reconciling affected HTTPRoutes",
+			"grant", fmt.Sprintf("%s/%s", grant.Namespace, grant.Name),
+			"routes", len(requests))
+	}
+
+	return requests
+}
+
+// routeHasCrossNamespaceRefTo checks if any backendRef in the route references
+// a Service in the given namespace from a different namespace.
+func routeHasCrossNamespaceRefTo(route *gatewayv1.HTTPRoute, targetNamespace string) bool {
+	for _, rule := range route.Spec.Rules {
+		for _, backendRef := range rule.BackendRefs {
+			if backendRef.Namespace == nil {
+				continue
+			}
+			if string(*backendRef.Namespace) == targetNamespace && route.Namespace != targetNamespace {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // findHTTPRoutesForVCP returns reconcile requests for HTTPRoutes affected by a VCP change.
 func (r *HTTPRouteReconciler) findHTTPRoutesForVCP(ctx context.Context, obj client.Object) []reconcile.Request {
 	vcp, ok := obj.(*gatewayparamsv1alpha1.VarnishCachePolicy)
@@ -1276,6 +1386,10 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&gatewayv1.BackendTLSPolicy{},
 			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForBackendTLSPolicy),
+		).
+		Watches(
+			&gatewayv1beta1.ReferenceGrant{},
+			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForReferenceGrant),
 		).
 		Complete(r)
 }

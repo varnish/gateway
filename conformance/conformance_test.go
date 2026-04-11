@@ -9,6 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/gateway-api/conformance"
 	confv1 "sigs.k8s.io/gateway-api/conformance/apis/v1"
+	"sigs.k8s.io/gateway-api/conformance/utils/suite"
 	"sigs.k8s.io/gateway-api/pkg/features"
 )
 
@@ -19,9 +20,14 @@ func TestConformance(t *testing.T) {
 	opts.CleanupBaseResources = true
 	opts.AllowCRDsMismatch = true
 
+	opts.ConformanceProfiles = sets.New[suite.ConformanceProfileName](
+		suite.GatewayHTTPConformanceProfileName,
+	)
+
 	opts.SupportedFeatures = sets.New[features.FeatureName](
 		// Core
 		features.SupportGateway,
+		features.SupportReferenceGrant,
 		features.SupportHTTPRoute,
 		// Extended
 		features.SupportHTTPRouteQueryParamMatching,

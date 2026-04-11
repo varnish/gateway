@@ -107,7 +107,12 @@ type ServicePortMap map[string]ServicePortMapping
 // Returns a list of Route structs that include path matching rules.
 // When gateway is provided, listener information is computed for each route based on parentRef sectionNames.
 // When portMap is provided, service ports from BackendRefs are resolved to target ports.
-func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, namespace string, portMap ServicePortMap) []ghost.Route {
+// BlockedBackendKey returns the map key for a blocked backend ref.
+func BlockedBackendKey(routeNamespace, namespace, name string) string {
+	return routeNamespace + "/" + namespace + "/" + name
+}
+
+func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, namespace string, portMap ServicePortMap, blockedRefs map[string]bool) []ghost.Route {
 	var collectedRoutes []ghost.Route
 
 	ruleIndex := 0
@@ -172,11 +177,32 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 						})
 					}
 
-					for _, backend := range rule.BackendRefs {
-						if backend.Name == "" {
-							continue
-						}
+					// Filter to valid backends (skip empty names and blocked refs)
+					validNoMatchBackends := filterValidBackends(rule.BackendRefs, routeNS, blockedRefs)
 
+					// If all backends were filtered, create a route with no backend (ghost returns 500)
+					if len(validNoMatchBackends) == 0 && len(rule.BackendRefs) > 0 {
+						pathMatch := &ghost.PathMatch{
+							Type:  ghost.PathMatchPathPrefix,
+							Value: "/",
+						}
+						collectedRoutes = append(collectedRoutes, ghost.Route{
+							Hostname:  hostname,
+							PathMatch: pathMatch,
+							Filters:   filters,
+							Service:   "",
+							Namespace: routeNS,
+							Port:      0,
+							Weight:    0,
+							Listeners: listeners,
+							RouteName: routeName,
+							RuleName:  ruleName,
+							Priority:  CalculateRoutePriority(pathMatch, nil, nil, nil),
+							RuleIndex: ruleIndex,
+						})
+					}
+
+					for _, backend := range validNoMatchBackends {
 						backendNS := routeNS
 						if backend.Namespace != nil {
 							backendNS = string(*backend.Namespace)
@@ -303,17 +329,9 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							filters = extractFilters(rule.Filters)
 						}
 
-						// Filter to only valid backendRefs (Kind must be Service or unset, Group must be core/"" or unset)
-						var validBackendRefs []gatewayv1.HTTPBackendRef
-						for _, backend := range rule.BackendRefs {
-							if backend.Kind != nil && *backend.Kind != "Service" {
-								continue
-							}
-							if backend.Group != nil && *backend.Group != "" {
-								continue
-							}
-							validBackendRefs = append(validBackendRefs, backend)
-						}
+						// Filter to only valid backendRefs (Kind must be Service or unset, Group must be core/"" or unset,
+						// and not blocked by ReferenceGrant policy)
+						validBackendRefs := filterValidBackends(rule.BackendRefs, routeNS, blockedRefs)
 
 						// If there are no valid backends (filter-only routes, or all backends invalid),
 						// create a single route entry so the path still matches.
@@ -417,6 +435,33 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 	})
 
 	return collectedRoutes
+}
+
+// filterValidBackends returns backend refs that have a valid Kind/Group and are not blocked.
+func filterValidBackends(backendRefs []gatewayv1.HTTPBackendRef, routeNS string, blockedRefs map[string]bool) []gatewayv1.HTTPBackendRef {
+	var valid []gatewayv1.HTTPBackendRef
+	for _, backend := range backendRefs {
+		if backend.Name == "" {
+			continue
+		}
+		if backend.Kind != nil && *backend.Kind != "Service" {
+			continue
+		}
+		if backend.Group != nil && *backend.Group != "" {
+			continue
+		}
+		if len(blockedRefs) > 0 {
+			bns := routeNS
+			if backend.Namespace != nil {
+				bns = string(*backend.Namespace)
+			}
+			if blockedRefs[BlockedBackendKey(routeNS, bns, string(backend.Name))] {
+				continue
+			}
+		}
+		valid = append(valid, backend)
+	}
+	return valid
 }
 
 // extractFilters converts Gateway API filters to ghost filter configuration
