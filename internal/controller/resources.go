@@ -214,7 +214,13 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
 func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements, hasBackendTLS bool) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
-	replicas := int32(1) // TODO: get from GatewayClassParameters
+
+	// Replicas is intentionally left unset on the desired object so the operator
+	// does not fight a HorizontalPodAutoscaler (or manual `kubectl scale`).
+	// Kubernetes defaults Spec.Replicas to 1 when the field is nil on create,
+	// and the Deployment update path in reconcileResource only overwrites
+	// Spec.Template and Spec.Strategy — never Spec.Replicas — so the current
+	// replica count (whatever an HPA has set it to) is preserved on reconcile.
 
 	// Rolling update strategy for zero-downtime deployments
 	maxUnavailable := intstr.FromInt(0) // Never reduce available pods during update
@@ -241,7 +247,6 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiv
 			Labels:    labels,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{

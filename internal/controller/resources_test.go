@@ -394,8 +394,10 @@ func TestBuildDeployment_Basic(t *testing.T) {
 	if dep.Name != "my-gw" {
 		t.Errorf("name = %q, want %q", dep.Name, "my-gw")
 	}
-	if *dep.Spec.Replicas != 1 {
-		t.Errorf("replicas = %d, want 1", *dep.Spec.Replicas)
+	// Replicas is intentionally left unset so the operator does not fight an HPA.
+	// Kubernetes defaults Spec.Replicas to 1 on create when the field is nil.
+	if dep.Spec.Replicas != nil {
+		t.Errorf("replicas = %d, want nil (unset, so HPA can manage it)", *dep.Spec.Replicas)
 	}
 	// Check infra hash annotation
 	hash := dep.Spec.Template.Annotations[AnnotationInfraHash]
