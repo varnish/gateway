@@ -176,3 +176,5 @@ For Gateway- and HTTPRoute-level issues, see [First Gateway → Troubleshooting]
 
 - [First Gateway](first-gateway.md) — create your first Gateway and HTTPRoute
 - [GatewayClassParameters](../reference/gatewayclassparameters.md) — advanced configuration
+- [Custom VMODs](../operations/custom-vmods.md) — load additional VMODs via a custom image or init container
+- [Upgrades](../operations/upgrades.md) — upgrading an existing installation
