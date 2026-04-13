@@ -3583,10 +3583,11 @@ spec:
                   mode:
                     description: |-
                       Mode determines which varnish logging tool to use.
-                      Valid values: "varnishlog", "varnishncsa"
-                      Future: "varnishlog-json" when available
+                      Valid values: "varnishlog", "varnishlog-json", "varnishncsa"
+                      The named binary must exist in the sidecar image.
                     enum:
                     - varnishlog
+                    - varnishlog-json
                     - varnishncsa
                     type: string
                 required:

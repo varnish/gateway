@@ -102,9 +102,9 @@ type PodDisruptionBudget struct {
 // VarnishLogging configures varnish logging via a sidecar container.
 type VarnishLogging struct {
 	// Mode determines which varnish logging tool to use.
-	// Valid values: "varnishlog", "varnishncsa"
-	// Future: "varnishlog-json" when available
-	// +kubebuilder:validation:Enum=varnishlog;varnishncsa
+	// Valid values: "varnishlog", "varnishlog-json", "varnishncsa"
+	// The named binary must exist in the sidecar image.
+	// +kubebuilder:validation:Enum=varnishlog;varnishlog-json;varnishncsa
 	Mode string `json:"mode"`
 
 	// Format specifies the output format for varnishncsa.
