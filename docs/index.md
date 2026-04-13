@@ -28,7 +28,7 @@ Kubernetes Gateway API implementation using Varnish.
 
 - [Resources and Scaling](operations/resources-and-scaling.md)
 - [Pod Disruption Budgets](operations/pod-disruption-budgets.md) — TODO
-- [Horizontal Pod Autoscaling](operations/hpa.md) — TODO
+- [Horizontal Pod Autoscaling](operations/horizontal-pod-autoscaling.md)
 - [Upgrades](operations/upgrades.md) — TODO
 - [Observability](operations/observability.md) — TODO
 - [Troubleshooting](operations/troubleshooting.md) — TODO
