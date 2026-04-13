@@ -4,6 +4,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // DeepCopyInto copies the receiver into out.
@@ -242,6 +243,36 @@ func (in *GatewayClassParametersSpec) DeepCopyInto(out *GatewayClassParametersSp
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.PodDisruptionBudget != nil {
+		in, out := &in.PodDisruptionBudget, &out.PodDisruptionBudget
+		*out = new(PodDisruptionBudget)
+		(*in).DeepCopyInto(*out)
+	}
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *PodDisruptionBudget) DeepCopyInto(out *PodDisruptionBudget) {
+	*out = *in
+	if in.MinAvailable != nil {
+		in, out := &in.MinAvailable, &out.MinAvailable
+		*out = new(intstr.IntOrString)
+		**out = **in
+	}
+	if in.MaxUnavailable != nil {
+		in, out := &in.MaxUnavailable, &out.MaxUnavailable
+		*out = new(intstr.IntOrString)
+		**out = **in
+	}
+}
+
+// DeepCopy creates a deep copy of PodDisruptionBudget.
+func (in *PodDisruptionBudget) DeepCopy() *PodDisruptionBudget {
+	if in == nil {
+		return nil
+	}
+	out := new(PodDisruptionBudget)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopy creates a deep copy of GatewayClassParametersSpec.

@@ -7,6 +7,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
@@ -477,6 +478,53 @@ func TestBuildDeployment_WithBackendTLS(t *testing.T) {
 	}
 	if !foundEnv {
 		t.Error("expected SSL_CERT_FILE env var when hasBackendTLS=true")
+	}
+}
+
+// --- buildPodDisruptionBudget ---
+
+func TestBuildPodDisruptionBudget_MinAvailable(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+	min := intstr.FromInt(1)
+	pdb := r.buildPodDisruptionBudget(gw, &gatewayparamsv1alpha1.PodDisruptionBudget{
+		MinAvailable: &min,
+	})
+
+	if pdb.Name != "my-gw" || pdb.Namespace != "default" {
+		t.Errorf("unexpected name/namespace: %s/%s", pdb.Namespace, pdb.Name)
+	}
+	if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntVal != 1 {
+		t.Errorf("MinAvailable = %+v, want IntVal=1", pdb.Spec.MinAvailable)
+	}
+	if pdb.Spec.MaxUnavailable != nil {
+		t.Errorf("MaxUnavailable = %+v, want nil", pdb.Spec.MaxUnavailable)
+	}
+	// Selector must match Deployment labels so the PDB targets gateway pods.
+	expectedLabels := r.buildLabels(gw)
+	if pdb.Spec.Selector == nil {
+		t.Fatal("selector is nil")
+	}
+	for k, v := range expectedLabels {
+		if pdb.Spec.Selector.MatchLabels[k] != v {
+			t.Errorf("selector.MatchLabels[%q] = %q, want %q", k, pdb.Spec.Selector.MatchLabels[k], v)
+		}
+	}
+}
+
+func TestBuildPodDisruptionBudget_MaxUnavailablePercent(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+	max := intstr.FromString("50%")
+	pdb := r.buildPodDisruptionBudget(gw, &gatewayparamsv1alpha1.PodDisruptionBudget{
+		MaxUnavailable: &max,
+	})
+
+	if pdb.Spec.MaxUnavailable == nil || pdb.Spec.MaxUnavailable.StrVal != "50%" {
+		t.Errorf("MaxUnavailable = %+v, want StrVal=50%%", pdb.Spec.MaxUnavailable)
+	}
+	if pdb.Spec.MinAvailable != nil {
+		t.Errorf("MinAvailable = %+v, want nil", pdb.Spec.MinAvailable)
 	}
 }
 

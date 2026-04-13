@@ -3592,6 +3592,36 @@ spec:
                 required:
                 - mode
                 type: object
+              podDisruptionBudget:
+                description: |-
+                  PodDisruptionBudget, if set, causes the operator to create a
+                  PodDisruptionBudget for each Gateway using this GatewayClass. Omit to
+                  create no PDB.
+
+                  PDB is opt-in because the default replica count is 1: a PDB with
+                  minAvailable: 1 on a single-replica Deployment blocks all voluntary
+                  evictions (including node drains) indefinitely. Only set a PDB if you
+                  have also arranged for more than one replica (via an HPA or manual scale).
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MaxUnavailable is the maximum number of pods that can be unavailable
+                      during a voluntary disruption. Can be an absolute number or a percentage
+                      string (e.g. "50%"). Mutually exclusive with MinAvailable.
+                    x-kubernetes-int-or-string: true
+                  minAvailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      MinAvailable is the minimum number of pods that must be available during
+                      a voluntary disruption. Can be an absolute number or a percentage string
+                      (e.g. "50%"). Mutually exclusive with MaxUnavailable.
+                    x-kubernetes-int-or-string: true
+                type: object
               resources:
                 description: |-
                   Resources specifies resource requirements for the main varnish-gateway container.
