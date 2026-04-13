@@ -1,69 +1,136 @@
 # Installation Guide
 
-This guide covers different installation methods for Varnish Gateway.
+This guide covers installing, upgrading, and uninstalling Varnish Gateway. Helm is the recommended path; kubectl manifests are available as an alternative.
 
 ## Prerequisites
 
 - Kubernetes 1.26+
 - kubectl configured to access your cluster
-- Helm 3.8+ (for Helm installation method)
+- Helm 3.8+ (if using the Helm method)
 - [Gateway API CRDs](https://gateway-api.sigs.k8s.io/guides/#installing-gateway-api) installed in your cluster:
+
   ```bash
   kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
   ```
 
-## Installation Methods
+## Helm
 
-### Method 1: Helm (Recommended)
+### Install
 
-The easiest way to install Varnish Gateway is using the Helm chart:
+Install the chart from the OCI registry:
 
 ```bash
-# Install the chart
-helm install varnish-gateway ./charts/varnish-gateway \
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --namespace varnish-gateway-system \
   --create-namespace
 ```
 
-This will:
-- Install Varnish-specific CRDs (GatewayClassParameters, VarnishCacheInvalidation, VarnishCachePolicy)
-- Deploy the operator
-- Create RBAC resources
-- Create a default GatewayClass named "varnish"
+This installs:
 
-#### Helm Installation Options
+- Varnish-specific CRDs (GatewayClassParameters, VarnishCacheInvalidation, VarnishCachePolicy)
+- The operator deployment and RBAC
+- A default GatewayClass named `varnish`
 
-**Install with custom values**:
+### Install a specific version
 
 ```bash
-helm install varnish-gateway ./charts/varnish-gateway \
-  -f charts/varnish-gateway/examples/custom-values.yaml
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
+  --version v0.19.2 \
+  --namespace varnish-gateway-system \
+  --create-namespace
 ```
 
-**Install specific version**:
+### Install with custom values
 
 ```bash
-helm install varnish-gateway ./charts/varnish-gateway \
-  --set operator.image.tag=v0.7.2 \
-  --set chaperone.image.tag=v0.7.2
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
+  --namespace varnish-gateway-system \
+  --create-namespace \
+  -f my-values.yaml
 ```
 
-See [charts/varnish-gateway/README.md](charts/varnish-gateway/README.md) for all configuration options.
+See [charts/varnish-gateway/README.md](../../charts/varnish-gateway/README.md) for all configuration options.
 
-### Method 2: kubectl with manifests
+### Upgrade
 
-If you prefer not to use Helm, you can install using kubectl:
+Helm installs CRDs from a chart's `crds/` directory on first install but [does not touch them on upgrade or uninstall](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/), this is a deliberate Helm design choice to avoid accidentally destroying data held in custom resources. If the Varnish-specific CRDs (`GatewayClassParameters`, `VarnishCacheInvalidation`, `VarnishCachePolicy`) have changed between your installed version and the target version, apply them manually before upgrading:
 
 ```bash
-# Install Varnish Gateway (Gateway API CRDs must already be installed, see Prerequisites)
+# Pull the chart to get the CRDs for the new version
+helm pull oci://ghcr.io/varnish/charts/varnish-gateway --version vX.Y.Z --untar
+kubectl apply -f varnish-gateway/crds/
+```
+
+If CRDs are unchanged between versions, this step is a no-op and can be skipped — applying them is always safe. Release notes call out CRD changes when they happen.
+
+Then upgrade the release:
+
+```bash
+helm upgrade varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
+  --version vX.Y.Z \
+  --namespace varnish-gateway-system
+```
+
+This covers the Varnish-specific CRDs only. The Gateway API CRDs (`Gateway`, `HTTPRoute`, etc.) are upstream and upgraded separately — see the [Gateway API release notes](https://github.com/kubernetes-sigs/gateway-api/releases).
+
+### Uninstall
+
+```bash
+helm uninstall varnish-gateway --namespace varnish-gateway-system
+```
+
+**Warning:** deleting the CRDs also deletes all Gateway, HTTPRoute, and related resources in the cluster.
+
+```bash
+kubectl delete crd gatewayclassparameters.gateway.varnish-software.com \
+                   varnishcacheinvalidations.gateway.varnish-software.com \
+                   varnishcachepolicies.gateway.varnish-software.com
+```
+
+## kubectl (Alternative)
+
+Kubernetes manifests live in `deploy/`:
+
+```
+deploy/
+├── 00-prereqs.yaml       # Namespace + GatewayClassParameters CRD
+├── 01-operator.yaml      # ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment
+├── 02-chaperone-rbac.yaml # ClusterRole for chaperone to watch EndpointSlices
+├── 03-gatewayclass.yaml  # GatewayClass "varnish"
+└── sample-gateway.yaml   # Sample Gateway (not applied by default)
+```
+
+### Install
+
+```bash
 kubectl apply -f deploy/
 ```
 
-This will install the same resources as the Helm chart, but without templating support.
+This installs the same resources as the Helm chart, without templating.
+
+### Upgrade
+
+Re-apply the manifests for the new version:
+
+```bash
+kubectl apply -f deploy/
+```
+
+### Uninstall
+
+```bash
+kubectl delete -f deploy/
+```
+
+To also remove the Gateway API CRDs:
+
+```bash
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
+```
 
 ## Verify Installation
 
-Check that the operator is running:
+Check the operator is running:
 
 ```bash
 kubectl get pods -n varnish-gateway-system
@@ -76,7 +143,7 @@ NAME                                        READY   STATUS    RESTARTS   AGE
 varnish-gateway-operator-xxxxxxxxxx-xxxxx   1/1     Running   0          30s
 ```
 
-Check that the GatewayClass was created:
+Check the GatewayClass was created:
 
 ```bash
 kubectl get gatewayclass
@@ -89,74 +156,6 @@ NAME      CONTROLLER                      ACCEPTED   AGE
 varnish   varnish-software.com/gateway    True       1m
 ```
 
-## Create Your First Gateway
-
-Create a Gateway resource:
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: my-gateway
-  namespace: default
-spec:
-  gatewayClassName: varnish
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 80
-EOF
-```
-
-Wait for the Gateway to be ready:
-
-```bash
-kubectl wait --for=condition=Programmed gateway/my-gateway -n default --timeout=60s
-```
-
-Check the Gateway status:
-
-```bash
-kubectl get gateway my-gateway -n default
-```
-
-You should see:
-
-```
-NAME         CLASS     ADDRESS         PROGRAMMED   AGE
-my-gateway   varnish   10.96.xxx.xxx   True         1m
-```
-
-## Create an HTTPRoute
-
-Route traffic to a backend service:
-
-```bash
-kubectl apply -f - <<EOF
-apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
-metadata:
-  name: my-route
-  namespace: default
-spec:
-  parentRefs:
-    - name: my-gateway
-  hostnames:
-    - "example.com"
-  rules:
-    - backendRefs:
-        - name: my-service
-          port: 8080
-EOF
-```
-
-Check the HTTPRoute status:
-
-```bash
-kubectl get httproute my-route -n default
-```
-
 ## Troubleshooting
 
 ### View operator logs
@@ -165,72 +164,15 @@ kubectl get httproute my-route -n default
 kubectl logs -n varnish-gateway-system -l app.kubernetes.io/component=operator -f
 ```
 
-### View Gateway pod logs
+### GatewayClass not accepted
 
 ```bash
-# Find the Gateway pod
-kubectl get pods -n default -l gateway.networking.k8s.io/gateway-name=my-gateway
-
-# View logs
-kubectl logs -n default <gateway-pod-name> -f
+kubectl describe gatewayclass varnish
 ```
 
-### Check Gateway status conditions
-
-```bash
-kubectl describe gateway my-gateway -n default
-```
-
-### Check HTTPRoute status conditions
-
-```bash
-kubectl describe httproute my-route -n default
-```
-
-## Upgrading
-
-### Helm
-
-```bash
-# Upgrade Varnish-specific CRDs first (Helm doesn't auto-upgrade CRDs)
-kubectl apply -f charts/varnish-gateway/crds/
-
-# Upgrade the chart
-helm upgrade varnish-gateway ./charts/varnish-gateway \
-  --namespace varnish-gateway-system
-```
-
-### kubectl
-
-```bash
-# Re-apply manifests
-kubectl apply -f deploy/
-```
-
-## Uninstallation
-
-### Helm
-
-```bash
-# Uninstall the release
-helm uninstall varnish-gateway --namespace varnish-gateway-system
-
-# Optionally delete CRDs (WARNING: This will delete all Gateway/HTTPRoute resources)
-kubectl delete -f charts/varnish-gateway/crds/
-```
-
-### kubectl
-
-```bash
-# Delete manifests
-kubectl delete -f deploy/
-
-# Optionally delete Gateway API CRDs
-kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
-```
+For Gateway- and HTTPRoute-level issues, see [First Gateway → Troubleshooting](first-gateway.md#troubleshooting) and [Operations → Troubleshooting](../operations/troubleshooting.md).
 
 ## Next Steps
 
-- See [examples/](charts/varnish-gateway/examples/) for more Gateway and HTTPRoute examples
-- Read [docs/configuration-reference.md](docs/configuration-reference.md) for advanced configuration
-- Check out [CLAUDE.md](CLAUDE.md) for development information
+- [First Gateway](first-gateway.md) — create your first Gateway and HTTPRoute
+- [GatewayClassParameters](../reference/gatewayclassparameters.md) — advanced configuration
