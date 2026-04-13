@@ -39,7 +39,3 @@ Kubernetes Gateway API implementation using Varnish.
 - [VarnishCachePolicy](reference/varnishcachepolicy.md)
 - [VarnishCacheInvalidation](reference/varnishcacheinvalidation.md)
 - [varnishd Arguments](reference/varnishd-args.md) — TODO (currently covered in GatewayClassParameters)
-
-## Examples
-
-See [examples/](examples/) for sample manifests.
