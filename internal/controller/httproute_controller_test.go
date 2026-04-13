@@ -39,7 +39,7 @@ func newHTTPRouteTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) 
 		Client: fakeClient,
 		Scheme: scheme,
 		Config: Config{
-			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 		},
 		Logger: slog.Default(),
 	}

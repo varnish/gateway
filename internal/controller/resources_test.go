@@ -15,7 +15,7 @@ import (
 
 func testReconcilerSimple() *GatewayReconciler {
 	return &GatewayReconciler{
-		Config: Config{GatewayImage: "ghcr.io/varnish/varnish-gateway:latest"},
+		Config: Config{GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest"},
 		Logger: slog.Default(),
 	}
 }

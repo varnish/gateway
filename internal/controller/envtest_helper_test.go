@@ -101,7 +101,7 @@ func NewEnvtestGatewayReconciler(env *EnvtestEnvironment) *GatewayReconciler {
 		Client: env.Client,
 		Scheme: env.Scheme,
 		Config: Config{
-			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 		},
 		Logger: slog.Default(),
 	}

@@ -250,7 +250,7 @@ func TestHTTPSListener_MissingSecret_ProgrammedFalse(t *testing.T) {
 		Client: testEnv.Client,
 		Scheme: testEnv.Scheme,
 		Config: Config{
-			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 		},
 		Logger: slog.Default(),
 	}

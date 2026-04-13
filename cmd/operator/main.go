@@ -64,7 +64,7 @@ func main() {
 
 	// Load config from environment
 	cfg := controller.Config{
-		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/varnish-gateway:latest"),
+		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/gateway-chaperone:latest"),
 		ImagePullSecrets: getEnvOrDefault("IMAGE_PULL_SECRETS", ""),
 	}
 

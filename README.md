@@ -94,7 +94,7 @@ spec:
   grace: 5m
 ```
 
-See [VarnishCachePolicy Reference](docs/varnish-cache-policy.md) for full documentation.
+See [VarnishCachePolicy Reference](docs/reference/varnishcachepolicy.md) for full documentation.
 
 ## Real-Time Dashboard
 
@@ -183,7 +183,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 kubectl apply -f deploy/
 ```
 
-See [INSTALL.md](INSTALL.md) for detailed installation instructions and configuration options.
+See [docs/getting-started/installation.md](docs/getting-started/installation.md) for detailed installation instructions and configuration options.
 
 ## Loading Custom VMODs
 
@@ -201,7 +201,7 @@ spec:
 The custom image is typically a one-liner Dockerfile that adds your VMOD to the base image:
 
 ```dockerfile
-FROM ghcr.io/varnish/varnish-gateway:latest
+FROM ghcr.io/varnish/gateway-chaperone:vX.Y.Z
 COPY libvmod_custom.so /usr/lib/varnish/vmods/
 ```
 
