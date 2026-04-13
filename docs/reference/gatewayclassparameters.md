@@ -10,12 +10,12 @@ kind: GatewayClassParameters
 metadata:
   name: my-params
 spec:
-  image: my-registry/varnish-gateway-custom:v1  # optional, overrides GATEWAY_IMAGE
-  userVCLConfigMapRef:    # optional
+  image: my-registry/varnish-gateway-custom:v1 # optional, overrides GATEWAY_IMAGE
+  userVCLConfigMapRef: # optional
     name: my-vcl
     namespace: default
-    key: user.vcl         # optional, defaults to "user.vcl"
-  varnishdExtraArgs:      # optional
+    key: user.vcl # optional, defaults to "user.vcl"
+  varnishdExtraArgs: # optional
     - "-p"
     - "thread_pools=2"
 ```
@@ -32,17 +32,18 @@ Changing this field triggers a rolling restart of all affected gateway pods.
 
 Reference to a ConfigMap containing custom VCL. The VCL is appended to the generated VCL using Varnish's subroutine concatenation.
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | yes | ConfigMap name |
-| `namespace` | yes | ConfigMap namespace |
-| `key` | no | Key containing VCL (default: `user.vcl`) |
+| Field       | Required | Description                              |
+| ----------- | -------- | ---------------------------------------- |
+| `name`      | yes      | ConfigMap name                           |
+| `namespace` | yes      | ConfigMap namespace                      |
+| `key`       | no       | Key containing VCL (default: `user.vcl`) |
 
 ### spec.varnishdExtraArgs
 
 Additional command-line arguments passed to varnishd. Each array element is a separate argument.
 
 **Protected flags** (cannot be overridden):
+
 - `-M` - Admin socket (controlled by operator)
 - `-S` - Secret file (controlled by operator)
 - `-F` - Foreground mode (required for containers)
@@ -51,24 +52,17 @@ Additional command-line arguments passed to varnishd. Each array element is a se
 
 **Common extra args:**
 
-| Args | Description |
-|------|-------------|
+| Args                        | Description                                                         |
+| --------------------------- | ------------------------------------------------------------------- |
 | `-p thread_pool_stack=160k` | Worker thread stack size (recommended for ghost VMOD, default: 80k) |
-| `-p thread_pools=N` | Number of thread pools (default: 2) |
-| `-p thread_pool_min=N` | Min threads per pool |
-| `-p thread_pool_max=N` | Max threads per pool |
-| `-p workspace_client=N` | Client workspace size (e.g., `256k`) |
-| `-s malloc,SIZE` | Additional malloc storage (e.g., `512m`, `2g`) |
-| `-s file,PATH,SIZE` | File-based storage |
+| `-p thread_pools=N`         | Number of thread pools (default: 2)                                 |
+| `-p thread_pool_min=N`      | Min threads per pool                                                |
+| `-p thread_pool_max=N`      | Max threads per pool                                                |
+| `-p workspace_client=N`     | Client workspace size (e.g., `256k`)                                |
+| `-s malloc,SIZE`            | Additional malloc storage (e.g., `512m`, `2g`)                      |
+| `-s file,PATH,SIZE`         | File-based storage                                                  |
 
 **Note:** The ghost VMOD uses Rust regex which benefits from increased stack size (160k vs default 80k), especially in debug builds. This is safe and adds minimal memory overhead (~16MB for typical thread pool configurations).
-
-**Varnish Enterprise:**
-
-| Args | Description |
-|------|-------------|
-| `-s mse,PATH` | Massive Storage Engine config file |
-| `-p feature=+http2` | Enable HTTP/2 |
 
 ## Environment Variables
 
@@ -76,29 +70,29 @@ Chaperone reads these environment variables. The operator sets most of them auto
 
 ### Varnishd Process
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VARNISH_LISTEN` | `:80,http` | Listen address(es) for varnishd (`-a` flag). Semicolon-separated for multiple. |
-| `VARNISH_STORAGE` | `malloc,256m` | Storage backend(s) (`-s` flag). Semicolon-separated for multiple. |
-| `VARNISH_ADMIN_PORT` | `6082` | Admin socket port (`-M` flag) |
-| `VARNISH_DIR` | *(empty)* | Varnish working directory (`-n` flag). Empty uses varnish default. |
-| `VARNISHD_EXTRA_ARGS` | *(none)* | Additional varnishd args. Semicolon-separated. Set via GatewayClassParameters. |
+| Variable              | Default       | Description                                                                    |
+| --------------------- | ------------- | ------------------------------------------------------------------------------ |
+| `VARNISH_LISTEN`      | `:80,http`    | Listen address(es) for varnishd (`-a` flag). Semicolon-separated for multiple. |
+| `VARNISH_STORAGE`     | `malloc,256m` | Storage backend(s) (`-s` flag). Semicolon-separated for multiple.              |
+| `VARNISH_ADMIN_PORT`  | `6082`        | Admin socket port (`-M` flag)                                                  |
+| `VARNISH_DIR`         | _(empty)_     | Varnish working directory (`-n` flag). Empty uses varnish default.             |
+| `VARNISHD_EXTRA_ARGS` | _(none)_      | Additional varnishd args. Semicolon-separated. Set via GatewayClassParameters. |
 
 ### Paths
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WORK_DIR` | `/var/run/varnish` | Chaperone working directory (secrets, runtime files) |
-| `VCL_PATH` | `/var/run/varnish/main.vcl` | Path to VCL file (watched for changes) |
-| `ROUTING_CONFIG_PATH` | `/etc/varnish/routing.json` | Routing config from operator |
-| `GHOST_CONFIG_PATH` | `/var/run/varnish/ghost.json` | Generated ghost config output |
+| Variable              | Default                       | Description                                          |
+| --------------------- | ----------------------------- | ---------------------------------------------------- |
+| `WORK_DIR`            | `/var/run/varnish`            | Chaperone working directory (secrets, runtime files) |
+| `VCL_PATH`            | `/var/run/varnish/main.vcl`   | Path to VCL file (watched for changes)               |
+| `ROUTING_CONFIG_PATH` | `/etc/varnish/routing.json`   | Routing config from operator                         |
+| `GHOST_CONFIG_PATH`   | `/var/run/varnish/ghost.json` | Generated ghost config output                        |
 
 ### Runtime
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `NAMESPACE` | `default` | Kubernetes namespace for EndpointSlice watching |
-| `HEALTH_ADDR` | `:8080` | Health/readiness endpoint address |
+| Variable            | Default          | Description                                                                  |
+| ------------------- | ---------------- | ---------------------------------------------------------------------------- |
+| `NAMESPACE`         | `default`        | Kubernetes namespace for EndpointSlice watching                              |
+| `HEALTH_ADDR`       | `:8080`          | Health/readiness endpoint address                                            |
 | `VARNISH_HTTP_ADDR` | `localhost:1969` | Varnish HTTP address for ghost reload requests (dedicated loopback listener) |
 
 ### Semicolon-separated values
