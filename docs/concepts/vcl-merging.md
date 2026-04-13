@@ -14,7 +14,7 @@ A compiled gateway VCL is three pieces, in order:
 1. **Preamble** — imports and the subroutines ghost needs (routing,
    cache policy application, ban lurker headers). Runs first.
 2. **User VCL** — whatever you supply through
-   `GatewayClassParameters.userVCLRef`. Runs in the middle.
+   `GatewayClassParameters.userVCLConfigMapRef`. Runs in the middle.
 3. **Postamble** — a short `vcl_recv` that executes the deferred
    `return(pass)` decision. Runs last.
 
