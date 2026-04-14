@@ -77,8 +77,9 @@ Certificate rotation does not require a pod restart. The flow is:
 2. On change, it rebuilds the gateway's TLS Secret (`{gateway-name}-tls`), which is
    mounted into the pod at `/etc/varnish/tls/` as PEM files.
 3. The chaperone's TLS reloader watches that directory with fsnotify, debounces for
-   200ms, then reloads all certs atomically via `varnishadm`
-   (`tls.cert.discard` + `tls.cert.load` + `tls.cert.commit`).
+   200ms, then reloads all certs atomically via `varnishadm`,
+   running `tls.cert.discard`, `tls.cert.load`, and `tls.cert.commit`
+   in sequence.
 
 In-flight connections are not interrupted; new handshakes use the new cert.
 

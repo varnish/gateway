@@ -172,7 +172,7 @@ spec:
 
 ## Dynamic Configuration Updates
 
-You can change logging configuration without redeploying Gateways. Simply edit the GatewayClassParameters:
+You can change logging configuration without redeploying Gateways. Edit the GatewayClassParameters:
 
 ```bash
 # Edit logging configuration

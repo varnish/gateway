@@ -116,7 +116,7 @@ Invalidates any cached object whose URL matches a regex. The ban is
 evaluated against cached objects lazily by the **ban lurker**, a
 background thread that walks the cache applying outstanding bans. This
 keeps the request path fast but means "banned" objects may remain in
-memory for a arbitrary time window after the ban is issued.
+memory for an arbitrary time window after the ban is issued.
 
 Ghost's VCL preamble cooperates with the lurker by writing two headers
 onto each cached object's metadata in `vcl_backend_response`:
@@ -142,8 +142,8 @@ deployment that invalidates many URLs at once produces one CR rather than
 hundreds.
 
 See [reference/varnishcacheinvalidation.md](../reference/varnishcacheinvalidation.md)
-(TODO) and [guides/cache-invalidation.md](../guides/cache-invalidation.md)
-(TODO) for the full reference and usage.
+and [guides/cache-invalidation.md](../guides/cache-invalidation.md)
+for the full reference and usage.
 
 ## Caveats
 
@@ -173,4 +173,4 @@ through normal VCL flow and user VCL can intercept.
 
 - [VarnishCachePolicy reference](../reference/varnishcachepolicy.md)
 - [VCL merging](vcl-merging.md)
-- [Cache invalidation guide](../guides/cache-invalidation.md) (TODO)
+- [Cache invalidation guide](../guides/cache-invalidation.md)

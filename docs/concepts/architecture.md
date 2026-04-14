@@ -14,13 +14,13 @@ ghost VMOD, and chaperone (as PID 1).
 
 ## Motivation
 
-### Why chaperone, not a plain varnishd container.
+### Why chaperone, not a plain varnishd container
 
-`varnishd`on its own cannot watch Kubernetes resources. Something in the pod has to resolve Service names to pod IPs (via EndpointSlices), watch the ConfigMap for VCL and routing changes, and drive the reload protocols (varnishadm for VCL, HTTP for ghost). Chaperone is that something. Running it as PID 1 also gives it a clean place to own varnishd's lifecycle (signal handling, graceful shutdown, restart on crash).
+`varnishd` on its own cannot watch Kubernetes resources. Something in the pod has to resolve Service names to pod IPs using EndpointSlices, watch the ConfigMap for VCL and routing changes, and drive the reload protocols — varnishadm for VCL, HTTP for ghost. Chaperone is that something. Running it as PID 1 gives it a clean place to own varnishd's lifecycle: signal handling, graceful shutdown, restart on crash.
 
 ### Why ghost is a VMOD, why not generate VCL
 
-When generating VCL, there is a risk of generating something invalid, which would be fatal. Furthermore, VCL compilation is slow and involved multiple steps that can fail. So, in order to avoid all this, we have a custom VMOD that implements the rules.
+Generating VCL risks producing something invalid, which would be fatal at load time. VCL compilation is also slow and involves multiple steps that can fail. To avoid this, ghost implements the routing rules as a VMOD that reads its configuration at runtime.
 
 ## Data flow
 
@@ -66,7 +66,7 @@ Gateway / HTTPRoute                      EndpointSlices
 
 ## Controller separation
 
-The operator runs two reconsilers with non-overlapping responsibilities:
+The operator runs two reconcilers with non-overlapping responsibilities:
 
 HTTPRoute reconciler:
 
@@ -119,7 +119,7 @@ Generated VCL and user VCL are combined by concatenation, relying on
 Varnish's ability to define a subroutine (e.g., `vcl_recv`) multiple times
 and run each body in order. This avoids parsing user VCL in the operator and
 keeps the generator's surface small. Users who need pre-routing logic can
-simply define their own `vcl_recv` — it runs after the generator's.
+define their own `vcl_recv` — it runs after the generator's.
 
 See [vcl-merging.md](vcl-merging.md) for which subroutines are safe to
 override and the caveats around `vcl_synth` / `vcl_backend_error`.

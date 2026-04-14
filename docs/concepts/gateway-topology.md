@@ -70,8 +70,8 @@ team-b/
 
 The main axis is **how much you rely on the cache**:
 
-- **Cache-heavy** (high hit ratios, large working set, content you want Varnish to actually retain) → lean toward **shared Gateway**. Cache efficiency scales with pool size; many small caches waste memory on duplicated hot objects and evict usefully cached ones sooner.
-- **Pure proxy / light caching** (mostly pass-through, TLS termination, routing) → **Gateway per application** is fine and often simpler. The cache-sharing argument doesn't apply when there's little to cache.
+- **Cache-heavy workloads** — high hit ratios, large working set, content you want Varnish to retain — lean toward **shared Gateway**. Cache efficiency scales with pool size; many small caches waste memory on duplicated hot objects and evict usefully cached ones sooner.
+- **Pure proxy / light caching** — mostly pass-through, TLS termination, routing — **Gateway per application** is fine and often simpler. The cache-sharing argument does not apply when there is little to cache.
 
 Secondary factors: platform team vs. autonomous teams, blast-radius tolerance, and how much operational ceremony you want around onboarding.
 

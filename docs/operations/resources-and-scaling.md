@@ -21,7 +21,7 @@ The absence of limits is deliberate. Varnish's working set is dominated by its c
 
 CPU limits are likewise omitted because CPU throttling under Linux CFS produces latency spikes that are hard to diagnose and rarely what operators actually want — a noisy-neighbour concern is better solved with requests and node sizing.
 
-If you need a ceiling (multi-tenant clusters, strict bin-packing, chargeback) set both `requests` and `limits` via `GatewayClassParameters.spec.resources`, and size the memory limit **above** your configured Varnish storage size plus headroom for transient allocations. A rule of thumb: memory limit ≥ storage size × 1.3, and never below storage size + 256Mi.
+If you need a ceiling — multi-tenant clusters, strict bin-packing, chargeback — set both `requests` and `limits` via `GatewayClassParameters.spec.resources`, and size the memory limit **above** your configured Varnish storage size plus headroom for transient allocations. A rule of thumb: memory limit ≥ storage size × 1.3, and never below storage size + 256Mi.
 
 ## Overriding defaults
 
@@ -52,7 +52,7 @@ A change to `spec.resources` updates the Deployment pod template and triggers a 
 
 - **CPU request.** The default `100m` is a placeholder for small dev workloads. For production, size the request to your expected steady-state CPU usage — this is also what HPA's `averageUtilization` metric is computed against (see [horizontal-pod-autoscaling.md](horizontal-pod-autoscaling.md#choosing-a-metric)). TLS termination and HTTP/2 meaningfully increase CPU per request; measure before settling.
 - **Memory request.** Set to your configured storage size plus a small buffer (e.g., `malloc,1g` → `memory: 1.2Gi` request). The scheduler uses requests, not limits, to place pods on nodes.
-- **Thread pool memory.** Each worker thread consumes its stack (default 80k, 160k with the recommended `thread_pool_stack=160k`). A Varnish with `thread_pool_max=5000` across 2 pools can allocate ~1.5Gi of thread stacks under peak load — include this in your memory sizing.
+- **Thread pool memory.** Each worker thread consumes its stack. The default is 80k, or 160k with the recommended `thread_pool_stack=160k` setting. A Varnish with `thread_pool_max=5000` across 2 pools can allocate ~1.5 GiB of thread stacks under peak load — include this in your memory sizing.
 
 ## Scaling
 

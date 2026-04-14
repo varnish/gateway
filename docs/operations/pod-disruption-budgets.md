@@ -43,7 +43,7 @@ If your PDB uses a percentage, it is computed against the current replica count 
 
 ## Rolling restarts
 
-Rolling restarts — triggered by infrastructure changes such as listener edits, image bumps, or `varnishdExtraArgs` changes (see the `varnish.io/infra-hash` annotation in the [architecture overview](../../CLAUDE.md)) — respect the PDB. With `minAvailable: 1` and two replicas, a rolling restart proceeds one pod at a time. Keep this in mind when sizing: a tight PDB on a small replica count extends upgrade duration.
+Rolling restarts — triggered by infrastructure changes such as listener edits, image bumps, or `varnishdExtraArgs` changes, as described in the [architecture overview](../concepts/architecture.md) — respect the PDB. With `minAvailable: 1` and two replicas, a rolling restart proceeds one pod at a time. Keep this in mind when sizing: a tight PDB on a small replica count extends upgrade duration.
 
 ## Disabling a PDB
 

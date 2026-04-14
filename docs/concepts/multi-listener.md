@@ -16,7 +16,7 @@ Each Gateway listener maps to a Varnish `-a` socket named
 | HTTPS             | 443           | `https-443`    |
 | HTTP              | 3000          | `http-3000`    |
 
-`TLS` listener share the `https-` prefix
+`TLS` listeners share the `https-` prefix
 with HTTPS. The naming rule is implemented by `listenerSocketName` in
 `internal/controller/resources.go`.
 

@@ -27,7 +27,7 @@ helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
 
 This installs:
 
-- Varnish-specific CRDs (GatewayClassParameters, VarnishCacheInvalidation, VarnishCachePolicy)
+- Varnish-specific CRDs: GatewayClassParameters, VarnishCacheInvalidation, and VarnishCachePolicy
 - The operator deployment and RBAC
 - A default GatewayClass named `varnish`
 
