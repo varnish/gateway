@@ -11,6 +11,7 @@ CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 .PHONY: test-conformance test-conformance-report test-conformance-single
 .PHONY: kind-create kind-delete kind-load kind-deploy test-conformance-kind
 .PHONY: manifests generate verify-manifests
+.PHONY: docs-venv docs-serve docs-build docs-clean
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -63,6 +64,11 @@ help:
 	@echo "  make manifests        Generate CRD manifests from Go types (controller-gen)"
 	@echo "  make generate         Generate deepcopy functions (controller-gen)"
 	@echo "  make verify-manifests Verify generated files are up-to-date"
+	@echo ""
+	@echo "Docs site (MkDocs Material):"
+	@echo "  make docs-serve       Live-reload dev server at http://127.0.0.1:8000"
+	@echo "  make docs-build       Build static site into _site/ (strict mode)"
+	@echo "  make docs-clean       Remove _site/ and the docs virtualenv"
 	@echo ""
 	@echo "Other:"
 	@echo "  make vendor           Update Go vendor directory"
@@ -297,6 +303,40 @@ verify-manifests: manifests generate
 	fi
 
 # ============================================================================
+# Docs site (MkDocs Material)
+# ============================================================================
+
+DOCS_VENV := .venv-docs
+DOCS_PY   := $(DOCS_VENV)/bin/python
+DOCS_PIP  := $(DOCS_VENV)/bin/pip
+MKDOCS    := $(DOCS_VENV)/bin/mkdocs
+
+# Create the virtualenv and install pinned deps. Re-runs when
+# requirements-docs.txt changes.
+$(DOCS_VENV)/.stamp: requirements-docs.txt
+	@python3 -m venv $(DOCS_VENV)
+	@$(DOCS_PIP) install --quiet --upgrade pip
+	@$(DOCS_PIP) install --quiet -r requirements-docs.txt
+	@touch $@
+
+docs-venv: $(DOCS_VENV)/.stamp
+
+# Sync the version badge in the hero with .version before building/serving.
+# Uses a temp mkdocs config so the source file stays stable in git.
+docs-serve: docs-venv
+	@VG_VERSION=$(VERSION) $(MKDOCS) serve --dev-addr 127.0.0.1:8000 \
+		--config-file mkdocs.yml
+
+docs-build: docs-venv
+	@echo "Building docs site for $(VERSION)..."
+	@perl -pi -e 's|^(\s*version:\s*)v[0-9][^\s]*|$${1}$(VERSION)|' mkdocs.yml
+	@$(MKDOCS) build --strict --config-file mkdocs.yml
+	@echo "Built site in _site/"
+
+docs-clean:
+	rm -rf _site $(DOCS_VENV)
+
+# ============================================================================
 # Maintenance
 # ============================================================================
 
@@ -304,6 +344,6 @@ vendor:
 	go mod vendor
 
 clean:
-	rm -rf dist/
+	rm -rf dist/ _site/
 	rm -f operator chaperone
 	cd ghost && cargo clean

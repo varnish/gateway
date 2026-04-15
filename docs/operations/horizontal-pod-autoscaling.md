@@ -91,7 +91,9 @@ annotation. The restart replaces pods one-by-one against the current HPA-chosen
 replica count — the HPA is not consulted mid-restart, and replicas are not reset to
 a default.
 
-**Cache warmth on scale-up.** Newly added pods start with an empty cache and will
+### Cache warmth on scale-up
+
+Newly added pods start with an empty cache and will
 generate a burst of backend traffic as they fill. Size your `scaleUp`
 `stabilizationWindowSeconds` and your backend capacity accordingly. The Gateway
 Service load-balances uniformly across ready pods, so a cold pod is just as likely

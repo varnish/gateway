@@ -49,7 +49,7 @@ helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   -f my-values.yaml
 ```
 
-See [charts/varnish-gateway/README.md](../../charts/varnish-gateway/README.md) for all configuration options.
+See the [chart README](https://github.com/varnish/gateway/blob/main/charts/varnish-gateway/README.md) for all configuration options.
 
 ### Upgrade
 

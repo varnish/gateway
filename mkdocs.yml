@@ -1,0 +1,127 @@
+site_name: Varnish Gateway
+site_description: Kubernetes Gateway API implementation powered by Varnish Cache.
+site_url: https://gateway.varnish-software.com/
+repo_url: https://github.com/varnish/gateway
+repo_name: varnish/gateway
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+site_dir: _site
+
+# Patterns are relative to docs_dir. Keep internal notes out of the published site.
+exclude_docs: |
+  internal/
+
+theme:
+  name: material
+  custom_dir: overrides
+  language: en
+  font:
+    text: Source Sans 3
+    code: IBM Plex Mono
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.tabs.link
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+extra_css:
+  - assets/brand.css
+
+extra:
+  # Version displayed in the home-page hero badge. The Makefile's `docs-build`
+  # target overrides this from .version so it can't drift.
+  version: v0.19.4
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/varnish/gateway
+    - icon: fontawesome/solid/globe
+      link: https://www.varnish-software.com/
+
+plugins:
+  - search
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - First Gateway: getting-started/first-gateway.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - Multi-Listener Model: concepts/multi-listener.md
+      - VCL Merging: concepts/vcl-merging.md
+      - Reload Paths: concepts/reload-paths.md
+      - Caching Model: concepts/caching-model.md
+      - Gateway Topology: concepts/gateway-topology.md
+  - Guides:
+      - Canary Deployments: guides/canary-deployments.md
+      - Logging: guides/logging.md
+      - Custom VCL: guides/custom-vcl.md
+      - Cache Invalidation: guides/cache-invalidation.md
+      - TLS: guides/tls.md
+  - Operations:
+      - Resources and Scaling: operations/resources-and-scaling.md
+      - Pod Disruption Budgets: operations/pod-disruption-budgets.md
+      - Horizontal Pod Autoscaling: operations/horizontal-pod-autoscaling.md
+      - Upgrades: operations/upgrades.md
+      - Custom VMODs: operations/custom-vmods.md
+      - Observability: operations/observability.md
+      - Troubleshooting: operations/troubleshooting.md
+  - Reference:
+      - GatewayClassParameters: reference/gatewayclassparameters.md
+      - VarnishCachePolicy: reference/varnishcachepolicy.md
+      - VarnishCacheInvalidation: reference/varnishcacheinvalidation.md
+      - varnishd Arguments: reference/varnishd-args.md

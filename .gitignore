@@ -16,3 +16,7 @@ bin/setup-envtest
 
 # Internal working notes (not published)
 docs/internal/
+
+# MkDocs build output + virtualenv
+/_site/
+/.venv-docs/

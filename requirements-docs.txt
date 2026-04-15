@@ -1,0 +1,5 @@
+# MkDocs Material + plugins for building the Varnish Gateway docs site.
+# Pinned to reproducible versions; bump with `pip install -U` + commit.
+mkdocs==1.6.1
+mkdocs-material==9.5.44
+pymdown-extensions==10.12
