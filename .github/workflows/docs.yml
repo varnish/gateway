@@ -49,4 +49,5 @@ jobs:
           aws s3 sync _site/ s3://varnish-gateway-docs/ \
             --endpoint-url https://s3.fr-par.scw.cloud \
             --delete \
+            --acl public-read \
             --cache-control "public, max-age=300"
