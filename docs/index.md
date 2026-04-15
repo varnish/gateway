@@ -10,7 +10,7 @@ hide:
 
 ## Why Varnish Gateway?
 
-All the routing capabilities of the Gateway API, with the speed and flexibility of Varnish.
+All the routing capabilities of the Gateway API, with the speed and flexibility of [Varnish](https://varnish.org/).
 
 <div class="grid cards" markdown>
 

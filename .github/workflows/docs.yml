@@ -1,0 +1,52 @@
+name: Deploy Docs
+
+# Builds the MkDocs Material site and syncs it to the Scaleway Object Storage
+# bucket that serves as the origin for the docs CDN.
+#
+# Triggers on pushes to main that touch any docs source file.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "overrides/**"
+      - "requirements-docs.txt"
+      - ".version"
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build and deploy docs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install MkDocs dependencies
+        run: pip install -r requirements-docs.txt
+
+      - name: Build docs
+        run: make docs-build
+
+      - name: Sync to Scaleway bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.SCW_DOCS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.SCW_DOCS_SECRET_KEY }}
+          AWS_DEFAULT_REGION: fr-par
+        run: |
+          aws s3 sync _site/ s3://varnish-gateway-docs/ \
+            --endpoint-url https://s3.fr-par.scw.cloud \
+            --delete \
+            --cache-control "public, max-age=300"
