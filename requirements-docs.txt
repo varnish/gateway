@@ -2,4 +2,4 @@
 # Pinned to reproducible versions; bump with `pip install -U` + commit.
 mkdocs==1.6.1
 mkdocs-material==9.5.44
-pymdown-extensions==10.12
+pymdown-extensions==10.21.2

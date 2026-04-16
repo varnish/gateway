@@ -116,34 +116,22 @@ so a listener change must be a new process.
 
 ## Who watches what
 
-```
-Gateway / GatewayClassParameters / user-VCL ConfigMap
-        │
-        ▼ (Gateway controller)
-  ┌───────────────────────┬──────────────────────────────────┐
-  │ ConfigMap: main.vcl   │ Deployment: varnish.io/infra-hash│
-  └───────────┬───────────┴────────────────┬─────────────────┘
-              │                            │
-              │ (chaperone ConfigMap       │ (kube-controller-manager
-              │  informer, main.vcl diff)  │  rolling update)
-              ▼                            ▼
-         varnishadm                  new pod lifecycle
-         vcl.load / vcl.use
+```mermaid
+flowchart TD
+    subgraph VCL["VCL reload path"]
+        GW["Gateway / GatewayClassParameters\nuser-VCL ConfigMap"]
+        GW -->|"Gateway controller"| CM_VCL["ConfigMap: main.vcl"]
+        GW -->|"Gateway controller"| DEP["Deployment:\nvarnish.io/infra-hash"]
+        CM_VCL -->|"chaperone ConfigMap\ninformer, main.vcl diff"| ADM["varnishadm\nvcl.load / vcl.use"]
+        DEP -->|"kube-controller-manager\nrolling update"| POD["new pod lifecycle"]
+    end
 
-HTTPRoute                                   EndpointSlices
-        │                                         │
-        ▼ (HTTPRoute controller)                  │
-  ┌────────────────────────┐                      │
-  │ ConfigMap: routing.json│                      │
-  └───────────┬────────────┘                      │
-              │                                   │
-              └──────────┬────────────────────────┘
-                         ▼ (chaperone)
-                  ghost.json regenerated
-                         │
-                         ▼
-                GET /.varnish-ghost/reload
-                (loopback ghost-reload socket)
+    subgraph Ghost["Ghost reload path"]
+        HR["HTTPRoute"] -->|"HTTPRoute controller"| CM_RT["ConfigMap: routing.json"]
+        ESLICE["EndpointSlices"] --> MERGE
+        CM_RT --> MERGE["chaperone\nghost.json regenerated"]
+        MERGE --> RELOAD["GET /.varnish-ghost/reload\n(loopback ghost-reload socket)"]
+    end
 ```
 
 The two reconcilers write into disjoint keys of the same ConfigMap, and

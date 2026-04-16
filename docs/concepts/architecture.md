@@ -24,30 +24,18 @@ Generating VCL risks producing something invalid, which would be fatal at load t
 
 ## Data flow
 
-```
-Gateway / HTTPRoute                      EndpointSlices
-        │                                      │
-        ▼                                      │
-   ┌─────────┐                                 │
-   │ Operator│─── routing.json ──┐             │
-   │         │─── main.vcl ──────┤             │
-   └─────────┘                   │             │
-                                 ▼             ▼
-                          ┌───────────────────────┐
-                          │      Chaperone        │
-                          │  (in the gateway pod) │
-                          │                       │
-                          │  merges routing.json  │
-                          │  + EndpointSlices     │
-                          │  → ghost.json         │
-                          └───────────────────────┘
-                                 │             │
-                       varnishadm│             │HTTP /.varnish-ghost/reload
-                                 ▼             ▼
-                          ┌──────────────────────┐
-                          │       varnishd       │
-                          │     (ghost VMOD)     │
-                          └──────────────────────┘
+```mermaid
+flowchart TD
+    GW["Gateway / HTTPRoute"] --> OP["Operator"]
+    ES["EndpointSlices"] --> CH
+
+    OP -- "routing.json" --> CH
+    OP -- "main.vcl" --> CH
+
+    CH["Chaperone\n(in the gateway pod)\nmerges routing.json + EndpointSlices → ghost.json"]
+
+    CH -- "varnishadm" --> VD["varnishd\n(ghost VMOD)"]
+    CH -- "HTTP /.varnish-ghost/reload" --> VD
 ```
 
 1. The operator watches Gateway, HTTPRoute, and `GatewayClassParameters`

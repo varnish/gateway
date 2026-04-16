@@ -143,3 +143,19 @@
   font-size: 0.92rem;
   color: var(--md-default-fg-color--light);
 }
+
+/* Shell / command code blocks — subtle blue tint to distinguish from config. */
+.highlight.language-bash > pre,
+.highlight.language-shell > pre,
+.highlight.language-console > pre,
+.highlight.language-sh > pre {
+  background: rgba(45, 111, 181, 0.06);
+  border-left: 3px solid var(--vg-blue);
+}
+
+[data-md-color-scheme="slate"] .highlight.language-bash > pre,
+[data-md-color-scheme="slate"] .highlight.language-shell > pre,
+[data-md-color-scheme="slate"] .highlight.language-console > pre,
+[data-md-color-scheme="slate"] .highlight.language-sh > pre {
+  background: rgba(45, 111, 181, 0.10);
+}
