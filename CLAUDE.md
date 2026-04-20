@@ -480,8 +480,7 @@ deploy/
 ├── 00-prereqs.yaml       # Namespace + GatewayClassParameters CRD
 ├── 01-operator.yaml      # ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment
 ├── 02-chaperone-rbac.yaml # ClusterRole for chaperone to watch EndpointSlices
-├── 03-gatewayclass.yaml  # GatewayClass "varnish"
-└── sample-gateway.yaml   # Sample Gateway (not applied by make deploy)
+└── 03-gatewayclass.yaml  # GatewayClass "varnish"
 ```
 
 Deploy to cluster:
