@@ -282,7 +282,7 @@ CONTROLLER_GEN = go tool controller-gen
 manifests:
 	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=charts/varnish-gateway/crds
 	@echo "Assembling deploy/00-prereqs.yaml..."
-	@cat deploy/namespace.yaml > deploy/00-prereqs.yaml
+	@printf '# Namespace for varnish-gateway operator\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: varnish-gateway-system\n  labels:\n    app.kubernetes.io/name: varnish-gateway\n    app.kubernetes.io/component: operator\n' > deploy/00-prereqs.yaml
 	@echo "---" >> deploy/00-prereqs.yaml
 	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_gatewayclassparameters.yaml >> deploy/00-prereqs.yaml
 	@echo "---" >> deploy/00-prereqs.yaml

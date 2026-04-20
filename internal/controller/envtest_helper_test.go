@@ -45,7 +45,7 @@ func SetupEnvtest() (*EnvtestEnvironment, error) {
 	// Setup envtest environment
 	// CRDDirectoryPaths points to directories containing CRDs:
 	// - testdata: Gateway API CRDs (downloaded for testing)
-	// - deploy: Our custom CRDs (GatewayClassParameters)
+	// - charts/varnish-gateway/crds: our custom CRDs (controller-gen output)
 	//
 	// BinaryAssetsDirectory: If KUBEBUILDER_ASSETS is set, convert to absolute path
 	// (envtest requires absolute paths, but setup-envtest may return relative paths)
@@ -59,8 +59,8 @@ func SetupEnvtest() (*EnvtestEnvironment, error) {
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths: []string{
-			filepath.Join("testdata"),           // Gateway API CRDs
-			filepath.Join("..", "..", "deploy"), // Custom CRDs
+			filepath.Join("testdata"),                                       // Gateway API CRDs
+			filepath.Join("..", "..", "charts", "varnish-gateway", "crds"), // Custom CRDs
 		},
 		ErrorIfCRDPathMissing: true,
 		Scheme:                scheme,
