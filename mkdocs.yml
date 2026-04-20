@@ -55,6 +55,12 @@ theme:
 extra_css:
   - assets/brand.css
 
+extra_javascript:
+  - assets/llm-actions.js
+
+hooks:
+  - docs/overrides/hooks/copy_markdown.py
+
 extra:
   # Version displayed in the home-page hero badge. The Makefile's `docs-build`
   # target overrides this from .version so it can't drift.

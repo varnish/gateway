@@ -159,3 +159,61 @@
 [data-md-color-scheme="slate"] .highlight.language-sh > pre {
   background: rgba(45, 111, 181, 0.10);
 }
+
+/* "Show / Copy Markdown" actions above the right-rail ToC. Intended to let
+   readers grab the raw page source for pasting into LLMs. */
+.llm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.6rem 0.6rem 0.8rem;
+  margin-bottom: 0.2rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.llm-actions__btn {
+  flex: 1 1 auto;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--md-default-fg-color--light);
+  background: transparent;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.25rem;
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+
+.llm-actions__btn:hover,
+.llm-actions__btn:focus-visible {
+  color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+  background: var(--vg-blue-glow);
+  outline: none;
+}
+
+.llm-actions__btn--success {
+  color: #1f8a4c;
+  border-color: #1f8a4c;
+  background: rgba(31, 138, 76, 0.08);
+}
+
+[data-md-color-scheme="slate"] .llm-actions__btn--success {
+  color: #4cc47d;
+  border-color: #4cc47d;
+  background: rgba(76, 196, 125, 0.14);
+}
+
+.llm-actions__btn--error {
+  color: #c0392b;
+  border-color: #c0392b;
+  background: rgba(192, 57, 43, 0.08);
+}
+
+[data-md-color-scheme="slate"] .llm-actions__btn--error {
+  color: #e57368;
+  border-color: #e57368;
+  background: rgba(229, 115, 104, 0.14);
+}
