@@ -12,7 +12,6 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
-      - "overrides/**"
       - "requirements-docs.txt"
       - ".version"
   # Allow manual trigger from the Actions tab

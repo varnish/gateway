@@ -217,7 +217,7 @@ KIND := go tool kind
 kind-create:
 	$(KIND) create cluster --name $(KIND_CLUSTER_NAME) --wait 60s
 	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
-	./hack/kind-metallb.sh
+	./docs/development/kind-metallb.sh
 
 kind-delete:
 	$(KIND) delete cluster --name $(KIND_CLUSTER_NAME)

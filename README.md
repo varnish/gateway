@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/varnish-gateway-logo.svg" alt="Varnish Gateway" width="360">
+  <img src="docs/assets/varnish-gateway-logo.svg" alt="Varnish Gateway" width="360">
 </p>
 
 <p align="center">
