@@ -292,7 +292,7 @@ manifests:
 
 # Generate deepcopy functions from Go types
 generate:
-	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
+	$(CONTROLLER_GEN) object paths="./api/..."
 
 # Verify generated files are up-to-date (for CI)
 verify-manifests: manifests generate
