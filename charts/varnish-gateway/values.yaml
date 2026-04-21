@@ -143,6 +143,21 @@ serviceAccount:
   # The name of the service account to use (if not creating)
   # name: ""
 
+# Prometheus ServiceMonitor / PodMonitor configuration.
+# Requires prometheus-operator CRDs (monitoring.coreos.com) to be installed
+# in the cluster — e.g. via kube-prometheus-stack.
+serviceMonitor:
+  # Set to true to create ServiceMonitor (operator) and PodMonitor (chaperone).
+  enabled: false
+  # Scrape interval.
+  interval: 30s
+  # Scrape timeout.
+  scrapeTimeout: 10s
+  # Extra labels to add to the ServiceMonitor/PodMonitor objects. Commonly
+  # used to match the Prometheus instance's serviceMonitorSelector — for
+  # kube-prometheus-stack this is usually `release: <helm-release-name>`.
+  labels: {}
+
 # Additional labels to add to all resources
 commonLabels: {}
 

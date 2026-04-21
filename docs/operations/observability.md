@@ -63,6 +63,34 @@ address, port 8080 by default. These include reconciliation latency,
 work queue depth, and error counts — standard controller-runtime metrics
 documented upstream.
 
+### Prometheus scraping
+
+The Helm chart can create `ServiceMonitor` (operator) and `PodMonitor`
+(chaperone) resources for auto-discovery by the
+[prometheus-operator](https://github.com/prometheus-operator/prometheus-operator).
+This requires the `monitoring.coreos.com` CRDs to be installed — for
+example, via kube-prometheus-stack.
+
+```yaml
+# values.yaml
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  # Match your Prometheus instance's serviceMonitorSelector / podMonitorSelector.
+  # For kube-prometheus-stack the default selector is `release: <helm-release>`.
+  labels:
+    release: kube-prometheus-stack
+```
+
+The operator metrics Service (`{release}-varnish-gateway-operator-metrics`)
+is created unconditionally so you can port-forward it without enabling the
+monitor objects.
+
+The chaperone PodMonitor selects all Gateway pods across namespaces by the
+`app.kubernetes.io/managed-by: varnish-gateway-operator` label, so a single
+monitor covers every Gateway the operator manages.
+
 ## Dashboard
 
 Chaperone includes an embedded dashboard, enabled by default on port
