@@ -165,7 +165,7 @@
       "type": "timeseries",
       "title": "client-go requests by response code",
       "description": "rate(rest_client_requests_total) split by HTTP code. Watch for 429 (apiserver throttling us), 5xx (apiserver trouble), and 409 conflict spikes.",
-      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 34 },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 34 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [{
         "expr": "sum by (code) (rate(rest_client_requests_total{job=~\".*varnish-gateway-operator.*\"}[1m]))",
@@ -173,6 +173,20 @@
         "legendFormat": "{{code}}"
       }],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "client-go request latency p95 per verb",
+      "description": "histogram_quantile(0.95, rest_client_request_duration_seconds_bucket) by verb. Rising p95 during a soak points at apiserver slowdown or us hammering a slow endpoint.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 34 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum by (le, verb) (rate(rest_client_request_duration_seconds_bucket{job=~\".*varnish-gateway-operator.*\"}[5m])))",
+        "refId": "A",
+        "legendFormat": "{{verb}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
     }
   ]
 }

@@ -359,7 +359,7 @@ func run() error {
 	promReg.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	promReg.MustRegister(collectors.NewGoCollector())
 	promReg.MustRegister(varnishstat.NewCollector(cfg.VarnishDir, logger.With("component", "varnishstat")))
-	registerClientGoMetrics(promReg)
+	k8sutil.RegisterClientGoMetrics(promReg)
 	chapMetrics := newChaperoneMetrics(promReg)
 
 	// Start health server with drain endpoint for graceful shutdown
