@@ -176,6 +176,60 @@ docker-chaperone:
 	docker tag $(CHAPERONE_IMAGE):$(VERSION) $(CHAPERONE_IMAGE):latest
 
 # ============================================================================
+# Load / correctness testing (test/load)
+# ============================================================================
+ECHO_IMAGE      := $(REGISTRY)/gateway-echo
+COLLECTOR_IMAGE := $(REGISTRY)/gateway-ledger-collector
+LOAD_NS         ?= varnish-load
+GATEWAY_URL     ?= http://127.0.0.1:8080
+COLLECTOR_URL   ?= http://127.0.0.1:9090
+K6_RPS          ?= 50
+K6_DURATION     ?= 1m
+K6_VUS          ?= 10
+
+.PHONY: load-build load-docker load-up load-down load-run load-analyze load-download
+
+load-build:
+	CGO_ENABLED=0 go build -mod=vendor -o dist/load-echo ./test/load/echo
+	CGO_ENABLED=0 go build -mod=vendor -o dist/load-collector ./test/load/collector
+	CGO_ENABLED=0 go build -mod=vendor -o dist/load-analyze ./test/load/analyze
+
+load-docker:
+	docker build -t $(ECHO_IMAGE):$(VERSION) -f test/load/echo/Dockerfile .
+	docker tag $(ECHO_IMAGE):$(VERSION) $(ECHO_IMAGE):latest
+	docker build -t $(COLLECTOR_IMAGE):$(VERSION) -f test/load/collector/Dockerfile .
+	docker tag $(COLLECTOR_IMAGE):$(VERSION) $(COLLECTOR_IMAGE):latest
+
+load-up:
+	kubectl apply -f test/load/deploy/echo.yaml
+	kubectl apply -f test/load/deploy/collector.yaml
+	kubectl apply -f test/load/fixtures/routes.yaml
+	kubectl -n $(LOAD_NS) rollout status deploy/ledger-collector --timeout=2m
+	kubectl -n $(LOAD_NS) rollout status deploy/echo-a --timeout=2m
+	kubectl -n $(LOAD_NS) rollout status deploy/echo-b --timeout=2m
+
+load-down:
+	kubectl delete -f test/load/fixtures/routes.yaml --ignore-not-found
+	kubectl delete -f test/load/deploy/echo.yaml --ignore-not-found
+	kubectl delete -f test/load/deploy/collector.yaml --ignore-not-found
+
+# Run k6. Expects GATEWAY_URL and COLLECTOR_URL reachable from the host
+# (typically via kubectl port-forward).
+load-run:
+	k6 run \
+	  -e GATEWAY_URL=$(GATEWAY_URL) \
+	  -e COLLECTOR_URL=$(COLLECTOR_URL) \
+	  -e RPS=$(K6_RPS) -e DURATION=$(K6_DURATION) -e VUS=$(K6_VUS) \
+	  test/load/k6/run.js
+
+load-download:
+	curl -fsS $(COLLECTOR_URL)/download -o dist/ledger.ndjson
+	@echo "wrote dist/ledger.ndjson ($$(wc -l < dist/ledger.ndjson) lines)"
+
+load-analyze: load-download
+	go run ./test/load/analyze -f dist/ledger.ndjson
+
+# ============================================================================
 # CI/Testing
 # ============================================================================
 

@@ -1,0 +1,97 @@
+# Echo backends for load/correctness testing. Deploy N services, each pointed
+# at by one or more HTTPRoutes in the fixture. Misroute = request for service
+# A arrived at service B.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: varnish-load
+---
+# Template Deployment+Service pair. Duplicate this block per backend; set
+# SERVICE_NAME, metadata.name, and label selectors consistently.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: varnish-load
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: echo-a }
+  template:
+    metadata:
+      labels: { app: echo-a }
+    spec:
+      containers:
+        - name: echo
+          image: ghcr.io/varnish/gateway-echo:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LISTEN
+              value: ":8080"
+            - name: SERVICE_NAME
+              value: "echo-a"
+            - name: NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: COLLECTOR_URL
+              value: "http://ledger-collector.varnish-load.svc:8080"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: varnish-load
+spec:
+  selector: { app: echo-a }
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  namespace: varnish-load
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: echo-b }
+  template:
+    metadata:
+      labels: { app: echo-b }
+    spec:
+      containers:
+        - name: echo
+          image: ghcr.io/varnish/gateway-echo:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LISTEN
+              value: ":8080"
+            - name: SERVICE_NAME
+              value: "echo-b"
+            - name: NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: COLLECTOR_URL
+              value: "http://ledger-collector.varnish-load.svc:8080"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: varnish-load
+spec:
+  selector: { app: echo-b }
+  ports:
+    - port: 8080
+      targetPort: 8080
