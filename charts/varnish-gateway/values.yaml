@@ -158,6 +158,21 @@ serviceMonitor:
   # kube-prometheus-stack this is usually `release: <helm-release-name>`.
   labels: {}
 
+# Grafana dashboards packaged as ConfigMaps for auto-discovery via the
+# Grafana sidecar (kube-prometheus-stack, grafana-operator, etc).
+dashboards:
+  # Set to true to render each JSON under charts/varnish-gateway/dashboards/
+  # into a ConfigMap. Canonical copies live in the same directory and can
+  # also be imported by hand via Grafana's UI.
+  enabled: false
+  # Labels applied to the dashboard ConfigMaps. The default matches the
+  # kube-prometheus-stack Grafana sidecar's selector (`grafana_dashboard=1`).
+  labels:
+    grafana_dashboard: "1"
+  # Optional annotations — useful when the sidecar needs a folder hint.
+  annotations: {}
+    # grafana_folder: Varnish Gateway
+
 # Additional labels to add to all resources
 commonLabels: {}
 

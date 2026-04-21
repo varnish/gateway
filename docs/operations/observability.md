@@ -91,6 +91,38 @@ The chaperone PodMonitor selects all Gateway pods across namespaces by the
 `app.kubernetes.io/managed-by: varnish-gateway-operator` label, so a single
 monitor covers every Gateway the operator manages.
 
+### Grafana dashboards
+
+The chart ships three Grafana dashboards under
+`charts/varnish-gateway/dashboards/`:
+
+| Dashboard | UID                           | Focus                                                             |
+| --------- | ----------------------------- | ----------------------------------------------------------------- |
+| Chaperone | `varnish-gateway-chaperone`   | Ready/draining state, reload rates and errors, endpoint churn     |
+| Varnish   | `varnish-gateway-varnish`     | Client rate, hit ratio, backend errors, threads, storage, bans    |
+| Operator  | `varnish-gateway-operator`    | Reconcile rate/errors/latency per controller, workqueue depth     |
+
+Two packaging options:
+
+**Helm (auto-discovery via the Grafana sidecar).** Set
+`dashboards.enabled=true`. Each JSON file becomes a ConfigMap carrying
+the `grafana_dashboard: "1"` label, which kube-prometheus-stack's
+Grafana sidecar watches by default:
+
+```yaml
+# values.yaml
+dashboards:
+  enabled: true
+  # Optional folder hint for grafana-operator-style sidecars.
+  # annotations:
+  #   grafana_folder: Varnish Gateway
+```
+
+**Manual import.** Open Grafana → Dashboards → Import → paste the JSON
+from `charts/varnish-gateway/dashboards/*.json`.
+
+Dashboards target Grafana v12 (`schemaVersion: 41`).
+
 ## Dashboard
 
 Chaperone includes an embedded dashboard, enabled by default on port

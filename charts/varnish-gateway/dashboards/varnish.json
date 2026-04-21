@@ -1,0 +1,141 @@
+{
+  "title": "Varnish Gateway / Varnish",
+  "uid": "varnish-gateway-varnish",
+  "tags": ["varnish-gateway"],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "timezone": "",
+  "templating": {
+    "list": [
+      { "name": "datasource", "type": "datasource", "query": "prometheus", "current": { "text": "Prometheus", "value": "Prometheus" } },
+      { "name": "namespace", "type": "query", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "query": "label_values(varnish_main_uptime, namespace)", "refresh": 2, "includeAll": true, "multi": true, "current": { "text": "All", "value": "$__all" } },
+      { "name": "pod",       "type": "query", "datasource": { "type": "prometheus", "uid": "${datasource}" }, "query": "label_values(varnish_main_uptime{namespace=~\"$namespace\"}, pod)", "refresh": 2, "includeAll": true, "multi": true, "current": { "text": "All", "value": "$__all" } }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Client req rate",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "sum(rate(varnish_main_client_req{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Cache hit ratio (5m)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "sum(rate(varnish_main_cache_hit{namespace=~\"$namespace\", pod=~\"$pod\"}[5m])) / clamp_min(sum(rate(varnish_main_cache_hit{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]) + rate(varnish_main_cache_miss{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]) + rate(varnish_main_cache_hitpass{namespace=~\"$namespace\", pod=~\"$pod\"}[5m])), 1)",
+        "refId": "A"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "color": {"mode":"thresholds"}, "thresholds": {"mode":"absolute","steps":[{"color":"red","value":null},{"color":"yellow","value":0.5},{"color":"green","value":0.8}]} }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Backend req rate",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "sum(rate(varnish_main_backend_req{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Uptime",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "max(varnish_main_uptime{namespace=~\"$namespace\", pod=~\"$pod\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Request rate — hit / miss / pass",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum(rate(varnish_main_cache_hit{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",     "refId": "A", "legendFormat": "hit" },
+        { "expr": "sum(rate(varnish_main_cache_miss{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",    "refId": "B", "legendFormat": "miss" },
+        { "expr": "sum(rate(varnish_main_cache_hitpass{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "hitpass" },
+        { "expr": "sum(rate(varnish_main_s_pass{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",        "refId": "D", "legendFormat": "pass" },
+        { "expr": "sum(rate(varnish_main_s_synth{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",       "refId": "E", "legendFormat": "synth" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "stacking": { "mode": "normal" } } }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Backend errors",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum(rate(varnish_main_backend_fail{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",        "refId": "A", "legendFormat": "backend_fail" },
+        { "expr": "sum(rate(varnish_main_backend_unhealthy{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",   "refId": "B", "legendFormat": "backend_unhealthy" },
+        { "expr": "sum(rate(varnish_main_backend_retry{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",       "refId": "C", "legendFormat": "backend_retry" },
+        { "expr": "sum(rate(varnish_main_fetch_failed{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",        "refId": "D", "legendFormat": "fetch_failed" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "color": { "mode": "palette-classic" } }, "overrides": [] }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Threads — total / limited / queue",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (pod) (varnish_main_threads{namespace=~\"$namespace\", pod=~\"$pod\"})",               "refId": "A", "legendFormat": "threads — {{pod}}" },
+        { "expr": "sum by (pod) (rate(varnish_main_threads_limited{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "limited/s — {{pod}}" },
+        { "expr": "sum by (pod) (varnish_main_thread_queue_len{namespace=~\"$namespace\", pod=~\"$pod\"})",       "refId": "C", "legendFormat": "queue — {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Sessions",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum(rate(varnish_main_sess_conn{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",    "refId": "A", "legendFormat": "conn/s" },
+        { "expr": "sum(rate(varnish_main_sess_dropped{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "dropped/s" },
+        { "expr": "sum(rate(varnish_main_sess_fail{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",    "refId": "C", "legendFormat": "fail/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Storage — objects & LRU",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (pod) (varnish_main_n_object{namespace=~\"$namespace\", pod=~\"$pod\"})",          "refId": "A", "legendFormat": "n_object — {{pod}}" },
+        { "expr": "sum by (pod) (rate(varnish_main_n_lru_nuked{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))", "refId": "B", "legendFormat": "nuked/s — {{pod}}" },
+        { "expr": "sum by (pod) (rate(varnish_main_n_expired{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",   "refId": "C", "legendFormat": "expired/s — {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Ban list",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (pod) (varnish_main_bans{namespace=~\"$namespace\", pod=~\"$pod\"})",                   "refId": "A", "legendFormat": "bans — {{pod}}" },
+        { "expr": "sum by (pod) (rate(varnish_main_bans_tested{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",  "refId": "B", "legendFormat": "tested/s — {{pod}}" },
+        { "expr": "sum by (pod) (rate(varnish_main_bans_obj_killed{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))", "refId": "C", "legendFormat": "obj_killed/s — {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    }
+  ]
+}
