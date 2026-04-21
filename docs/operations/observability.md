@@ -93,14 +93,19 @@ monitor covers every Gateway the operator manages.
 
 ### Grafana dashboards
 
-The chart ships three Grafana dashboards under
+The chart ships four Grafana dashboards under
 `charts/varnish-gateway/dashboards/`:
 
-| Dashboard | UID                           | Focus                                                             |
-| --------- | ----------------------------- | ----------------------------------------------------------------- |
-| Chaperone | `varnish-gateway-chaperone`   | Ready/draining state, reload rates and errors, endpoint churn     |
-| Varnish   | `varnish-gateway-varnish`     | Client rate, hit ratio, backend errors, threads, storage, bans    |
-| Operator  | `varnish-gateway-operator`    | Reconcile rate/errors/latency per controller, workqueue depth     |
+| Dashboard       | UID                                | Focus                                                                           |
+| --------------- | ---------------------------------- | ------------------------------------------------------------------------------- |
+| Varnish         | `varnish-gateway-varnish`          | Client rate, hit ratio, backend errors, threads, storage, bans                  |
+| Chaperone       | `varnish-gateway-chaperone`        | Ready/draining state, reload rates and errors, endpoint churn                   |
+| Operator        | `varnish-gateway-operator`         | Reconcile latency, workqueue queue/work duration, client-go codes               |
+| Soak — Resources | `varnish-gateway-soak-resources`  | Heap, RSS, goroutines, FDs, GC, CPU, restarts — side-by-side leak detector      |
+
+The Varnish and Chaperone dashboards target day-to-day operations; the
+Operator and Soak dashboards target regression detection during soak
+tests and upgrades.
 
 Two packaging options:
 

@@ -139,45 +139,6 @@
         { "expr": "chaperone_draining{namespace=~\"$namespace\", pod=~\"$pod\"}", "refId": "B", "legendFormat": "draining — {{pod}}" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 }, "overrides": [] }
-    },
-    {
-      "id": 20,
-      "type": "timeseries",
-      "title": "Go heap in use",
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{
-        "expr": "go_memstats_heap_inuse_bytes{job=~\".*chaperone.*\", namespace=~\"$namespace\", pod=~\"$pod\"}",
-        "refId": "A",
-        "legendFormat": "{{pod}}"
-      }],
-      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
-    },
-    {
-      "id": 21,
-      "type": "timeseries",
-      "title": "Goroutines",
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{
-        "expr": "go_goroutines{job=~\".*chaperone.*\", namespace=~\"$namespace\", pod=~\"$pod\"}",
-        "refId": "A",
-        "legendFormat": "{{pod}}"
-      }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
-    },
-    {
-      "id": 22,
-      "type": "timeseries",
-      "title": "Open file descriptors",
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 20 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "targets": [{
-        "expr": "process_open_fds{job=~\".*chaperone.*\", namespace=~\"$namespace\", pod=~\"$pod\"}",
-        "refId": "A",
-        "legendFormat": "{{pod}}"
-      }],
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ]
 }

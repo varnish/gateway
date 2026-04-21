@@ -9,6 +9,7 @@
   "time": { "from": "now-1h", "to": "now" },
   "refresh": "30s",
   "timezone": "",
+  "description": "Operator reconciliation health: latency, workqueue timing, and client-go behaviour. Drift in p95/p99 over a soak points at regressions in reconcile work or apiserver interaction.",
   "templating": {
     "list": [
       { "name": "datasource", "type": "datasource", "query": "prometheus", "current": { "text": "Prometheus", "value": "Prometheus" } },
@@ -83,6 +84,7 @@
       "id": 20,
       "type": "timeseries",
       "title": "Reconcile latency p50 / p95 / p99",
+      "description": "controller_runtime_reconcile_time_seconds — full reconcile body including apiserver round-trips. Drift here is the primary soak signal for operator slowness.",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
@@ -95,8 +97,36 @@
     {
       "id": 21,
       "type": "timeseries",
-      "title": "Workqueue depth per controller",
+      "title": "Workqueue queue duration p95 per controller",
+      "description": "Time an item waits in the workqueue before a worker picks it up. Growing p95 = worker starvation (too few workers, or reconciles running too long).",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum by (le, name) (rate(workqueue_queue_duration_seconds_bucket{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\", name=~\"$controller\"}[5m])))",
+        "refId": "A",
+        "legendFormat": "{{name}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Workqueue work duration p95 per controller",
+      "description": "Time a worker spends processing a single item. Diverging from reconcile_time_seconds indicates workqueue-internal overhead.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum by (le, name) (rate(workqueue_work_duration_seconds_bucket{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\", name=~\"$controller\"}[5m])))",
+        "refId": "A",
+        "legendFormat": "{{name}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Workqueue depth per controller",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 20 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [{
         "expr": "workqueue_depth{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\", name=~\"$controller\"}",
@@ -106,10 +136,10 @@
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
-      "id": 22,
+      "id": 24,
       "type": "timeseries",
       "title": "Workqueue adds / retries",
-      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 20 },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 27 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [
         { "expr": "sum by (name) (rate(workqueue_adds_total{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\", name=~\"$controller\"}[1m]))",    "refId": "A", "legendFormat": "adds — {{name}}" },
@@ -118,17 +148,31 @@
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
     },
     {
-      "id": 23,
+      "id": 25,
       "type": "timeseries",
-      "title": "Unfinished work seconds",
-      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 20 },
+      "title": "Longest-running processor / unfinished work",
+      "description": "workqueue_longest_running_processor_seconds catches a single stuck reconcile; workqueue_unfinished_work_seconds is the integrated lag.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "workqueue_longest_running_processor_seconds{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\", name=~\"$controller\"}", "refId": "A", "legendFormat": "longest — {{name}}" },
+        { "expr": "workqueue_unfinished_work_seconds{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\", name=~\"$controller\"}",          "refId": "B", "legendFormat": "unfinished — {{name}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "client-go requests by response code",
+      "description": "rate(rest_client_requests_total) split by HTTP code. Watch for 429 (apiserver throttling us), 5xx (apiserver trouble), and 409 conflict spikes.",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 34 },
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "targets": [{
-        "expr": "workqueue_unfinished_work_seconds{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\", name=~\"$controller\"}",
+        "expr": "sum by (code) (rate(rest_client_requests_total{job=~\".*varnish-gateway-operator.*\"}[1m]))",
         "refId": "A",
-        "legendFormat": "{{name}}"
+        "legendFormat": "{{code}}"
       }],
-      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
     }
   ]
 }
