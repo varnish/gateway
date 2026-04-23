@@ -16,7 +16,7 @@ scaling" and "HTTPRoute churn" scenarios benefit from ≥3 nodes.
 | --- | -------- | --------------------------- | ------------------------------------------------- | ---------------------------------------------------- | ------ |
 | C01 | P0       | Chaperone pod kill          | `PodChaos` kill 1 chaperone pod                   | 0 misroutes post-recovery, convergence < 10s, < 1% drops during event | scaffolded |
 | C02 | P0       | Rapid backend scaling       | Scale echo 0→30→0→30 over 2 min                   | 0 stale backends in `ghost.json`, 500s only for empty groups | scaffolded |
-| C03 | P0       | HTTPRoute churn             | Apply/delete 50 HTTPRoutes in a 30s burst         | No ConfigMap conflicts, routing converges < 15s      | TODO   |
+| C03 | P0       | HTTPRoute churn             | Apply/delete 50 HTTPRoutes in a 30s burst         | No ConfigMap conflicts, routing converges < 15s      | scaffolded |
 | C04 | P0       | Operator pod kill           | `PodChaos` kill operator mid-reconcile            | Clean recovery, no partial state, next reconcile succeeds | TODO   |
 | C05 | P1       | API-server network partition | `NetworkChaos` chaperone ↔ apiserver for 60s     | Resync on reconnect, no restart loops                | TODO   |
 | C06 | P1       | Node drain                  | `kubectl drain` a node running gateway pods       | Traffic continues, pods rescheduled, 0 misroutes     | TODO   |
