@@ -51,11 +51,17 @@ make -C "$repo" docker VERSION="$version" >/dev/null
 make -C "$repo" load-docker VERSION="$version" >/dev/null
 
 echo "==> loading images into kind"
+# The operator/chaperone manifests are templated with $version via
+# kind-deploy, but the load-suite manifests (test/load/deploy/*.yaml)
+# hardcode :latest. load-docker tags both :$version and :latest
+# locally, so load both into kind.
 for img in \
     "ghcr.io/varnish/gateway-operator:$version" \
     "ghcr.io/varnish/gateway-chaperone:$version" \
     "ghcr.io/varnish/gateway-echo:$version" \
-    "ghcr.io/varnish/gateway-ledger-collector:$version"; do
+    "ghcr.io/varnish/gateway-echo:latest" \
+    "ghcr.io/varnish/gateway-ledger-collector:$version" \
+    "ghcr.io/varnish/gateway-ledger-collector:latest"; do
   go tool kind load docker-image "$img" --name "$cluster"
 done
 
