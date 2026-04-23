@@ -26,6 +26,21 @@ scaling" and "HTTPRoute churn" scenarios benefit from ≥3 nodes.
 "Convergence" = first correct echo response for a given route after the
 recovery marker, measured by the analyzer.
 
+## Dry-run in kind
+
+For shaking out the harness (not a real correctness gate):
+
+```bash
+make chaos-kind-setup          # cluster + deps + operator + load suite
+# follow the printed port-forward instructions, then:
+make chaos-run SCENARIO=C01
+make chaos-kind-teardown       # clean up
+```
+
+The setup script is idempotent. C06 requires ≥2 schedulable nodes and
+will `SKIP` on the default single-node kind config; edit
+`kind-setup.sh` to pass a multi-node kind config if you need it.
+
 ## Running
 
 ```bash
