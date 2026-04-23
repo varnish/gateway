@@ -77,7 +77,7 @@ func newTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *GatewayR
 		Client: fakeClient,
 		Scheme: scheme,
 		Config: Config{
-			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 		},
 		Logger: slog.Default(),
 	}
@@ -146,7 +146,7 @@ func TestBuildLabels(t *testing.T) {
 func TestBuildDeployment(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
-			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 		},
 	}
 
@@ -206,7 +206,7 @@ func TestBuildDeployment(t *testing.T) {
 func TestBuildDeployment_WithExtras(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
-			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 		},
 	}
 
@@ -922,7 +922,7 @@ func TestBuildLoggingSidecar(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &GatewayReconciler{
 				Config: Config{
-					GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+					GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 				},
 			}
 
@@ -1053,7 +1053,7 @@ func TestBuildGatewayContainer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &GatewayReconciler{
 				Config: Config{
-					GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+					GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 				},
 			}
 
@@ -1201,7 +1201,7 @@ func TestBuildVolumes(t *testing.T) {
 func TestBuildContainers(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
-			GatewayImage: "ghcr.io/varnish/varnish-gateway:latest",
+			GatewayImage: "ghcr.io/varnish/gateway-chaperone:latest",
 		},
 	}
 	gateway := &gatewayv1.Gateway{

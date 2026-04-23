@@ -9,6 +9,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -214,7 +215,13 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
 func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements, hasBackendTLS bool) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
-	replicas := int32(1) // TODO: get from GatewayClassParameters
+
+	// Replicas is intentionally left unset on the desired object so the operator
+	// does not fight a HorizontalPodAutoscaler (or manual `kubectl scale`).
+	// Kubernetes defaults Spec.Replicas to 1 when the field is nil on create,
+	// and the Deployment update path in reconcileResource only overwrites
+	// Spec.Template and Spec.Strategy — never Spec.Replicas — so the current
+	// replica count (whatever an HPA has set it to) is preserved on reconcile.
 
 	// Rolling update strategy for zero-downtime deployments
 	maxUnavailable := intstr.FromInt(0) // Never reduce available pods during update
@@ -241,7 +248,6 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiv
 			Labels:    labels,
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 				RollingUpdate: &appsv1.RollingUpdateDeployment{
@@ -592,6 +598,34 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway) *corev1.Ser
 			Type:     corev1.ServiceTypeLoadBalancer,
 			Selector: labels,
 			Ports:    ports,
+		},
+	}
+}
+
+// buildPodDisruptionBudget creates a PodDisruptionBudget matching the Gateway's
+// pods. The selector mirrors the Deployment selector (buildLabels).
+//
+// The caller is responsible for only invoking this when pdb != nil — the
+// operator does not create a PDB by default, because the default replica count
+// is 1 and a PDB with minAvailable: 1 would block node drains indefinitely.
+func (r *GatewayReconciler) buildPodDisruptionBudget(gateway *gatewayv1.Gateway, pdb *gatewayparamsv1alpha1.PodDisruptionBudget) *policyv1.PodDisruptionBudget {
+	labels := r.buildLabels(gateway)
+	return &policyv1.PodDisruptionBudget{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "policy/v1",
+			Kind:       "PodDisruptionBudget",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gateway.Name,
+			Namespace: gateway.Namespace,
+			Labels:    labels,
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable:   pdb.MinAvailable,
+			MaxUnavailable: pdb.MaxUnavailable,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: labels,
+			},
 		},
 	}
 }

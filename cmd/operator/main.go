@@ -15,6 +15,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -64,9 +65,13 @@ func main() {
 
 	// Load config from environment
 	cfg := controller.Config{
-		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/varnish-gateway:latest"),
+		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/gateway-chaperone:latest"),
 		ImagePullSecrets: getEnvOrDefault("IMAGE_PULL_SECRETS", ""),
 	}
+
+	// controller-runtime's init() only wires rest_client_requests_total;
+	// add the duration histogram onto its registry so /metrics exposes both.
+	k8sutil.RegisterClientGoDurationMetric(ctrlmetrics.Registry)
 
 	// Wrap the Kubernetes client transport to warn on slow API server requests.
 	restCfg := ctrl.GetConfigOrDie()

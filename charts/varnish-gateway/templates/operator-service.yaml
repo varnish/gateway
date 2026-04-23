@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "varnish-gateway.fullname" . }}-operator-metrics
+  namespace: {{ include "varnish-gateway.namespace" . }}
+  labels:
+    {{- include "varnish-gateway.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "varnish-gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 8080
+      targetPort: metrics
+      protocol: TCP

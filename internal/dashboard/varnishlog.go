@@ -9,12 +9,10 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
-	"time"
 )
 
 const (
 	maxVarnishlogSessions = 2
-	defaultSessionTimeout = 600 * time.Second
 	varnishlogBufSize     = 256 * 1024 // 256KB scanner buffer
 )
 
@@ -216,9 +214,8 @@ func (s *Server) handleVarnishlog(w http.ResponseWriter, r *http.Request) {
 	})
 	s.logger.Info("starting varnishlog-json session", "args", args)
 
-	// Create context with timeout; also cancelled on client disconnect.
-	ctx, cancel := context.WithTimeout(r.Context(), defaultSessionTimeout)
-	defer cancel()
+	// Cancelled on client disconnect.
+	ctx := r.Context()
 
 	cmd := exec.CommandContext(ctx, "varnishlog-json", args...)
 	var stderrBuf bytes.Buffer
@@ -253,16 +250,11 @@ func (s *Server) handleVarnishlog(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
-	// Capture the context state before cancelling, so we can distinguish
-	// client disconnect / timeout from a process failure.
 	ctxErr := ctx.Err()
-	cancel()
 	waitErr := cmd.Wait()
 
 	reason := "process exited"
-	if ctxErr == context.DeadlineExceeded {
-		reason = "session timeout"
-	} else if ctxErr == context.Canceled {
+	if ctxErr == context.Canceled {
 		reason = "client disconnected"
 	}
 

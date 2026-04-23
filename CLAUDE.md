@@ -9,7 +9,8 @@ Kubernetes Gateway API implementation using Varnish. Three components:
 
 ## Documentation
 
-- [Configuration Reference](docs/configuration-reference.md) - GatewayClassParameters, varnishd args, defaults
+- [Documentation Index](docs/index.md) - user-facing docs (getting started, concepts, guides, operations, reference)
+- [GatewayClassParameters Reference](docs/reference/gatewayclassparameters.md) - GatewayClassParameters, varnishd args, defaults
 
 ## Current Status
 
@@ -441,7 +442,7 @@ spec behavior (consistent with Envoy Gateway).
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `GATEWAY_IMAGE` | `ghcr.io/varnish/varnish-gateway:latest` | Combined varnish+ghost+chaperone image |
+| `GATEWAY_IMAGE` | `ghcr.io/varnish/gateway-chaperone:latest` | Combined varnish+ghost+chaperone image (the "gateway data plane") |
 | `IMAGE_PULL_SECRETS` | `` | Comma-separated list of image pull secret names for chaperone pods |
 
 The operator manages all GatewayClasses with `controllerName: varnish-software.com/gateway`.
@@ -468,7 +469,7 @@ The Helm chart includes:
 
 **Note:** Gateway API CRDs must be installed separately as a prerequisite.
 
-See [INSTALL.md](INSTALL.md) for detailed installation instructions and [charts/varnish-gateway/README.md](charts/varnish-gateway/README.md) for configuration options.
+See [docs/getting-started/installation.md](docs/getting-started/installation.md) for detailed installation instructions and [charts/varnish-gateway/README.md](charts/varnish-gateway/README.md) for configuration options.
 
 ### kubectl (Alternative)
 
@@ -479,8 +480,7 @@ deploy/
 ├── 00-prereqs.yaml       # Namespace + GatewayClassParameters CRD
 ├── 01-operator.yaml      # ServiceAccount, ClusterRole, ClusterRoleBinding, Deployment
 ├── 02-chaperone-rbac.yaml # ClusterRole for chaperone to watch EndpointSlices
-├── 03-gatewayclass.yaml  # GatewayClass "varnish"
-└── sample-gateway.yaml   # Sample Gateway (not applied by make deploy)
+└── 03-gatewayclass.yaml  # GatewayClass "varnish"
 ```
 
 Deploy to cluster:

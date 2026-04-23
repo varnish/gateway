@@ -1,0 +1,37 @@
+{% extends "main.html" %}
+
+{#
+  Home-page hero. Mirrors the marketing landing that used to live at
+  site/index.html (pre-MkDocs). The rest of the page is rendered from the
+  body of docs/index.md via the default content block.
+#}
+
+{% block tabs %}
+  {{ super() }}
+
+  <section class="vg-hero">
+    <div class="vg-hero-inner">
+      <div class="vg-hero-badge">
+        Gateway API for Varnish Cache <code>{{ config.extra.version | default("") }}</code>
+      </div>
+      <h1>Kubernetes-native HTTP routing, powered by Varnish</h1>
+      <p class="vg-hero-lead">
+        A full Gateway API implementation backed by the world's fastest HTTP
+        accelerator. Standards-compliant routing with Varnish's legendary
+        performance.
+      </p>
+      <a href="{{ 'getting-started/installation/' | url }}" class="md-button md-button--primary">
+        Get started
+      </a>
+      <a href="{{ config.repo_url }}" class="md-button">
+        View on GitHub
+      </a>
+    </div>
+  </section>
+{% endblock %}
+
+{% block content %}
+  <div class="vg-home-content">
+    {{ super() }}
+  </div>
+{% endblock %}

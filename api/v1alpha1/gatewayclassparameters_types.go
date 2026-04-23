@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // GatewayClassParameters contains configuration for a GatewayClass.
@@ -67,14 +68,43 @@ type GatewayClassParametersSpec struct {
 	// appropriate for their workload.
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// PodDisruptionBudget, if set, causes the operator to create a
+	// PodDisruptionBudget for each Gateway using this GatewayClass. Omit to
+	// create no PDB.
+	//
+	// PDB is opt-in because the default replica count is 1: a PDB with
+	// minAvailable: 1 on a single-replica Deployment blocks all voluntary
+	// evictions (including node drains) indefinitely. Only set a PDB if you
+	// have also arranged for more than one replica (via an HPA or manual scale).
+	// +optional
+	PodDisruptionBudget *PodDisruptionBudget `json:"podDisruptionBudget,omitempty"`
+}
+
+// PodDisruptionBudget configures a PodDisruptionBudget for Gateway pods.
+// Exactly one of MinAvailable or MaxUnavailable must be set, mirroring
+// Kubernetes PodDisruptionBudgetSpec semantics. The selector is generated
+// by the operator to match the Gateway's pods.
+type PodDisruptionBudget struct {
+	// MinAvailable is the minimum number of pods that must be available during
+	// a voluntary disruption. Can be an absolute number or a percentage string
+	// (e.g. "50%"). Mutually exclusive with MaxUnavailable.
+	// +optional
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+
+	// MaxUnavailable is the maximum number of pods that can be unavailable
+	// during a voluntary disruption. Can be an absolute number or a percentage
+	// string (e.g. "50%"). Mutually exclusive with MinAvailable.
+	// +optional
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
 
 // VarnishLogging configures varnish logging via a sidecar container.
 type VarnishLogging struct {
 	// Mode determines which varnish logging tool to use.
-	// Valid values: "varnishlog", "varnishncsa"
-	// Future: "varnishlog-json" when available
-	// +kubebuilder:validation:Enum=varnishlog;varnishncsa
+	// Valid values: "varnishlog", "varnishlog-json", "varnishncsa"
+	// The named binary must exist in the sidecar image.
+	// +kubebuilder:validation:Enum=varnishlog;varnishlog-json;varnishncsa
 	Mode string `json:"mode"`
 
 	// Format specifies the output format for varnishncsa.

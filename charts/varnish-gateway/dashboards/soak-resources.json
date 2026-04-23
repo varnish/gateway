@@ -1,0 +1,151 @@
+{
+  "title": "Varnish Gateway / Soak — Resources",
+  "uid": "varnish-gateway-soak-resources",
+  "tags": ["varnish-gateway", "soak"],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "1m",
+  "timezone": "",
+  "description": "Leak-detection view for soak tests. Every panel should be flat over hours; upward slopes point at leaks.",
+  "templating": {
+    "list": [
+      { "name": "datasource", "type": "datasource", "query": "prometheus", "current": { "text": "Prometheus", "value": "Prometheus" } },
+      {
+        "name": "job",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(go_goroutines{job=~\".*varnish-gateway.*\"}, job)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(go_goroutines{job=~\"$job\"}, pod)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Heap in use",
+      "description": "go_memstats_heap_inuse_bytes. Sustained upward slope over hours = live allocations the GC can't reach = leak.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "go_memstats_heap_inuse_bytes{job=~\"$job\", pod=~\"$pod\"}",
+        "refId": "A",
+        "legendFormat": "{{job}} / {{pod}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Resident set size (RSS)",
+      "description": "process_resident_memory_bytes. Catches off-heap leaks (cgo, mmap) that heap_inuse misses.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "process_resident_memory_bytes{job=~\"$job\", pod=~\"$pod\"}",
+        "refId": "A",
+        "legendFormat": "{{job}} / {{pod}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Goroutines",
+      "description": "go_goroutines. Should be stable once warm. Trending up = goroutine leak (unclosed channels, un-cancelled contexts).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "go_goroutines{job=~\"$job\", pod=~\"$pod\"}",
+        "refId": "A",
+        "legendFormat": "{{job}} / {{pod}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Open file descriptors",
+      "description": "process_open_fds. FD leaks show as monotonic growth and eventually hit process_max_fds.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "process_open_fds{job=~\"$job\", pod=~\"$pod\"}", "refId": "A", "legendFormat": "{{job}} / {{pod}} (open)" },
+        { "expr": "process_max_fds{job=~\"$job\", pod=~\"$pod\"}",  "refId": "B", "legendFormat": "{{job}} / {{pod}} (max)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Stack in use",
+      "description": "go_memstats_stack_inuse_bytes. Correlates with goroutine leaks but also catches runaway stack growth.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "go_memstats_stack_inuse_bytes{job=~\"$job\", pod=~\"$pod\"}",
+        "refId": "A",
+        "legendFormat": "{{job}} / {{pod}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "GC pause rate",
+      "description": "rate(go_gc_duration_seconds_sum[5m]). Rising GC pressure often means allocation churn ahead of a heap leak.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "rate(go_gc_duration_seconds_sum{job=~\"$job\", pod=~\"$pod\"}[5m])",
+        "refId": "A",
+        "legendFormat": "{{job}} / {{pod}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "CPU rate",
+      "description": "rate(process_cpu_seconds_total[5m]). Cores consumed. Drift at steady load = work-per-request regression.",
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 23 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "rate(process_cpu_seconds_total{job=~\"$job\", pod=~\"$pod\"}[5m])",
+        "refId": "A",
+        "legendFormat": "{{job}} / {{pod}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Pod restarts (cumulative)",
+      "description": "kube_pod_container_status_restarts_total. Any increment during a soak = crash/OOM — correlate with memory/CPU panels above.",
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 23 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "sum by (namespace, pod, container) (kube_pod_container_status_restarts_total{pod=~\"$pod\", container=~\"operator|varnish-gateway\"})",
+        "refId": "A",
+        "legendFormat": "{{namespace}}/{{pod}}/{{container}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    }
+  ]
+}

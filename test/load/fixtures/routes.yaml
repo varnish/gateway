@@ -1,0 +1,75 @@
+# Minimal route fixture. Keep in sync with test/load/k6/lib/routes.js —
+# the k6 script relies on (host, path) -> expected service mappings that
+# match these HTTPRoutes.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: load
+  namespace: varnish-load
+spec:
+  gatewayClassName: varnish
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: a-route
+  namespace: varnish-load
+spec:
+  parentRefs: [{ name: load }]
+  hostnames: ["a.load.local"]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: "/" } }]
+      backendRefs:
+        - name: echo-a
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: b-route
+  namespace: varnish-load
+spec:
+  parentRefs: [{ name: load }]
+  hostnames: ["b.load.local"]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: "/" } }]
+      backendRefs:
+        - name: echo-b
+          port: 8080
+---
+# Same host, path-split between services: exercises path matching and
+# priority ordering.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mixed-a-route
+  namespace: varnish-load
+spec:
+  parentRefs: [{ name: load }]
+  hostnames: ["mixed.load.local"]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: "/a" } }]
+      backendRefs:
+        - name: echo-a
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mixed-b-route
+  namespace: varnish-load
+spec:
+  parentRefs: [{ name: load }]
+  hostnames: ["mixed.load.local"]
+  rules:
+    - matches: [{ path: { type: PathPrefix, value: "/b" } }]
+      backendRefs:
+        - name: echo-b
+          port: 8080

@@ -1,8 +1,0 @@
-# Namespace for varnish-gateway operator
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: varnish-gateway-system
-  labels:
-    app.kubernetes.io/name: varnish-gateway
-    app.kubernetes.io/component: operator

@@ -1,0 +1,144 @@
+{
+  "title": "Varnish Gateway / Chaperone",
+  "uid": "varnish-gateway-chaperone",
+  "tags": ["varnish-gateway"],
+  "schemaVersion": 41,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "timezone": "",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0
+      },
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(chaperone_ready, namespace)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "query": "label_values(chaperone_ready{namespace=~\"$namespace\"}, pod)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Ready pods",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{
+        "expr": "sum(chaperone_ready{namespace=~\"$namespace\", pod=~\"$pod\"})",
+        "refId": "A",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" }
+      }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": {"mode": "thresholds"}, "thresholds": { "mode": "absolute", "steps": [{"color":"red","value":null},{"color":"green","value":1}] } }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Draining pods",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{
+        "expr": "sum(chaperone_draining{namespace=~\"$namespace\", pod=~\"$pod\"})",
+        "refId": "A",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" }
+      }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": {"mode": "thresholds"}, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"yellow","value":1}] } }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Uptime",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{
+        "expr": "time() - min(process_start_time_seconds{job=~\".*chaperone.*\", namespace=~\"$namespace\", pod=~\"$pod\"})",
+        "refId": "A",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" }
+      }],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Reload errors (1h)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{
+        "expr": "sum(increase(chaperone_ghost_reload_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[1h])) + sum(increase(chaperone_vcl_reload_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[1h])) + sum(increase(chaperone_tls_reload_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[1h]))",
+        "refId": "A",
+        "datasource": { "type": "prometheus", "uid": "${datasource}" }
+      }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": {"mode": "thresholds"}, "thresholds": { "mode": "absolute", "steps": [{"color":"green","value":null},{"color":"red","value":1}] } }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Reload rate (per pod)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (pod) (rate(chaperone_ghost_reloads_total{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]))", "refId": "A", "legendFormat": "ghost — {{pod}}" },
+        { "expr": "sum by (pod) (rate(chaperone_vcl_reloads_total{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]))",   "refId": "B", "legendFormat": "vcl — {{pod}}" },
+        { "expr": "sum by (pod) (rate(chaperone_tls_reloads_total{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]))",   "refId": "C", "legendFormat": "tls — {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Reload error rate (per pod)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum by (pod) (rate(chaperone_ghost_reload_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]))", "refId": "A", "legendFormat": "ghost — {{pod}}" },
+        { "expr": "sum by (pod) (rate(chaperone_vcl_reload_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]))",   "refId": "B", "legendFormat": "vcl — {{pod}}" },
+        { "expr": "sum by (pod) (rate(chaperone_tls_reload_errors_total{namespace=~\"$namespace\", pod=~\"$pod\"}[5m]))",   "refId": "C", "legendFormat": "tls — {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "color": { "mode": "palette-classic" } }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "EndpointSlice change rate",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "sum by (pod) (rate(chaperone_endpoint_changes_total{namespace=~\"$namespace\", pod=~\"$pod\"}[1m]))",
+        "refId": "A",
+        "legendFormat": "{{pod}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Ready / Draining state",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "chaperone_ready{namespace=~\"$namespace\", pod=~\"$pod\"}",    "refId": "A", "legendFormat": "ready — {{pod}}" },
+        { "expr": "chaperone_draining{namespace=~\"$namespace\", pod=~\"$pod\"}", "refId": "B", "legendFormat": "draining — {{pod}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 }, "overrides": [] }
+    }
+  ]
+}

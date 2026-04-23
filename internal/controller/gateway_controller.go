@@ -11,11 +11,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -184,6 +186,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	var extraVolumeMounts []corev1.VolumeMount
 	var extraInitContainers []corev1.Container
 	var containerResources *corev1.ResourceRequirements
+	var pdbSpec *gatewayparamsv1alpha1.PodDisruptionBudget
 	var imageOverride string
 	if params := r.getGatewayClassParameters(ctx, gateway); params != nil {
 		imageOverride = params.Spec.Image
@@ -193,6 +196,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		extraVolumeMounts = params.Spec.ExtraVolumeMounts
 		extraInitContainers = params.Spec.ExtraInitContainers
 		containerResources = params.Spec.Resources
+		pdbSpec = params.Spec.PodDisruptionBudget
 	}
 
 	// Resolve effective image: per-GatewayClass override or operator default
@@ -249,6 +253,10 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources, hasBackendTLS),
 		r.buildService(gateway),
 	)
+	// PDB is opt-in. Create one only if the user asked for it.
+	if pdbSpec != nil {
+		resources = append(resources, r.buildPodDisruptionBudget(gateway, pdbSpec))
+	}
 
 	for _, desired := range resources {
 		if err := r.reconcileResource(ctx, gateway, desired); err != nil {
@@ -256,6 +264,41 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		}
 	}
 
+	// If the PDB was toggled off (or never set), make sure no stale one remains.
+	// A stale PDB with minAvailable: 1 on a single-replica Deployment would
+	// block node drains indefinitely, so we must delete it explicitly rather
+	// than leave it behind via owner-reference GC.
+	if pdbSpec == nil {
+		if err := r.deletePodDisruptionBudgetIfExists(ctx, gateway); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// deletePodDisruptionBudgetIfExists deletes the Gateway's PodDisruptionBudget
+// if one exists. Called when the user disables PDB in GatewayClassParameters
+// to avoid leaving a stale PDB that could block evictions.
+func (r *GatewayReconciler) deletePodDisruptionBudgetIfExists(ctx context.Context, gateway *gatewayv1.Gateway) error {
+	pdb := &policyv1.PodDisruptionBudget{}
+	key := types.NamespacedName{Name: gateway.Name, Namespace: gateway.Namespace}
+	if err := r.Get(ctx, key, pdb); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("r.Get(PodDisruptionBudget %s): %w", key, err)
+	}
+	// Only delete PDBs we own (defensive: shouldn't happen since we only ever
+	// create one here, but respect hand-crafted PDBs that happen to share the name).
+	if !metav1.IsControlledBy(pdb, gateway) {
+		return nil
+	}
+	if err := r.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("r.Delete(PodDisruptionBudget %s): %w", key, err)
+	}
+	r.Logger.Info("deleted PodDisruptionBudget (disabled in GatewayClassParameters)",
+		"name", key.Name, "namespace", key.Namespace)
 	return nil
 }
 
@@ -343,6 +386,20 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		return nil
 	}
 
+	// For PodDisruptionBudgets, update if spec (min/max/selector) changed.
+	if desiredPDB, ok := desired.(*policyv1.PodDisruptionBudget); ok {
+		existingPDB := existing.(*policyv1.PodDisruptionBudget)
+		if needsPDBUpdate(existingPDB, desiredPDB) {
+			existingPDB.Spec = desiredPDB.Spec
+			if err := r.Update(ctx, existingPDB); err != nil {
+				return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
+			}
+			r.Logger.Info("updated PodDisruptionBudget",
+				"name", desired.GetName())
+		}
+		return nil
+	}
+
 	// For TLS bundle Secrets, update if cert data changed.
 	// Admin secrets (suffix -secret) are generated once and must not be overwritten.
 	if desiredSecret, ok := desired.(*corev1.Secret); ok {
@@ -416,6 +473,42 @@ func needsServiceUpdate(existing, desired *corev1.Service) bool {
 		}
 	}
 	return false
+}
+
+// needsPDBUpdate checks if the PodDisruptionBudget spec needs to be updated.
+// Compares the two fields the operator owns: MinAvailable/MaxUnavailable and
+// the selector. Any other fields are left alone.
+func needsPDBUpdate(existing, desired *policyv1.PodDisruptionBudget) bool {
+	if !intOrStringPtrEqual(existing.Spec.MinAvailable, desired.Spec.MinAvailable) {
+		return true
+	}
+	if !intOrStringPtrEqual(existing.Spec.MaxUnavailable, desired.Spec.MaxUnavailable) {
+		return true
+	}
+	return !labelSelectorEqual(existing.Spec.Selector, desired.Spec.Selector)
+}
+
+func intOrStringPtrEqual(a, b *intstr.IntOrString) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Type == b.Type && a.IntVal == b.IntVal && a.StrVal == b.StrVal
+}
+
+func labelSelectorEqual(a, b *metav1.LabelSelector) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if len(a.MatchLabels) != len(b.MatchLabels) {
+		return false
+	}
+	for k, v := range a.MatchLabels {
+		if b.MatchLabels[k] != v {
+			return false
+		}
+	}
+	// We do not generate MatchExpressions, so equal MatchLabels is sufficient.
+	return len(a.MatchExpressions) == len(b.MatchExpressions)
 }
 
 // needsSecretUpdate checks if the Secret data needs to be updated.
@@ -1588,6 +1681,7 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.ServiceAccount{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		// Note: ClusterRoleBinding is cluster-scoped, so it cannot be owned by namespace-scoped Gateway
 		// We manage its lifecycle manually in reconcileResources without owner references
 		Watches(

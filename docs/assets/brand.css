@@ -1,0 +1,219 @@
+/* Varnish Gateway brand palette — mirrors the pre-MkDocs landing page. */
+
+:root,
+[data-md-color-scheme="default"] {
+  --vg-blue: #2d6fb5;
+  --vg-blue-dark: #1e5a9a;
+  --vg-blue-light: #3a8dd4;
+  --vg-blue-glow: rgba(45, 111, 181, 0.10);
+
+  --md-primary-fg-color: var(--vg-blue);
+  --md-primary-fg-color--light: var(--vg-blue-light);
+  --md-primary-fg-color--dark: var(--vg-blue-dark);
+  --md-accent-fg-color: var(--vg-blue-light);
+  --md-typeset-a-color: var(--vg-blue-dark);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--vg-blue-light);
+  --md-primary-fg-color--light: #5aa6e3;
+  --md-primary-fg-color--dark: var(--vg-blue);
+  --md-accent-fg-color: var(--vg-blue-light);
+  --md-typeset-a-color: #7bb4e0;
+}
+
+/* Hero — shown on the home page only (template: home.html). */
+.vg-hero {
+  background:
+    radial-gradient(ellipse at top, rgba(58, 141, 212, 0.18), transparent 60%),
+    linear-gradient(135deg, var(--vg-blue-dark) 0%, var(--vg-blue) 60%, var(--vg-blue-light) 100%);
+  color: #fff;
+  padding: 5rem 1.2rem 5.5rem;
+  text-align: center;
+  margin-bottom: 2rem;
+}
+
+.vg-hero-inner {
+  max-width: 860px;
+  margin: 0 auto;
+}
+
+.vg-hero-badge {
+  display: inline-block;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  margin-bottom: 1.4rem;
+}
+
+.vg-hero-badge code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: 0.78rem;
+}
+
+.vg-hero h1 {
+  font-size: clamp(2.1rem, 4.2vw, 3.2rem);
+  font-weight: 700;
+  line-height: 1.15;
+  margin: 0 0 1rem;
+  color: #fff;
+}
+
+.vg-hero p.vg-hero-lead {
+  font-size: 1.15rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.88);
+  margin: 0 auto 2rem;
+  max-width: 640px;
+}
+
+.vg-hero .md-button {
+  margin: 0.25rem 0.35rem;
+}
+
+.vg-hero .md-button--primary {
+  background: #fff;
+  color: var(--vg-blue-dark);
+  border-color: #fff;
+}
+
+.vg-hero .md-button--primary:hover {
+  background: #f4f6f9;
+  color: var(--vg-blue-dark);
+  border-color: #f4f6f9;
+}
+
+.vg-hero .md-button:not(.md-button--primary) {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.vg-hero .md-button:not(.md-button--primary):hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: #fff;
+}
+
+/* Hide the default page title on the home page — the hero is the title. */
+.md-typeset .vg-home-content > h1:first-child {
+  display: none;
+}
+
+/* Architecture step cards (used on the home page). */
+.vg-arch {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.2rem;
+  margin: 1.5rem 0;
+}
+
+.vg-arch-step {
+  background: var(--md-code-bg-color);
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.5rem;
+  padding: 1.25rem 1.3rem;
+  position: relative;
+}
+
+.vg-arch-num {
+  display: inline-flex;
+  width: 2rem;
+  height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--vg-blue);
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.9rem;
+  margin-bottom: 0.6rem;
+}
+
+.vg-arch-step h4 {
+  margin: 0 0 0.4rem;
+  font-size: 1.05rem;
+}
+
+.vg-arch-step p {
+  margin: 0;
+  font-size: 0.92rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* Shell / command code blocks — subtle blue tint to distinguish from config. */
+.highlight.language-bash > pre,
+.highlight.language-shell > pre,
+.highlight.language-console > pre,
+.highlight.language-sh > pre {
+  background: rgba(45, 111, 181, 0.06);
+  border-left: 3px solid var(--vg-blue);
+}
+
+[data-md-color-scheme="slate"] .highlight.language-bash > pre,
+[data-md-color-scheme="slate"] .highlight.language-shell > pre,
+[data-md-color-scheme="slate"] .highlight.language-console > pre,
+[data-md-color-scheme="slate"] .highlight.language-sh > pre {
+  background: rgba(45, 111, 181, 0.10);
+}
+
+/* "Show / Copy Markdown" actions above the right-rail ToC. Intended to let
+   readers grab the raw page source for pasting into LLMs. */
+.llm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.6rem 0.6rem 0.8rem;
+  margin-bottom: 0.2rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.llm-actions__btn {
+  flex: 1 1 auto;
+  font: inherit;
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  color: var(--md-default-fg-color--light);
+  background: transparent;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.25rem;
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+
+.llm-actions__btn:hover,
+.llm-actions__btn:focus-visible {
+  color: var(--md-accent-fg-color);
+  border-color: var(--md-accent-fg-color);
+  background: var(--vg-blue-glow);
+  outline: none;
+}
+
+.llm-actions__btn--success {
+  color: #1f8a4c;
+  border-color: #1f8a4c;
+  background: rgba(31, 138, 76, 0.08);
+}
+
+[data-md-color-scheme="slate"] .llm-actions__btn--success {
+  color: #4cc47d;
+  border-color: #4cc47d;
+  background: rgba(76, 196, 125, 0.14);
+}
+
+.llm-actions__btn--error {
+  color: #c0392b;
+  border-color: #c0392b;
+  background: rgba(192, 57, 43, 0.08);
+}
+
+[data-md-color-scheme="slate"] .llm-actions__btn--error {
+  color: #e57368;
+  border-color: #e57368;
+  background: rgba(229, 115, 104, 0.14);
+}

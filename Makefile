@@ -11,6 +11,7 @@ CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 .PHONY: test-conformance test-conformance-report test-conformance-single
 .PHONY: kind-create kind-delete kind-load kind-deploy test-conformance-kind
 .PHONY: manifests generate verify-manifests
+.PHONY: docs-venv docs-serve docs-build docs-clean
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -63,6 +64,11 @@ help:
 	@echo "  make manifests        Generate CRD manifests from Go types (controller-gen)"
 	@echo "  make generate         Generate deepcopy functions (controller-gen)"
 	@echo "  make verify-manifests Verify generated files are up-to-date"
+	@echo ""
+	@echo "Docs site (MkDocs Material):"
+	@echo "  make docs-serve       Live-reload dev server at http://127.0.0.1:8000"
+	@echo "  make docs-build       Build static site into _site/ (strict mode)"
+	@echo "  make docs-clean       Remove _site/ and the docs virtualenv"
 	@echo ""
 	@echo "Other:"
 	@echo "  make vendor           Update Go vendor directory"
@@ -170,6 +176,60 @@ docker-chaperone:
 	docker tag $(CHAPERONE_IMAGE):$(VERSION) $(CHAPERONE_IMAGE):latest
 
 # ============================================================================
+# Load / correctness testing (test/load)
+# ============================================================================
+ECHO_IMAGE      := $(REGISTRY)/gateway-echo
+COLLECTOR_IMAGE := $(REGISTRY)/gateway-ledger-collector
+LOAD_NS         ?= varnish-load
+GATEWAY_URL     ?= http://127.0.0.1:8080
+COLLECTOR_URL   ?= http://127.0.0.1:9090
+K6_RPS          ?= 50
+K6_DURATION     ?= 1m
+K6_VUS          ?= 10
+
+.PHONY: load-build load-docker load-up load-down load-run load-analyze load-download
+
+load-build:
+	CGO_ENABLED=0 go build -mod=vendor -o dist/load-echo ./test/load/echo
+	CGO_ENABLED=0 go build -mod=vendor -o dist/load-collector ./test/load/collector
+	CGO_ENABLED=0 go build -mod=vendor -o dist/load-analyze ./test/load/analyze
+
+load-docker:
+	docker build -t $(ECHO_IMAGE):$(VERSION) -f test/load/echo/Dockerfile .
+	docker tag $(ECHO_IMAGE):$(VERSION) $(ECHO_IMAGE):latest
+	docker build -t $(COLLECTOR_IMAGE):$(VERSION) -f test/load/collector/Dockerfile .
+	docker tag $(COLLECTOR_IMAGE):$(VERSION) $(COLLECTOR_IMAGE):latest
+
+load-up:
+	kubectl apply -f test/load/deploy/echo.yaml
+	kubectl apply -f test/load/deploy/collector.yaml
+	kubectl apply -f test/load/fixtures/routes.yaml
+	kubectl -n $(LOAD_NS) rollout status deploy/ledger-collector --timeout=2m
+	kubectl -n $(LOAD_NS) rollout status deploy/echo-a --timeout=2m
+	kubectl -n $(LOAD_NS) rollout status deploy/echo-b --timeout=2m
+
+load-down:
+	kubectl delete -f test/load/fixtures/routes.yaml --ignore-not-found
+	kubectl delete -f test/load/deploy/echo.yaml --ignore-not-found
+	kubectl delete -f test/load/deploy/collector.yaml --ignore-not-found
+
+# Run k6. Expects GATEWAY_URL and COLLECTOR_URL reachable from the host
+# (typically via kubectl port-forward).
+load-run:
+	k6 run \
+	  -e GATEWAY_URL=$(GATEWAY_URL) \
+	  -e COLLECTOR_URL=$(COLLECTOR_URL) \
+	  -e RPS=$(K6_RPS) -e DURATION=$(K6_DURATION) -e VUS=$(K6_VUS) \
+	  test/load/k6/run.js
+
+load-download:
+	curl -fsS $(COLLECTOR_URL)/download -o dist/ledger.ndjson
+	@echo "wrote dist/ledger.ndjson ($$(wc -l < dist/ledger.ndjson) lines)"
+
+load-analyze: load-download
+	go run ./test/load/analyze -f dist/ledger.ndjson
+
+# ============================================================================
 # CI/Testing
 # ============================================================================
 
@@ -211,7 +271,7 @@ KIND := go tool kind
 kind-create:
 	$(KIND) create cluster --name $(KIND_CLUSTER_NAME) --wait 60s
 	kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$(GATEWAY_API_VERSION)/standard-install.yaml
-	./hack/kind-metallb.sh
+	./docs/development/kind-metallb.sh
 
 kind-delete:
 	$(KIND) delete cluster --name $(KIND_CLUSTER_NAME)
@@ -276,7 +336,7 @@ CONTROLLER_GEN = go tool controller-gen
 manifests:
 	$(CONTROLLER_GEN) crd paths="./api/..." output:crd:artifacts:config=charts/varnish-gateway/crds
 	@echo "Assembling deploy/00-prereqs.yaml..."
-	@cat deploy/namespace.yaml > deploy/00-prereqs.yaml
+	@printf '# Namespace for varnish-gateway operator\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: varnish-gateway-system\n  labels:\n    app.kubernetes.io/name: varnish-gateway\n    app.kubernetes.io/component: operator\n' > deploy/00-prereqs.yaml
 	@echo "---" >> deploy/00-prereqs.yaml
 	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_gatewayclassparameters.yaml >> deploy/00-prereqs.yaml
 	@echo "---" >> deploy/00-prereqs.yaml
@@ -286,7 +346,7 @@ manifests:
 
 # Generate deepcopy functions from Go types
 generate:
-	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./api/..."
+	$(CONTROLLER_GEN) object paths="./api/..."
 
 # Verify generated files are up-to-date (for CI)
 verify-manifests: manifests generate
@@ -297,6 +357,40 @@ verify-manifests: manifests generate
 	fi
 
 # ============================================================================
+# Docs site (MkDocs Material)
+# ============================================================================
+
+DOCS_VENV := .venv-docs
+DOCS_PY   := $(DOCS_VENV)/bin/python
+DOCS_PIP  := $(DOCS_VENV)/bin/pip
+MKDOCS    := $(DOCS_VENV)/bin/mkdocs
+
+# Create the virtualenv and install pinned deps. Re-runs when
+# requirements-docs.txt changes.
+$(DOCS_VENV)/.stamp: requirements-docs.txt
+	@python3 -m venv $(DOCS_VENV)
+	@$(DOCS_PIP) install --quiet --upgrade pip
+	@$(DOCS_PIP) install --quiet -r requirements-docs.txt
+	@touch $@
+
+docs-venv: $(DOCS_VENV)/.stamp
+
+# Sync the version badge in the hero with .version before building/serving.
+# Uses a temp mkdocs config so the source file stays stable in git.
+docs-serve: docs-venv
+	@VG_VERSION=$(VERSION) $(MKDOCS) serve --dev-addr 127.0.0.1:8000 \
+		--config-file mkdocs.yml
+
+docs-build: docs-venv
+	@echo "Building docs site for $(VERSION)..."
+	@perl -pi -e 's|^(\s*version:\s*)v[0-9][^\s]*|$${1}$(VERSION)|' mkdocs.yml
+	@$(MKDOCS) build --strict --config-file mkdocs.yml
+	@echo "Built site in _site/"
+
+docs-clean:
+	rm -rf _site $(DOCS_VENV)
+
+# ============================================================================
 # Maintenance
 # ============================================================================
 
@@ -304,6 +398,6 @@ vendor:
 	go mod vendor
 
 clean:
-	rm -rf dist/
+	rm -rf dist/ _site/
 	rm -f operator chaperone
 	cd ghost && cargo clean

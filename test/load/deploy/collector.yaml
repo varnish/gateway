@@ -1,0 +1,67 @@
+# Ledger collector: accepts NDJSON from k6 (out-of-cluster or in-cluster),
+# from echo pods, and from chaos runners. Writes to a PVC so pod restarts
+# don't lose data. A 72h soak at ~100 RPS × ~500 B/record fits easily in
+# a few GB; we over-provision to 20 Gi.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ledger-data
+  namespace: varnish-load
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-collector
+  namespace: varnish-load
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: ledger-collector }
+  template:
+    metadata:
+      labels: { app: ledger-collector }
+    spec:
+      containers:
+        - name: collector
+          image: ghcr.io/varnish/gateway-ledger-collector:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LISTEN
+              value: ":8080"
+            - name: DATA_DIR
+              value: "/data"
+            - name: ROTATE_BYTES
+              value: "1073741824"
+          ports:
+            - containerPort: 8080
+              name: http
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ledger-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-collector
+  namespace: varnish-load
+spec:
+  selector: { app: ledger-collector }
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http

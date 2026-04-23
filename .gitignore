@@ -1,6 +1,22 @@
+# IDE
 .idea
+
+# Build artifacts
 dist/
+/operator
+/chaperone
+
+# Test artifacts
+coverage.out
+*.report.log
 
 # EnvTest binaries (platform-specific, don't commit)
-bin/setup-envtest
 testbin/
+bin/setup-envtest
+
+# Internal working notes (not published)
+docs/internal/
+
+# MkDocs build output + virtualenv
+/_site/
+/.venv-docs/
