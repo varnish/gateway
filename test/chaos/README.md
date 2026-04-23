@@ -18,10 +18,10 @@ scaling" and "HTTPRoute churn" scenarios benefit from ≥3 nodes.
 | C02 | P0       | Rapid backend scaling       | Scale echo 0→30→0→30 over 2 min                   | 0 stale backends in `ghost.json`, 500s only for empty groups | scaffolded |
 | C03 | P0       | HTTPRoute churn             | Apply/delete 50 HTTPRoutes in a 30s burst         | No ConfigMap conflicts, routing converges < 15s      | scaffolded |
 | C04 | P0       | Operator pod kill           | `kubectl delete pod` mid-reconcile                | Clean recovery, no partial state, next reconcile succeeds | scaffolded |
-| C05 | P1       | API-server network partition | `NetworkChaos` chaperone ↔ apiserver for 60s     | Resync on reconnect, no restart loops                | TODO   |
-| C06 | P1       | Node drain                  | `kubectl drain` a node running gateway pods       | Traffic continues, pods rescheduled, 0 misroutes     | TODO   |
-| C07 | P1       | TLS cert rotation under load | Rotate cert-manager cert mid-run                  | Hot-reload, 0 TLS handshake failures after rotation  | TODO   |
-| C08 | P1       | Simultaneous Gateway + Route changes | Concurrent Gateway + HTTPRoute edits      | Both converge, no lost updates                       | TODO   |
+| C05 | P1       | API-server network partition | `NetworkChaos` chaperone ↔ apiserver for 60s     | Resync on reconnect, no restart loops                | scaffolded |
+| C06 | P1       | Node drain                  | `kubectl drain` a node running gateway pods       | Traffic continues, pods rescheduled, 0 misroutes     | scaffolded (needs ≥2 nodes) |
+| C07 | P1       | TLS cert rotation under load | Rotate cert-manager cert mid-run                  | Hot-reload, 0 TLS handshake failures after rotation  | scaffolded (blocked on TLS fixture) |
+| C08 | P1       | Simultaneous Gateway + Route changes | Concurrent Gateway + HTTPRoute edits      | Both converge, no lost updates                       | scaffolded |
 
 "Convergence" = first correct echo response for a given route after the
 recovery marker, measured by the analyzer.
@@ -74,8 +74,21 @@ Both flavors share:
 
 ## Known gaps
 
-- Cluster sizing for C02/C03 ("hundreds of HTTPRoutes", 10–15 nodes) is
-  not yet budgeted in CI. These are manual pre-release for now.
-- Only C01 is implemented end-to-end; the rest are table entries.
+- All scenarios are scaffolded but none have been validated against a
+  real cluster — syntax-checked only. First end-to-end run will surface
+  the real issues (selector mismatches, timing windows, etc.).
+- C06 requires ≥2 schedulable nodes; it prints `SKIP` on single-node
+  clusters (rancher-desktop).
+- C07 requires a cert-manager Certificate on the load Gateway; the
+  current fixture is HTTP-only, so the scenario prints `SKIP` until
+  `test/load/fixtures/routes.yaml` grows a TLS listener.
+- C02 and C03 are sized for rancher-desktop defaults; the issue calls
+  for "hundreds of HTTPRoutes on 10–15 nodes" — that needs a CI cluster
+  budget decision before those scenarios can run at full scale.
+- "Mid-reconcile" in C04 and "during partition" in C05 are timing-
+  dependent — the apply happens a few seconds into the fault window,
+  which is best-effort rather than deterministic. Scenarios catch the
+  common cases; a dedicated fault-injection hook in the operator would
+  be needed for reliable mid-operation kills.
 - Per-scenario thresholds are enforced by `run.sh` post-processing the
   analyzer's `-json` output, not by the analyzer itself.
