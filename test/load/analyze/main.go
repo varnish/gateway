@@ -77,12 +77,14 @@ func main() {
 
 	r := analyze(entries, events, verbose)
 	if jsonMode {
+		// In JSON mode, the caller (e.g. run.sh) applies its own
+		// thresholds — don't pre-empt it with our own exit code.
 		writeJSON(os.Stdout, r)
-	} else {
-		printReport(r)
+		return
 	}
+	printReport(r)
 
-	// Exit non-zero if we found correctness violations, so CI can gate on it.
+	// Text mode: exit non-zero on any violation, so CI can gate on it.
 	if r.drops > 0 || r.misroutes > 0 || r.duplicates > 0 {
 		os.Exit(2)
 	}
