@@ -12,3 +12,4 @@ ignore:
   - "**/*_test.go"
   - "api/**"
   - "cmd/**"
+  - "test/**"
