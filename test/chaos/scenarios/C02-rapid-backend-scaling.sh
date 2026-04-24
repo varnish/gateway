@@ -27,6 +27,18 @@ scale() {
   kubectl -n "$ns" scale "deploy/$deploy" --replicas="$n"
 }
 
+# Capture the pre-test replica count and restore it on exit, so subsequent
+# scenarios don't inherit the scale-to-0 final state asserted below.
+original=$(kubectl -n "$ns" get "deploy/$deploy" -o jsonpath='{.spec.replicas}')
+restore() {
+  echo "C02: restoring $deploy to ${original:-2} replicas"
+  kubectl -n "$ns" scale "deploy/$deploy" --replicas="${original:-2}" >/dev/null 2>&1 || true
+  # Wait for endpoints to repopulate so the next scenario doesn't see a
+  # scale-up window. Bounded at 60s to not hide a genuine failure.
+  kubectl -n "$ns" rollout status "deploy/$deploy" --timeout=60s >/dev/null 2>&1 || true
+}
+trap restore EXIT
+
 scale 30
 sleep "$hold_s"
 scale 0
@@ -47,7 +59,7 @@ if [[ -z "$pod" ]]; then
 fi
 
 echo "C02: inspecting ghost.json on $pod"
-ghost_json=$(kubectl -n "$gw_ns" exec "$pod" -c chaperone -- cat /var/run/varnish/ghost.json)
+ghost_json=$(kubectl -n "$gw_ns" exec "$pod" -c varnish-gateway -- cat /var/run/varnish/ghost.json)
 
 # Count backends whose .port matches any endpoint of deploy=$deploy.
 # Simpler + sufficient: the per-vhost routes reference service name in

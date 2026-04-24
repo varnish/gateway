@@ -14,8 +14,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/varnish/gateway/test/load/ledger"
@@ -53,10 +55,12 @@ func main() {
 		path     string
 		verbose  bool
 		jsonMode bool
+		scenario string
 	)
 	flag.StringVar(&path, "f", "", "Path to NDJSON ledger (default: stdin)")
 	flag.BoolVar(&verbose, "v", false, "Print per-misroute detail")
 	flag.BoolVar(&jsonMode, "json", false, "Emit machine-readable JSON report on stdout")
+	flag.StringVar(&scenario, "scenario", "", "Scope ratios to a scenario window [<id>_fault_start, <id>_scenario_end]")
 	flag.Parse()
 
 	var in io.Reader = os.Stdin
@@ -73,6 +77,10 @@ func main() {
 	entries, events, parseErrs := parse(in)
 	if parseErrs > 0 {
 		fmt.Fprintf(os.Stderr, "warning: %d unparseable lines\n", parseErrs)
+	}
+
+	if scenario != "" {
+		entries, events = scopeToScenario(entries, events, scenario)
 	}
 
 	r := analyze(entries, events, verbose)
@@ -131,6 +139,50 @@ func parse(in io.Reader) (map[string]*entry, []ledger.Record, int) {
 		fmt.Fprintf(os.Stderr, "scan: %v\n", err)
 	}
 	return entries, events, errs
+}
+
+// scopeToScenario narrows entries and events to the window bounded by the
+// scenario's fault_start and scenario_end markers. k6 entries outside the
+// window are dropped (their echo records are dropped with them). Events
+// belonging to other scenarios are dropped.
+//
+// Missing bounds are non-fatal: without fault_start the window has no
+// lower bound; without scenario_end it has no upper bound. This keeps the
+// analyzer usable on in-progress runs.
+func scopeToScenario(entries map[string]*entry, events []ledger.Record, scenario string) (map[string]*entry, []ledger.Record) {
+	var startTS, endTS int64 = math.MinInt64, math.MaxInt64
+	haveStart, haveEnd := false, false
+	prefix := scenario + "_"
+	startEvent := prefix + "fault_start"
+	endEvent := prefix + "scenario_end"
+	var scopedEvents []ledger.Record
+	for _, ev := range events {
+		if !strings.HasPrefix(ev.Event, prefix) {
+			continue
+		}
+		scopedEvents = append(scopedEvents, ev)
+		switch ev.Event {
+		case startEvent:
+			startTS = ev.TS
+			haveStart = true
+		case endEvent:
+			endTS = ev.TS
+			haveEnd = true
+		}
+	}
+	if !haveStart && !haveEnd {
+		fmt.Fprintf(os.Stderr, "warning: no markers found for scenario %q; using entire ledger\n", scenario)
+		return entries, events
+	}
+
+	scoped := make(map[string]*entry, len(entries))
+	for tid, e := range entries {
+		if e.k6 == nil || e.k6.TS < startTS || e.k6.TS > endTS {
+			continue
+		}
+		scoped[tid] = e
+	}
+	return scoped, scopedEvents
 }
 
 func analyze(entries map[string]*entry, events []ledger.Record, verbose bool) result {
@@ -206,6 +258,9 @@ func analyze(entries map[string]*entry, events []ledger.Record, verbose bool) re
 	sort.Slice(samples, func(i, j int) bool { return samples[i].ts < samples[j].ts })
 	for _, ev := range events {
 		if ev.Event == "" || ev.Event == "run_start" || ev.Event == "run_end" {
+			continue
+		}
+		if strings.HasSuffix(ev.Event, "_scenario_end") {
 			continue
 		}
 		cs := convergenceSample{event: ev.Event, target: ev.Target, ts: ev.TS, firstCorrectMs: -1}

@@ -181,7 +181,7 @@ backend. Check ghost.json:
 
 ```bash
 pod=$(kubectl -n varnish-load get pod -l gateway.networking.k8s.io/gateway-name=load -o name | head -1)
-kubectl -n varnish-load exec "$pod" -c chaperone -- cat /var/run/varnish/ghost.json | jq .
+kubectl -n varnish-load exec "$pod" -c varnish-gateway -- cat /var/run/varnish/ghost.json | jq .
 ```
 
 Convergence > threshold: chaperone took too long to reload after a

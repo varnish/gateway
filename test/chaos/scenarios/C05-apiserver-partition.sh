@@ -102,7 +102,7 @@ pod=$(kubectl -n "$gw_ns" get pod \
   -o jsonpath='{.items[0].metadata.name}')
 deadline=$((SECONDS + converge_s))
 while (( SECONDS < deadline )); do
-  ghost_json=$(kubectl -n "$gw_ns" exec "$pod" -c chaperone -- \
+  ghost_json=$(kubectl -n "$gw_ns" exec "$pod" -c varnish-gateway -- \
     cat /var/run/varnish/ghost.json 2>/dev/null || echo '{}')
   if echo "$ghost_json" | jq -e --arg h "$canary_host" '.vhosts[$h]' >/dev/null 2>&1; then
     echo "C05: canary $canary_host resynced into ghost.json"

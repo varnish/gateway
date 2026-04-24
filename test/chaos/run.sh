@@ -79,13 +79,18 @@ fi
 
 # 3. Let things converge.
 sleep "$POST_FAULT_S"
+# The scenario_end marker bounds the analyzer's window for this run.
+# Its timestamp is the upper bound of [fault_start, scenario_end]; fault_end
+# is preserved in place so convergence still measures "first correct response
+# after the fault was reverted".
+mark "${id}_scenario_end" "end-of-window"
 
 # 4. Stop k6 and collect.
 kill "$k6_pid" 2>/dev/null || true
 wait "$k6_pid" 2>/dev/null || true
 
 curl -fsS "$COLLECTOR_URL/download" -o "$outdir/ledger.ndjson"
-go run "$root/../load/analyze" -f "$outdir/ledger.ndjson" -json >"$outdir/report.json"
+go run "$root/../load/analyze" -f "$outdir/ledger.ndjson" -scenario "$id" -json >"$outdir/report.json"
 
 # 5. Check thresholds.
 drop_ratio=$(jq -r '.drop_ratio // 0' "$outdir/report.json")
