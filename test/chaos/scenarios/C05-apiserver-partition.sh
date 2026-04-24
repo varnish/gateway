@@ -22,8 +22,10 @@ converge_s=${PARTITION_CONVERGE_S:-30}
 # NetworkChaos targeting chaperone pods' egress to the kube-apiserver.
 # externalTargets uses the in-cluster apiserver service name — this is
 # recognised by Chaos Mesh and resolved to the apiserver IPs.
-cr=$(mktemp --suffix=.yaml)
-trap 'rm -f "$cr"' EXIT
+# mktemp --suffix is GNU-only; build portable tmpfile.
+cr=$(mktemp -t c05-chaos.XXXXXX)
+mv "$cr" "$cr.yaml"
+cr="$cr.yaml"
 cat >"$cr" <<EOF
 apiVersion: chaos-mesh.org/v1alpha1
 kind: NetworkChaos

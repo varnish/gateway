@@ -4,10 +4,13 @@ Operational guide for running `test/chaos/` scenarios. Written to be
 usable both as a copy-paste run-book and as debugging context when
 things break.
 
-**Status at time of writing**: all 8 scenarios are scaffolded. None
-have been validated end-to-end against a real cluster. The first
-real run will find the real bugs — this document is partly a map of
-where those bugs are likely to be.
+**Status at time of writing**: C01, C04 and C08 have been dry-run
+against a single-node kind cluster and pass with healthy numbers (see
+"Reference numbers" below). C02 (scale storm, oversized for single-node),
+C05 (apiserver partition), C06 (needs multi-node) and C07 (needs TLS
+fixture) are unverified end-to-end and await a real multi-node cluster.
+Several harness bugs surfaced during the kind run have been fixed —
+see "Harness bugs fixed during kind validation" below.
 
 For scenario-level reference (the table of P0/P1 scenarios and their
 pass criteria) see [`test/chaos/README.md`](test/chaos/README.md).
@@ -32,12 +35,14 @@ when it fails, and how to debug.
 | `kubectl`| Cluster access              |
 | `helm`   | Chaos Mesh install          |
 | `docker` | Image builds                |
-| `k6`     | Load generator              |
+| `envsubst` | k6 Job manifest templating (gettext)   |
 | `jq`     | Threshold checks in `run.sh` |
 | `go`     | Analyzer + builds           |
 
 Chaos Mesh is installed *into* the cluster by the setup script — you
-don't need it locally.
+don't need it locally. k6 likewise runs in-cluster as a Kubernetes
+Job (image `grafana/k6:0.49.0`, pre-loaded into kind during setup);
+you do not need k6 on `PATH`.
 
 ## Quick start (kind)
 
@@ -45,23 +50,94 @@ don't need it locally.
 # 1. Stand up the cluster end-to-end. ~3-5 minutes.
 make chaos-kind-setup
 
-# 2. In two separate terminals, open port-forwards:
-kubectl -n varnish-load port-forward svc/ledger-collector 9090:8080
-kubectl -n varnish-load port-forward svc/load 8080:80
-
-# 3. Run a scenario.
-export GATEWAY_URL=http://127.0.0.1:8080
-export COLLECTOR_URL=http://127.0.0.1:9090
+# 2. Run a scenario. Traffic is generated inside the cluster; no
+#    port-forwards required.
 make chaos-run SCENARIO=C01
+
+# 3. Or run the full suite unattended (see "Running the full suite" below):
+make chaos-suite
 
 # 4. When done:
 make chaos-kind-teardown
 ```
 
+## Running the full suite
+
+`make chaos-suite` runs all applicable scenarios serially, gates the
+cluster back to health between each one, and writes an aggregated
+report. It is designed to be left unattended — submit it, walk away
+for a few hours, come back to a report plus diagnostic bundles for
+any failures.
+
+```bash
+# Default: all scenarios; C02/C05 are skipped on single-node kind
+# (known to overwhelm it), C06 auto-skips on single-node clusters,
+# C07 auto-skips unless the TLS fixture is present.
+make chaos-suite
+
+# Pick a subset, or force-include the heavy scenarios:
+make chaos-suite CHAOS_ARGS="--scenarios C01,C04,C08"
+make chaos-suite CHAOS_ARGS="--full"                # include C02/C05
+make chaos-suite CHAOS_ARGS="--bail"                # stop on first failure
+
+# Output goes to dist/suite-<timestamp>/:
+#   suite-report.md        human-readable summary table
+#   suite-report.json      machine-readable aggregate
+#   <scenario>/run.log     full run.sh stdout/stderr
+#   <scenario>/<id>-report.json, -ledger.ndjson, -k6.log
+#   <scenario>/bundle/     diagnostic bundle on FAIL/TIMEOUT
+#                          (operator + chaperone logs, ghost.json,
+#                           events, managedFields, etc.)
+```
+
+Per-scenario hard cap is `SCENARIO_TIMEOUT_S` (default 900s). Total
+suite cap is `SUITE_TIMEOUT_S` (default 12h). Post-scenario cooldown
+is `COOLDOWN_S` (default 30s), after which the health gate must pass
+or remaining scenarios are aborted.
+
 Recommended first-pass order for dry running: **C01 → C04 → C08**.
 C01 exercises the CR path, C04 exercises the action-script path,
 C08 exercises parallel ops. If those three pass, C02/C03/C05 will
 likely pass too. C06 needs multi-node, C07 needs TLS fixtures.
+
+**Gateway replica count matters for C01.** With a single replica, a
+pod-kill produces an outage window and the harness can only measure
+it via `non_2xx` (not gated). Scale to ≥2 before running C01:
+
+```bash
+kubectl -n varnish-load scale deploy/load --replicas=2
+```
+
+C01 has been observed to run cleanly at 2 replicas: zero 5xx, zero
+misroutes, ~1.8M k6 samples, 1 missing ledger record (ingest noise).
+
+## Running at scale (C02/C03)
+
+The default fixture has 4 HTTPRoutes — enough for correctness but too
+small to exercise C02's "rapid backend scaling" or C03's "HTTPRoute
+churn" at realistic cardinality. For a large fixture, use the
+generator:
+
+```bash
+# 50 vhosts × 10 paths = 500 HTTPRoutes, default parameters.
+make load-up-large
+# Custom: 100 vhosts × 20 paths = 2000 HTTPRoutes.
+make load-up-large LARGE_VHOSTS=100 LARGE_PATHS=20
+```
+
+`load-up-large` writes `test/load/fixtures/generated/{routes.yaml,
+routes.json}` (gitignored), applies the HTTPRoutes, and creates a
+`k6-routes` ConfigMap that the chaos k6 Job mounts at
+`/k6/routes/routes.json`. k6 automatically picks this up in place of
+the baked-in default route table (see `test/load/k6/lib/routes.js`).
+
+Tear down with:
+```bash
+make load-down-large
+```
+
+Each generated HTTPRoute is labelled `fixture=generated` so
+`load-down-large` can remove them without touching the default routes.
 
 ## What each scenario tests — one line each
 
@@ -145,13 +221,17 @@ The scripts fail in a few characteristic ways. Check these in order.
 **Symptom**: ledger has no `source: k6` records, analyzer says
 `total requests: 0`.
 
-- **Port-forwards not running.** Check with `curl
-  http://127.0.0.1:8080/` and `curl http://127.0.0.1:9090/healthz`.
+- **k6 Job pod never went Ready.** `kubectl -n varnish-load describe
+  pod -l job-name=k6-<scenario>-<epoch>`. Usually the `grafana/k6`
+  image wasn't loaded into kind (kind-setup should have handled
+  this) or the `k6-script` ConfigMap wasn't created.
 - **Gateway Service has no endpoints.** `kubectl -n varnish-load
   describe svc load`. Gateway pods must be Ready and selectable by
   the Service selector. If no pods match, the Gateway may not have
   reconciled yet — check operator logs.
 - **`load-up` never finished.** Re-run `make load-up`.
+- **k6 Job logs**: `kubectl -n varnish-load logs job/<k6-job-name>`
+  (also copied to `dist/<SCENARIO>-k6.log` at end of run).
 
 ### 3. Analyzer reports drops or misroutes
 
@@ -237,8 +317,20 @@ nodes:
 EOF
 # Then re-run make chaos-kind-setup (it skips cluster creation).
 ```
-Gateway pods must have a PodDisruptionBudget or drain will block
-forever — `--force` sidesteps this but weakens the test.
+Before running C06, apply the drain-friendly overlay and scale the
+gateway to match the node count:
+```bash
+kubectl apply -f test/load/fixtures/drain-friendly.yaml
+kubectl -n varnish-load scale deploy/load --replicas=2
+```
+The overlay configures:
+- `topologySpreadConstraints` (one pod per node by `kubernetes.io/hostname`)
+  so a drain actually moves a pod rather than killing one of several
+  co-located replicas.
+- `podDisruptionBudget` with `minAvailable: 1` so `kubectl drain`
+  blocks until the replacement pod is Ready. Without a PDB, drain
+  takes all gateway pods down and the scenario registers as a
+  complete outage; `--force` sidesteps this but weakens the test.
 
 **C07 — TLS rotation**: Exits with `SKIP` until
 `test/load/fixtures/routes.yaml` grows a TLS listener and a
@@ -281,17 +373,67 @@ The ledger format is defined in `test/load/ledger/record.go`. Field
 names are stable — if `run.sh` references a field that doesn't
 appear in the NDJSON, someone renamed something.
 
+## Reference numbers (single-node kind, 2 gateway replicas)
+
+Observed during dry-run validation. Use these as a smell test — the
+analyzer report should look similar on an otherwise-idle cluster. A
+run with `total < MIN_TOTAL` (default 50) now fails loudly instead of
+silently passing on empty data.
+
+| Scenario | total samples | drop_ratio | non_2xx | misroutes | converge_ms |
+| -------- | ------------- | ---------- | ------- | --------- | ----------- |
+| C01      | ~1.8M         | ~5e-7      | 0       | 0         | 0           |
+| C04      | ~10M          | ~1e-7      | 0       | 0         | 0           |
+| C08      | ~12M          | ~8e-8      | 0       | 0         | 0           |
+
+Drop ratios at ~1e-7 are ledger ingest noise (one missing echo POST
+per million k6 requests), not real data loss. `MAX_DROP_RATIO=1e-5`
+(10 ppm) in the C04/C08 envs is a noise floor, not a tolerance for
+actual drops — if the ratio climbs into 1e-4 or higher, something
+real is wrong.
+
+## Harness bugs fixed during kind validation
+
+The first kind run found several harness issues that produced
+misleading results. They are fixed in-tree; noted here because they
+are the kind of thing that can regress silently.
+
+- **`run.sh` used to swallow k6 failures.** k6 was forked with stderr
+  redirected to a log file inside a temp dir. If k6 was missing or
+  exited immediately, the scenario still "PASSED" because the
+  analyzer found zero drops of zero requests. Fixed: preflight check
+  for `k6` on `PATH`, post-launch liveness check, and a `MIN_TOTAL`
+  gate (default 50) that fails the scenario when k6 didn't actually
+  drive traffic. The summary line also now emits `total` and `non_2xx`.
+- **C04's post-canary timeout raced controller-runtime cache sync.**
+  `kubectl rollout status` returns when the pod is Ready per its
+  liveness probe, but controller-runtime needs an additional ~20–25s
+  for leader election + informer cache sync before HTTPRoute workers
+  start processing. The previous 30s wait occasionally beat this;
+  bumped to 60s. Notably the data path stayed up through this whole
+  window — the operator blind-spot did not produce any non_2xx.
+- **`MAX_DROP_RATIO=0.0` in C04/C08 was brittle** at multi-million
+  sample runs. A single unlogged echo POST out of 10M → failure.
+  Replaced with `1e-5` as a noise floor. C01 already used `0.01`.
+- **`mktemp --suffix=.yaml`** in C05 is GNU-only; replaced with a
+  portable form for macOS.
+- **`kind-setup.sh` loaded only `:$VERSION`-tagged images into kind.**
+  The load-suite manifests (`test/load/deploy/*.yaml`) hardcode
+  `:latest`, so pods fell through to a ghcr.io pull (403). Fixed: the
+  script now loads both `:$VERSION` and `:latest` tags for the echo
+  and collector images.
+
 ## Known gaps (as of this writing)
 
-- **No scenario has been run against a real cluster.** This is the
-  single most important caveat. Syntax-checked only.
+- **C02/C03/C05/C06/C07 not yet validated end-to-end.** C01, C04 and
+  C08 have been dry-run on single-node kind; the rest await a
+  multi-node soak cluster. The load fixture still has only 4
+  HTTPRoutes, so C02/C03 at meaningful scale ("hundreds of
+  HTTPRoutes") requires a larger fixture too.
 - **Convergence is measured only after `fault_end`, not `fault_start`.**
   For scenarios where the interesting transition is at
   fault-start (C05 partition applied), the convergence metric
   doesn't capture that.
-- **The load fixture has 4 HTTPRoutes.** The issue specifies
-  "hundreds of HTTPRoutes" for meaningful C02/C03 at scale. Real
-  validation needs a larger fixture and a cluster budget.
 - **No CI wiring.** Scenarios are manual. A CI job would need: a
   kind cluster per run (expensive), images pre-built, port-forwards
   replaced by in-cluster k6. The run time per scenario (~3 min) is

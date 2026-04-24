@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -91,6 +92,11 @@ func newCollector(cfg config, log *slog.Logger) (*collector, error) {
 func (c *collector) rotate() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.rotateLocked()
+}
+
+// rotateLocked assumes c.mu is held.
+func (c *collector) rotateLocked() error {
 	if c.file != nil {
 		if err := c.file.Close(); err != nil {
 			c.log.Error("close current segment", "err", err)
@@ -209,6 +215,46 @@ func (c *collector) download(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// reset discards all existing ledger segments and starts a fresh one.
+// Intended to be called between chaos scenarios so the analyzer doesn't
+// re-scan unbounded history.
+func (c *collector) reset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	// Hold the mutex across the whole operation — concurrent /ingest
+	// writers would otherwise hit a nil file between close and rotate.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file != nil {
+		_ = c.file.Close()
+		c.file = nil
+	}
+	entries, err := os.ReadDir(c.cfg.dataDir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "ledger-") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(c.cfg.dataDir, e.Name())); err == nil {
+			removed++
+		}
+	}
+	c.totalRecords.Store(0)
+	if err := c.rotateLocked(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	c.log.Info("reset", "segments_removed", removed)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = fmt.Fprintf(w, `{"segments_removed":%d}`+"\n", removed)
+}
+
 func (c *collector) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -235,6 +281,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ingest", c.ingest)
 	mux.HandleFunc("/download", c.download)
+	mux.HandleFunc("/reset", c.reset)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.Handle("/metrics", promhttp.HandlerFor(c.reg, promhttp.HandlerOpts{}))
 

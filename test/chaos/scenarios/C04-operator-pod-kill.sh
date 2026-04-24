@@ -87,10 +87,12 @@ echo "C04: verifying pre-kill canary converged into routing.json"
 wait_for_vhost "$pre_host" present 60
 
 # 5. Post-recovery canary — proves next reconcile works with no
-#    partial state blocking it.
+#    partial state blocking it. Timeout is generous: controller-runtime
+#    needs leader election + cache sync after `rollout status` returns,
+#    typically ~20-30s before HTTPRoute workers start processing.
 echo "C04: applying post-recovery canary $post_host"
 apply_route c04-post "$post_host"
-wait_for_vhost "$post_host" present 30
+wait_for_vhost "$post_host" present 60
 
 # 6. Clean up and confirm both are gone.
 echo "C04: deleting canaries"

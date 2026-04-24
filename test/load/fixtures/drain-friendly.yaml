@@ -1,0 +1,48 @@
+# drain-friendly overlay for C06 (node drain) on a multi-node cluster.
+#
+# Apply on top of deploy/03-gatewayclass.yaml — this is a patch that
+# edits the existing `varnish-params` GatewayClassParameters to:
+#
+#   - spread gateway pods one-per-node (kubernetes.io/hostname)
+#   - require minAvailable: 1 during voluntary disruption so a drain
+#     blocks rather than taking out every replica at once
+#
+# Prerequisites:
+#   - cluster with ≥2 nodes
+#   - gateway scaled to ≥2 replicas:
+#       kubectl -n varnish-load scale deploy/load --replicas=2
+#
+# Usage:
+#   kubectl apply -f test/load/fixtures/drain-friendly.yaml
+#
+# To revert (back to no topology spread / no PDB):
+#   kubectl patch gatewayclassparameters varnish-params \
+#     --type=json -p='[
+#       {"op":"remove","path":"/spec/topologySpreadConstraints"},
+#       {"op":"remove","path":"/spec/podDisruptionBudget"}
+#     ]'
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: varnish-params
+spec:
+  userVCLConfigMapRef:
+    name: varnish-user-vcl
+    namespace: varnish-gateway-system
+    key: user.vcl
+  logging:
+    mode: varnishlog
+  varnishdExtraArgs:
+    - "-p"
+    - "thread_pools=2"
+    - "-s"
+    - "malloc,512m"
+  podDisruptionBudget:
+    minAvailable: 1
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          gateway.networking.k8s.io/gateway-name: load

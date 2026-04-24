@@ -213,7 +213,7 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
 // The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements, hasBackendTLS bool) *appsv1.Deployment {
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements, topologySpread []corev1.TopologySpreadConstraint, hasBackendTLS bool) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 
 	// Replicas is intentionally left unset on the desired object so the operator
@@ -269,9 +269,10 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiv
 					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
-					InitContainers: extraInitContainers,
-					Containers:     r.buildContainers(gateway, effectiveImage, varnishdExtraArgs, logging, extraVolumeMounts, resources, hasBackendTLS),
-					Volumes:        r.buildVolumes(gateway, extraVolumes, hasBackendTLS),
+					InitContainers:                extraInitContainers,
+					Containers:                    r.buildContainers(gateway, effectiveImage, varnishdExtraArgs, logging, extraVolumeMounts, resources, hasBackendTLS),
+					Volumes:                       r.buildVolumes(gateway, extraVolumes, hasBackendTLS),
+					TopologySpreadConstraints:     topologySpread,
 				},
 			},
 		},

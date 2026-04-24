@@ -47,6 +47,11 @@ type InfrastructureConfig struct {
 	// ExtraInitContainers are additional init containers to run before the main container
 	ExtraInitContainers []corev1.Container
 
+	// TopologySpreadConstraints pin pods across failure domains. Changes
+	// trigger a pod restart (new nodes may need to be picked) so this is
+	// part of the infrastructure hash.
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint
+
 	// HasBackendTLS indicates whether backend TLS (via BackendTLSPolicy) is configured.
 	// Changes to this trigger a pod restart to add/remove the CA cert volume and SSL_CERT_FILE env.
 	HasBackendTLS bool
@@ -109,6 +114,11 @@ func (c *InfrastructureConfig) ComputeHash() string {
 	h.Write([]byte{0})
 	if len(c.ExtraInitContainers) > 0 {
 		data, _ := json.Marshal(c.ExtraInitContainers)
+		h.Write(data)
+	}
+	h.Write([]byte{0})
+	if len(c.TopologySpreadConstraints) > 0 {
+		data, _ := json.Marshal(c.TopologySpreadConstraints)
 		h.Write(data)
 	}
 	h.Write([]byte{0})
