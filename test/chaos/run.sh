@@ -37,9 +37,13 @@ source "$env_file"
 
 mark() { "$root/lib/mark.sh" "$@"; }
 
-outdir=$(mktemp -d)
+# shellcheck source=lib/metrics-scrape.sh
+source "$root/lib/metrics-scrape.sh"
 
-# 1. Start k6.
+outdir=$(mktemp -d)
+metrics_dir="$outdir/metrics"
+
+# 1. Start k6 and metric port-forwards.
 k6 run \
   -e GATEWAY_URL="$GATEWAY_URL" \
   -e COLLECTOR_URL="$COLLECTOR_URL" \
@@ -48,7 +52,11 @@ k6 run \
 k6_pid=$!
 echo "k6 started (pid=$k6_pid), log=$outdir/k6.log"
 
+metrics_ok=1
+metrics_scrape_start "$metrics_dir" || metrics_ok=0
+
 cleanup() {
+  metrics_scrape_stop
   if [[ -n "$cr_file" ]]; then
     kubectl delete -f "$cr_file" --ignore-not-found >/dev/null 2>&1 || true
   fi
@@ -60,6 +68,11 @@ trap cleanup EXIT
 
 # 2. Warm-up, then inject fault.
 sleep "$PRE_FAULT_S"
+
+if (( metrics_ok )); then
+  metrics_snapshot fault_start
+  date +%s%3N >"$metrics_dir/.fault_start_ts"
+fi
 
 if [[ -n "$action_script" ]]; then
   mark "${id}_fault_start" "$(basename "$action_script")"
@@ -77,6 +90,11 @@ else
   mark "${id}_fault_end" "$(basename "$cr_file")"
 fi
 
+if (( metrics_ok )); then
+  metrics_snapshot fault_end
+  date +%s%3N >"$metrics_dir/.fault_end_ts"
+fi
+
 # 3. Let things converge.
 sleep "$POST_FAULT_S"
 # The scenario_end marker bounds the analyzer's window for this run.
@@ -84,6 +102,10 @@ sleep "$POST_FAULT_S"
 # is preserved in place so convergence still measures "first correct response
 # after the fault was reverted".
 mark "${id}_scenario_end" "end-of-window"
+
+if (( metrics_ok )); then
+  metrics_snapshot scenario_end
+fi
 
 # 4. Stop k6 and collect.
 kill "$k6_pid" 2>/dev/null || true
@@ -108,8 +130,39 @@ if (( converge_ms > ${MAX_CONVERGE_MS:-0} )); then
   echo "FAIL: converge_ms=$converge_ms > ${MAX_CONVERGE_MS:-0}"; fail=1
 fi
 
+metrics_summary=
+if (( metrics_ok )); then
+  metrics_summary=$("$root/lib/metrics-summary.sh" "$metrics_dir" 2>/dev/null || echo "")
+fi
+
+# Metrics-based thresholds are opt-in. An unset env var skips the check.
+check_metric() {
+  local label=$1 path=$2 limit=$3
+  [[ -z "$limit" ]] && return 0
+  [[ -z "$metrics_summary" ]] && return 0
+  local v
+  v=$(echo "$metrics_summary" | jq -r "$path // 0")
+  if awk -v a="$v" -v b="$limit" 'BEGIN{exit !(a+0 > b+0)}'; then
+    echo "FAIL: $label=$v > $limit"; fail=1
+  fi
+}
+
+check_metric "operator.goroutines_delta"   ".operator.goroutines.delta"  "${MAX_OPERATOR_GOROUTINE_DELTA:-}"
+check_metric "operator.workqueue_depth_end" ".operator.workqueue_depth_end" "${MAX_OPERATOR_WORKQUEUE_DEPTH_END:-}"
+check_metric "operator.reconcile_rate_hz"   ".operator.reconcile_rate_hz"   "${MAX_OPERATOR_RECONCILE_RATE_HZ:-}"
+check_metric "operator.reconcile_avg_ms"    ".operator.reconcile_avg_ms"    "${MAX_OPERATOR_RECONCILE_AVG_MS:-}"
+check_metric "operator.reconcile_errors"    ".operator.reconcile_errors"    "${MAX_OPERATOR_RECONCILE_ERRORS:-}"
+check_metric "operator.open_fds_delta"      ".operator.open_fds.delta"      "${MAX_OPERATOR_FDS_DELTA:-}"
+check_metric "chaperone.goroutines_delta"   ".chaperone.goroutines.delta"   "${MAX_CHAPERONE_GOROUTINE_DELTA:-}"
+check_metric "chaperone.ghost_reload_errors" ".chaperone.ghost_reload_errors" "${MAX_CHAPERONE_RELOAD_ERRORS:-}"
+
 mkdir -p dist
 cp "$outdir/report.json" "dist/${id}-report.json"
+if [[ -n "$metrics_summary" ]]; then
+  echo "$metrics_summary" >"dist/${id}-metrics.json"
+  mkdir -p "dist/${id}-metrics"
+  cp "$metrics_dir"/*.prom "dist/${id}-metrics/" 2>/dev/null || true
+fi
 
 if (( fail )); then
   echo "scenario $id FAILED (report: dist/${id}-report.json)"

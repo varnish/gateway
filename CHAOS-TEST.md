@@ -281,10 +281,52 @@ The ledger format is defined in `test/load/ledger/record.go`. Field
 names are stable — if `run.sh` references a field that doesn't
 appear in the NDJSON, someone renamed something.
 
-## Known gaps (as of this writing)
+## Resource-leak and reconcile-storm checks
 
-- **No scenario has been run against a real cluster.** This is the
-  single most important caveat. Syntax-checked only.
+The harness also snapshots `/metrics` from the operator and one data-plane
+pod's chaperone at `fault_start`, `fault_end`, and `scenario_end`. The
+summary (written to `dist/<ID>-metrics.json`; raw snapshots at
+`dist/<ID>-metrics/*.prom`) captures:
+
+| Field                              | What it catches                     |
+| ---------------------------------- | ----------------------------------- |
+| `operator.goroutines.delta`        | Goroutine leak across the scenario  |
+| `operator.open_fds.delta`          | FD / connection leak                |
+| `operator.rss_bytes.delta`         | Memory growth                       |
+| `operator.workqueue_depth_end`     | Queue failed to drain after fault   |
+| `operator.reconcile_rate_hz`       | Reconcile storm during fault window |
+| `operator.reconcile_avg_ms`        | Mean reconcile duration during fault (regression on blocking calls, lock contention) |
+| `operator.reconcile_errors`        | Reconcile errors during fault       |
+| `chaperone.goroutines.delta`       | Chaperone goroutine leak            |
+| `chaperone.ghost_reload_errors`    | Failed ghost reloads                |
+
+Thresholds are opt-in per scenario — set any of these in the scenario's
+`.env` to gate on them:
+
+```bash
+MAX_OPERATOR_GOROUTINE_DELTA=20      # goroutines between fault_start and scenario_end
+MAX_OPERATOR_WORKQUEUE_DEPTH_END=0   # queue depth summed across controllers at scenario_end
+MAX_OPERATOR_RECONCILE_RATE_HZ=50    # reconciles/sec during the fault window
+MAX_OPERATOR_RECONCILE_AVG_MS=200    # mean ms per reconcile during the fault window
+MAX_OPERATOR_RECONCILE_ERRORS=0      # new errors observed during the fault window
+MAX_OPERATOR_FDS_DELTA=5
+MAX_CHAPERONE_GOROUTINE_DELTA=10
+MAX_CHAPERONE_RELOAD_ERRORS=0
+```
+
+Unset variables skip the check — no defaults are enforced. C03 and C06
+intentionally produce high reconcile rates and should set
+`MAX_OPERATOR_RECONCILE_RATE_HZ` higher than the quieter scenarios, or
+omit it.
+
+Scrapes use ephemeral `kubectl port-forward`s on ports 18090/18091. If the
+chaperone pod being forwarded is rescheduled mid-run (C06 node drain),
+the snapshots for that pod will be empty; the summary reports zeros and
+the threshold check is harmless. For C06 in particular, chaperone-side
+leak checks are unreliable — lean on the operator-side metrics instead.
+
+## Known gaps
+
 - **Convergence is measured only after `fault_end`, not `fault_start`.**
   For scenarios where the interesting transition is at
   fault-start (C05 partition applied), the convergence metric
@@ -292,6 +334,14 @@ appear in the NDJSON, someone renamed something.
 - **The load fixture has 4 HTTPRoutes.** The issue specifies
   "hundreds of HTTPRoutes" for meaningful C02/C03 at scale. Real
   validation needs a larger fixture and a cluster budget.
+- **Leak detection is short-horizon.** Per-scenario metrics snapshots
+  catch leaks that surface in ~3 minutes. A slow per-reconcile goroutine
+  leak needs a long-soak variant (hours) and is not covered.
+- **No pprof capture on fail.** A threshold trip tells you *something*
+  leaked; diagnosing it still requires a manual `kubectl exec` +
+  `/debug/pprof/goroutine`.
+- **No leader-election / status-subresource checks.** A controller that
+  stops writing `Programmed=True` but keeps the data path working passes.
 - **No CI wiring.** Scenarios are manual. A CI job would need: a
   kind cluster per run (expensive), images pre-built, port-forwards
   replaced by in-cluster k6. The run time per scenario (~3 min) is
@@ -323,5 +373,6 @@ inside an action script:
 | Tear down kind             | `make chaos-kind-teardown`                |
 | Run a scenario             | `make chaos-run SCENARIO=C01`             |
 | Inspect ghost.json         | `kubectl exec ... cat /var/run/varnish/ghost.json` |
-| Analyzer JSON from ledger  | `go run ./test/load/analyze -f X.ndjson -json` |
+| Analyzer JSON from ledger  | `go run ./test/load/analyze -f X.ndjson -scenario C01 -json` |
+| Metrics summary from snapshots | `test/chaos/lib/metrics-summary.sh dist/C01-metrics/` |
 | Download ledger            | `curl http://127.0.0.1:9090/download`     |
