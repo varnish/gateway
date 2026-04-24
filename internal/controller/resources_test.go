@@ -390,7 +390,7 @@ func TestBuildDeployment_Basic(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "abc123", nil, nil, nil, nil, false)
+	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "abc123", nil, nil, nil, nil, nil, false)
 
 	if dep.Name != "my-gw" {
 		t.Errorf("name = %q, want %q", dep.Name, "my-gw")
@@ -421,7 +421,7 @@ func TestBuildDeployment_WithImagePullSecrets(t *testing.T) {
 	}
 	gw := testGateway("my-gw", "default")
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "hash", nil, nil, nil, nil, false)
+	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "hash", nil, nil, nil, nil, nil, false)
 
 	secrets := dep.Spec.Template.Spec.ImagePullSecrets
 	if len(secrets) != 2 {
@@ -437,7 +437,7 @@ func TestBuildDeployment_WithLoggingSidecar(t *testing.T) {
 	gw := testGateway("my-gw", "default")
 	logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishncsa"}
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, logging, "hash", nil, nil, nil, nil, false)
+	dep := r.buildDeployment(gw, "test-image:latest", nil, logging, "hash", nil, nil, nil, nil, nil, false)
 
 	containers := dep.Spec.Template.Spec.Containers
 	if len(containers) != 2 {
@@ -452,7 +452,7 @@ func TestBuildDeployment_WithBackendTLS(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "hash", nil, nil, nil, nil, true)
+	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "hash", nil, nil, nil, nil, nil, true)
 
 	// Check that backend-ca volume exists
 	volumes := dep.Spec.Template.Spec.Volumes

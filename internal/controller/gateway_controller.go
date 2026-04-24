@@ -187,6 +187,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	var extraInitContainers []corev1.Container
 	var containerResources *corev1.ResourceRequirements
 	var pdbSpec *gatewayparamsv1alpha1.PodDisruptionBudget
+	var topologySpread []corev1.TopologySpreadConstraint
 	var imageOverride string
 	if params := r.getGatewayClassParameters(ctx, gateway); params != nil {
 		imageOverride = params.Spec.Image
@@ -197,6 +198,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		extraInitContainers = params.Spec.ExtraInitContainers
 		containerResources = params.Spec.Resources
 		pdbSpec = params.Spec.PodDisruptionBudget
+		topologySpread = params.Spec.TopologySpreadConstraints
 	}
 
 	// Resolve effective image: per-GatewayClass override or operator default
@@ -221,15 +223,16 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 
 	// Compute infrastructure hash for pod restart detection
 	infraConfig := InfrastructureConfig{
-		GatewayImage:        effectiveImage,
-		VarnishdExtraArgs:   varnishdExtraArgs,
-		Logging:             logging,
-		ImagePullSecrets:    imagePullSecrets,
-		ListenerSpecs:       listenerSpecs(gateway),
-		ExtraVolumes:        extraVolumes,
-		ExtraVolumeMounts:   extraVolumeMounts,
-		ExtraInitContainers: extraInitContainers,
-		HasBackendTLS:       hasBackendTLS,
+		GatewayImage:              effectiveImage,
+		VarnishdExtraArgs:         varnishdExtraArgs,
+		Logging:                   logging,
+		ImagePullSecrets:          imagePullSecrets,
+		ListenerSpecs:             listenerSpecs(gateway),
+		ExtraVolumes:              extraVolumes,
+		ExtraVolumeMounts:         extraVolumeMounts,
+		ExtraInitContainers:       extraInitContainers,
+		TopologySpreadConstraints: topologySpread,
+		HasBackendTLS:             hasBackendTLS,
 	}
 	infraHash := infraConfig.ComputeHash()
 
@@ -250,7 +253,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	resources = append(resources,
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
-		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources, hasBackendTLS),
+		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources, topologySpread, hasBackendTLS),
 		r.buildService(gateway),
 	)
 	// PDB is opt-in. Create one only if the user asked for it.

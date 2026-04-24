@@ -248,6 +248,13 @@ func (in *GatewayClassParametersSpec) DeepCopyInto(out *GatewayClassParametersSp
 		*out = new(PodDisruptionBudget)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.TopologySpreadConstraints != nil {
+		in, out := &in.TopologySpreadConstraints, &out.TopologySpreadConstraints
+		*out = make([]corev1.TopologySpreadConstraint, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 }
 
 // DeepCopyInto copies the receiver into out.

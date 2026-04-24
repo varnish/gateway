@@ -1,0 +1,80 @@
+# k6 Job template — rendered per scenario by lib/k6-job.sh via envsubst.
+#
+# Placeholders (expanded by envsubst):
+#   ${K6_JOB_NAME}    unique per invocation, e.g. k6-c01-1714000000
+#   ${K6_IMAGE}       e.g. grafana/k6:0.49.0
+#   ${GATEWAY_URL}    http://load.varnish-load.svc.cluster.local
+#   ${COLLECTOR_URL}  http://ledger-collector.varnish-load.svc.cluster.local:8080
+#   ${DURATION}       k6 test duration (e.g. 2m)
+#   ${VUS}            virtual users
+#   ${RPS}            optional constant-arrival-rate target (0 = off)
+#   ${ACTIVE_DEADLINE_S}  Job hard cap (DURATION + slack)
+#
+# Script is mounted from ConfigMap k6-script, which embeds
+# test/load/k6/run.js and its lib/*.js files as a flat tree.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${K6_JOB_NAME}
+  namespace: ${CHAOS_NS}
+  labels:
+    app: k6
+    chaos-scenario: "${SCENARIO}"
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: ${ACTIVE_DEADLINE_S}
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: k6
+        chaos-scenario: ${SCENARIO}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: ${K6_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["k6", "run"]
+          args:
+            - "-e"
+            - "GATEWAY_URL=${GATEWAY_URL}"
+            - "-e"
+            - "COLLECTOR_URL=${COLLECTOR_URL}"
+            - "-e"
+            - "DURATION=${DURATION}"
+            - "-e"
+            - "VUS=${VUS}"
+            - "-e"
+            - "RPS=${RPS}"
+            - "-e"
+            - "ROUTES_JSON_PATH=/k6/routes/routes.json"
+            - "/k6/run.js"
+          volumeMounts:
+            - name: script
+              mountPath: /k6
+            - name: routes
+              mountPath: /k6/routes
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits:   { cpu: "2",  memory: 1Gi }
+      volumes:
+        - name: script
+          configMap:
+            name: k6-script
+            # Keys use "/" in paths to preserve the run.js + lib/*.js layout,
+            # so imports like "./lib/ledger.js" resolve unchanged.
+            items:
+              - key: run.js
+                path: run.js
+              - key: lib__ledger.js
+                path: lib/ledger.js
+              - key: lib__routes.js
+                path: lib/routes.js
+        - name: routes
+          # Optional — present only when load-up-large (or equivalent) has
+          # created this ConfigMap. If absent, k6 falls back to the small
+          # default route table baked into lib/routes.js.
+          configMap:
+            name: k6-routes
+            optional: true

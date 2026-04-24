@@ -4,19 +4,15 @@
 # chaos events.
 #
 # Usage:
-#   source metrics-scrape.sh
-#   metrics_scrape_start <outdir>         # spawn port-forwards, wait for ready
-#   metrics_snapshot <marker>             # write <outdir>/<marker>-{operator,chaperone}.prom
-#   metrics_scrape_stop                   # kill port-forwards
+#   source metrics-scrape.sh            # (after common.sh)
+#   metrics_scrape_start <outdir>       # spawn port-forwards, wait for ready
+#   metrics_snapshot <marker>           # write <outdir>/<marker>-{operator,chaperone}.prom
+#   metrics_scrape_stop                 # kill port-forwards
 #
-# Env overrides:
-#   OPERATOR_NAMESPACE  (default: varnish-gateway-system)
-#   OPERATOR_DEPLOY     (default: varnish-gateway-operator)
-#   GATEWAY_NAMESPACE   (default: varnish-load)
-#   GATEWAY_NAME        (default: load)
+# Reads common.sh: OPERATOR_NS, OPERATOR_SELECTOR, CHAOS_NS, GATEWAY_NAME.
 #
 # Port-forward ports are chosen from the 18000s range to avoid colliding
-# with the gateway/collector forwards that the caller may already own.
+# with the short-lived collector port-forward that run.sh already owns.
 
 _METRICS_OP_PORT=18090
 _METRICS_CH_PORT=18091
@@ -28,23 +24,24 @@ metrics_scrape_start() {
   _METRICS_OUTDIR=${1:?outdir required}
   mkdir -p "$_METRICS_OUTDIR"
 
-  local op_ns=${OPERATOR_NAMESPACE:-varnish-gateway-system}
-  local op_deploy=${OPERATOR_DEPLOY:-varnish-gateway-operator}
-  local gw_ns=${GATEWAY_NAMESPACE:-varnish-load}
+  local op_ns=${OPERATOR_NS:-varnish-gateway-system}
+  local op_sel=${OPERATOR_SELECTOR:-app.kubernetes.io/component=operator}
+  local gw_ns=${CHAOS_NS:-varnish-load}
   local gw_name=${GATEWAY_NAME:-load}
 
-  # Pick one data-plane pod — metrics are per-pod; we track a single one.
-  local ch_pod
+  local op_pod ch_pod
+  op_pod=$(kubectl -n "$op_ns" get pod -l "$op_sel" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
   ch_pod=$(kubectl -n "$gw_ns" get pod \
     -l "gateway.networking.k8s.io/gateway-name=$gw_name" \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-  if [[ -z "$ch_pod" ]]; then
-    echo "metrics-scrape: no chaperone pod for gateway $gw_name in $gw_ns; skipping" >&2
+  if [[ -z "$op_pod" || -z "$ch_pod" ]]; then
+    echo "metrics-scrape: missing pod (operator=$op_pod chaperone=$ch_pod); skipping" >&2
     return 1
   fi
   echo "$ch_pod" >"$_METRICS_OUTDIR/.chaperone-pod"
 
-  kubectl -n "$op_ns" port-forward "deploy/$op_deploy" \
+  kubectl -n "$op_ns" port-forward "pod/$op_pod" \
     "$_METRICS_OP_PORT:8080" >/dev/null 2>&1 &
   _METRICS_OP_PF_PID=$!
   kubectl -n "$gw_ns" port-forward "pod/$ch_pod" \

@@ -79,6 +79,16 @@ type GatewayClassParametersSpec struct {
 	// have also arranged for more than one replica (via an HPA or manual scale).
 	// +optional
 	PodDisruptionBudget *PodDisruptionBudget `json:"podDisruptionBudget,omitempty"`
+
+	// TopologySpreadConstraints lets you pin Gateway pods across failure
+	// domains (nodes, zones). Passed through verbatim to the Deployment's
+	// pod template. Typical use: spread replicas one-per-node so a node
+	// drain doesn't take out all gateway pods at once — pair with a
+	// PodDisruptionBudget so drains block until a replacement is ready.
+	// Changes trigger a rolling restart (included in the infrastructure
+	// hash).
+	// +optional
+	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
 }
 
 // PodDisruptionBudget configures a PodDisruptionBudget for Gateway pods.

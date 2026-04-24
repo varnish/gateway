@@ -163,7 +163,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", nil, nil, nil, nil, false)
+	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", nil, nil, nil, nil, nil, false)
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -233,7 +233,7 @@ func TestBuildDeployment_WithExtras(t *testing.T) {
 		{Name: "vmod-loader", Image: "busybox:latest", Command: []string{"cp", "/src/libvmod.so", "/dst/"}},
 	}
 
-	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil, false)
+	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil, nil, false)
 
 	// Verify extra volumes
 	foundVol := false

@@ -187,7 +187,11 @@ K6_RPS          ?= 50
 K6_DURATION     ?= 1m
 K6_VUS          ?= 10
 
-.PHONY: load-build load-docker load-up load-down load-run load-analyze load-download
+.PHONY: load-build load-docker load-up load-down load-run load-analyze load-download load-up-large load-down-large
+
+# Large-fixture knobs (used by load-up-large).
+LARGE_VHOSTS ?= 50
+LARGE_PATHS  ?= 10
 
 load-build:
 	CGO_ENABLED=0 go build -mod=vendor -o dist/load-echo ./test/load/echo
@@ -213,6 +217,24 @@ load-down:
 	kubectl delete -f test/load/deploy/echo.yaml --ignore-not-found
 	kubectl delete -f test/load/deploy/collector.yaml --ignore-not-found
 
+# Generate and apply a large HTTPRoute fixture for C02/C03 at scale.
+# Layers on top of load-up (which creates the Gateway); the generator
+# emits HTTPRoutes only by default, so run load-up first.
+#   make load-up-large LARGE_VHOSTS=100 LARGE_PATHS=20   -> 2000 routes
+load-up-large:
+	go run ./test/load/fixtures/gen \
+	  -out test/load/fixtures/generated \
+	  -vhosts $(LARGE_VHOSTS) -paths $(LARGE_PATHS) \
+	  -ns $(LOAD_NS)
+	kubectl apply -f test/load/fixtures/generated/routes.yaml
+	kubectl -n $(LOAD_NS) create configmap k6-routes \
+	  --from-file=routes.json=test/load/fixtures/generated/routes.json \
+	  --dry-run=client -o yaml | kubectl apply -f -
+
+load-down-large:
+	kubectl -n $(LOAD_NS) delete httproute -l fixture=generated --ignore-not-found
+	kubectl -n $(LOAD_NS) delete configmap k6-routes --ignore-not-found
+
 # Run k6. Expects GATEWAY_URL and COLLECTOR_URL reachable from the host
 # (typically via kubectl port-forward).
 load-run:
@@ -233,14 +255,18 @@ load-analyze: load-download
 # Chaos scenarios (requires Chaos Mesh + load suite up)
 # ============================================================================
 
-.PHONY: chaos-run chaos-kind-setup chaos-kind-teardown
+.PHONY: chaos-run chaos-suite chaos-kind-setup chaos-kind-teardown
 
 # Usage: make chaos-run SCENARIO=C01
-# Requires GATEWAY_URL and COLLECTOR_URL env (same as load-run).
+# Traffic is generated in-cluster; no GATEWAY_URL / COLLECTOR_URL required.
 chaos-run:
 	@test -n "$(SCENARIO)" || (echo "SCENARIO=<id> required (e.g. C01)"; exit 2)
-	GATEWAY_URL=$(GATEWAY_URL) COLLECTOR_URL=$(COLLECTOR_URL) \
-	  ./test/chaos/run.sh $(SCENARIO)
+	./test/chaos/run.sh $(SCENARIO)
+
+# Run the full chaos suite unattended. Pass-through flags via CHAOS_ARGS:
+#   make chaos-suite CHAOS_ARGS="--scenarios C01,C04 --bail"
+chaos-suite:
+	./test/chaos/suite.sh $(CHAOS_ARGS)
 
 chaos-kind-setup:
 	./test/chaos/kind-setup.sh

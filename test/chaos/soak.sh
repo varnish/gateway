@@ -33,11 +33,14 @@ source "$env_file"
 : "${GATEWAY_URL:?}"
 : "${COLLECTOR_URL:?}"
 
-op_ns=${OPERATOR_NAMESPACE:-varnish-gateway-system}
-op_deploy=${OPERATOR_DEPLOY:-varnish-gateway-operator}
-gw_ns=${GATEWAY_NAMESPACE:-varnish-load}
+# shellcheck source=lib/common.sh
+source "$root/lib/common.sh"
+
+op_ns=${OPERATOR_NS:-varnish-gateway-system}
+op_sel=${OPERATOR_SELECTOR:-app.kubernetes.io/component=operator}
+gw_ns=${CHAOS_NS:-varnish-load}
 gw_name=${GATEWAY_NAME:-load}
-route_ns=${ROUTE_NAMESPACE:-varnish-load}
+route_ns=${CHAOS_NS:-varnish-load}
 
 outdir="dist/C09-soak"
 mkdir -p "$outdir" "$outdir/snapshots"
@@ -47,7 +50,7 @@ proxy_port=18001
 kubectl proxy --port="$proxy_port" >/dev/null 2>&1 &
 proxy_pid=$!
 
-op_pod=$(kubectl -n "$op_ns" get pod -l app.kubernetes.io/component=operator \
+op_pod=$(kubectl -n "$op_ns" get pod -l "$op_sel" \
   -o jsonpath='{.items[0].metadata.name}')
 ch_pod=$(kubectl -n "$gw_ns" get pod -l "gateway.networking.k8s.io/gateway-name=$gw_name" \
   -o jsonpath='{.items[0].metadata.name}')
