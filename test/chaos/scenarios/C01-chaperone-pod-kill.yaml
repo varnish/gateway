@@ -1,0 +1,22 @@
+# C01: kill one chaperone pod and verify traffic recovers with no misroutes.
+#
+# Chaos Mesh selects a single gateway data-plane pod (chaperone + varnishd +
+# ghost) and sends SIGKILL. The deployment should reschedule; k6 traffic
+# continues throughout. The runner emits `chaos` markers around the kill
+# so the analyzer can measure convergence.
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: c01-chaperone-pod-kill
+  namespace: varnish-load
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - varnish-load
+    labelSelectors:
+      # Gateway data-plane pods live in the Gateway's namespace and carry
+      # the gateway-name label. The load fixture names the Gateway `load`.
+      gateway.networking.k8s.io/gateway-name: load
+  gracePeriod: 0

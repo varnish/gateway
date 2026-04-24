@@ -230,6 +230,25 @@ load-analyze: load-download
 	go run ./test/load/analyze -f dist/ledger.ndjson
 
 # ============================================================================
+# Chaos scenarios (requires Chaos Mesh + load suite up)
+# ============================================================================
+
+.PHONY: chaos-run chaos-kind-setup chaos-kind-teardown
+
+# Usage: make chaos-run SCENARIO=C01
+# Requires GATEWAY_URL and COLLECTOR_URL env (same as load-run).
+chaos-run:
+	@test -n "$(SCENARIO)" || (echo "SCENARIO=<id> required (e.g. C01)"; exit 2)
+	GATEWAY_URL=$(GATEWAY_URL) COLLECTOR_URL=$(COLLECTOR_URL) \
+	  ./test/chaos/run.sh $(SCENARIO)
+
+chaos-kind-setup:
+	./test/chaos/kind-setup.sh
+
+chaos-kind-teardown:
+	./test/chaos/kind-setup.sh teardown
+
+# ============================================================================
 # CI/Testing
 # ============================================================================
 

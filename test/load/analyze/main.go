@@ -50,11 +50,13 @@ type convergenceSample struct {
 
 func main() {
 	var (
-		path    string
-		verbose bool
+		path     string
+		verbose  bool
+		jsonMode bool
 	)
 	flag.StringVar(&path, "f", "", "Path to NDJSON ledger (default: stdin)")
 	flag.BoolVar(&verbose, "v", false, "Print per-misroute detail")
+	flag.BoolVar(&jsonMode, "json", false, "Emit machine-readable JSON report on stdout")
 	flag.Parse()
 
 	var in io.Reader = os.Stdin
@@ -74,9 +76,15 @@ func main() {
 	}
 
 	r := analyze(entries, events, verbose)
+	if jsonMode {
+		// In JSON mode, the caller (e.g. run.sh) applies its own
+		// thresholds — don't pre-empt it with our own exit code.
+		writeJSON(os.Stdout, r)
+		return
+	}
 	printReport(r)
 
-	// Exit non-zero if we found correctness violations, so CI can gate on it.
+	// Text mode: exit non-zero on any violation, so CI can gate on it.
 	if r.drops > 0 || r.misroutes > 0 || r.duplicates > 0 {
 		os.Exit(2)
 	}
@@ -212,6 +220,44 @@ func analyze(entries map[string]*entry, events []ledger.Record, verbose bool) re
 	}
 
 	return r
+}
+
+// writeJSON emits a machine-readable report for the chaos runner to
+// threshold-check with jq. Field names are stable.
+func writeJSON(w io.Writer, r result) {
+	convergence := map[string]int64{}
+	for _, c := range r.convergence {
+		// Overwrite is fine — events are uniquely named per run.
+		convergence[c.event] = c.firstCorrectMs
+	}
+	var dropRatio float64
+	if r.total > 0 {
+		dropRatio = float64(r.drops) / float64(r.total)
+	}
+	payload := struct {
+		Total       int              `json:"total"`
+		Drops       int              `json:"drops"`
+		DropRatio   float64          `json:"drop_ratio"`
+		Misroutes   int              `json:"misroutes"`
+		Duplicates  int              `json:"duplicates"`
+		ClientErr   int              `json:"client_errors"`
+		Non2xx      int              `json:"non_2xx"`
+		StatusCodes map[int]int      `json:"status_codes"`
+		Convergence map[string]int64 `json:"convergence"`
+	}{
+		Total:       r.total,
+		Drops:       r.drops,
+		DropRatio:   dropRatio,
+		Misroutes:   r.misroutes,
+		Duplicates:  r.duplicates,
+		ClientErr:   r.clientErr,
+		Non2xx:      r.non2xx,
+		StatusCodes: r.statusCodes,
+		Convergence: convergence,
+	}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(payload)
 }
 
 func printReport(r result) {
