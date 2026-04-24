@@ -75,6 +75,7 @@ likely pass too. C06 needs multi-node, C07 needs TLS fixtures.
 | C06 | Gateway pods reschedule during node drain                    |
 | C07 | Cert-manager hot-reload works under active traffic           |
 | C08 | Controller writes don't race on the shared ConfigMap         |
+| C09 | Operator/chaperone don't leak goroutines/FDs/memory under sustained churn (soak) |
 
 ## Architecture of the harness
 
@@ -325,6 +326,63 @@ the snapshots for that pod will be empty; the summary reports zeros and
 the threshold check is harmless. For C06 in particular, chaperone-side
 leak checks are unreliable — lean on the operator-side metrics instead.
 
+## Long-horizon soak (C09)
+
+C01–C08 run for ~3 minutes each. That catches leaks visible within the
+fault window but misses per-event leaks where N events need to accumulate
+— typically 1 goroutine per ~1k events, which takes hours to surface.
+
+`test/chaos/soak.sh` is a separate runner (not a `run.sh` scenario) that
+drives HTTPRoute churn continuously for `SOAK_HOURS` and takes metric
+snapshots every `SNAPSHOT_INTERVAL_S`. A linear fit through each metric's
+series gives a slope; threshold checks fail the run if the slope is
+positive beyond the scenario's tolerance.
+
+```bash
+source ./test/chaos/scenarios/C09.env   # SOAK_HOURS, intervals, thresholds
+./test/chaos/soak.sh
+```
+
+Differences from `run.sh`:
+
+- **Continuous driver, not a fault window.** One apply+delete cycle every
+  `CHURN_INTERVAL_S` (default 60s) — the soak itself is the fault.
+- **Many snapshots.** Each appends one line to `dist/C09-soak/metrics.ndjson`;
+  raw `.prom` files kept in `dist/C09-soak/snapshots/` for pprof-style
+  dives if a slope trips.
+- **`kubectl proxy` instead of `kubectl port-forward`.** Port-forwards
+  drop on the slightest network hiccup; proxy survives pod reschedules
+  and holds connections over hours. Requires `pods/proxy` RBAC.
+- **Slopes, not deltas.** Fails on sustained trend, not endpoint delta.
+  A 5-goroutine spike that decays back to baseline is a no-op; a
+  consistent 0.5/min climb over 3 hours is a leak.
+
+Output: `dist/C09-soak/soak-report.json`
+
+```json
+{
+  "samples": 37, "duration_min": 180.0,
+  "op_goroutines": {"start": 120, "end": 124, "slope_per_min": 0.022, "r2": 0.31},
+  "op_rss_bytes":  {"start": 5.24e+07, "end": 5.38e+07, "slope_per_min": 7840, "r2": 0.78},
+  ...
+}
+```
+
+Thresholds (all opt-in, see `C09.env`):
+
+```bash
+MAX_OP_GOROUTINE_SLOPE_PER_MIN=0.5   # +30 goroutines/h sustained → leak
+MAX_OP_RSS_SLOPE_PER_MIN=200000      # 200KB/min = 12MB/h
+MAX_OP_FDS_SLOPE_PER_MIN=0.02        # any positive slope on fds is suspect
+MAX_CH_GOROUTINE_SLOPE_PER_MIN=0.5
+```
+
+Calibrate from a clean baseline run — real slopes are never exactly 0
+(GC cycles, informer resync, legitimate growth), and thresholds need
+headroom above the noise floor. 3h is the default for routine soaks;
+24h catches most of what longer runs would, and 72h is rarely worth the
+cluster-rental cost for leak detection alone.
+
 ## Known gaps
 
 - **Convergence is measured only after `fault_end`, not `fault_start`.**
@@ -334,12 +392,18 @@ leak checks are unreliable — lean on the operator-side metrics instead.
 - **The load fixture has 4 HTTPRoutes.** The issue specifies
   "hundreds of HTTPRoutes" for meaningful C02/C03 at scale. Real
   validation needs a larger fixture and a cluster budget.
-- **Leak detection is short-horizon.** Per-scenario metrics snapshots
-  catch leaks that surface in ~3 minutes. A slow per-reconcile goroutine
-  leak needs a long-soak variant (hours) and is not covered.
-- **No pprof capture on fail.** A threshold trip tells you *something*
-  leaked; diagnosing it still requires a manual `kubectl exec` +
-  `/debug/pprof/goroutine`.
+- **Soak ledger doesn't rotate.** C09 at 20 RPS × 3h produces ~200MB of
+  k6 ledger, which the analyzer reads into memory fine. At 72h × 50 RPS
+  (~6GB) it would OOM — the collector rotates at 1GB but the analyzer
+  loads whole. Not a problem at the 3h default; becomes one for longer
+  soaks.
+- **No pprof capture on fail.** A threshold trip (either scenario or
+  soak) tells you *something* leaked; diagnosing it still requires a
+  manual `kubectl exec` + `/debug/pprof/goroutine`. The `.prom`
+  snapshots C09 keeps are a step toward this, but aren't full profiles.
+- **Soak driver is single-shape.** C09 only churns HTTPRoutes. A per-Gateway
+  annotation thrash or a mix with occasional pod kills would exercise
+  different code paths, but isn't there yet.
 - **No leader-election / status-subresource checks.** A controller that
   stops writing `Programmed=True` but keeps the data path working passes.
 - **No CI wiring.** Scenarios are manual. A CI job would need: a
@@ -351,7 +415,7 @@ leak checks are unreliable — lean on the operator-side metrics instead.
 
 Add a scenario:
 
-1. Pick the next ID (e.g., C09) and decide flavor:
+1. Pick the next ID (e.g., C10) and decide flavor:
    - Chaos Mesh CR → `test/chaos/scenarios/C09-<name>.yaml`
    - Action script → `test/chaos/scenarios/C09-<name>.sh`
 2. Add `test/chaos/scenarios/C09.env` with `DURATION`,
@@ -375,4 +439,6 @@ inside an action script:
 | Inspect ghost.json         | `kubectl exec ... cat /var/run/varnish/ghost.json` |
 | Analyzer JSON from ledger  | `go run ./test/load/analyze -f X.ndjson -scenario C01 -json` |
 | Metrics summary from snapshots | `test/chaos/lib/metrics-summary.sh dist/C01-metrics/` |
+| Run soak (default 3h)      | `./test/chaos/soak.sh`                    |
+| Soak slope report          | `test/chaos/lib/soak-fit.sh dist/C09-soak/metrics.ndjson` |
 | Download ledger            | `curl http://127.0.0.1:9090/download`     |
