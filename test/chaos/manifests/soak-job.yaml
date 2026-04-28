@@ -1,0 +1,153 @@
+# In-cluster soak runner. Runs test/chaos/soak.sh in a Job pod for
+# SOAK_HOURS, scraping operator + chaperone /metrics directly via pod IPs
+# (no kubectl proxy), churning HTTPRoutes against the gateway, and
+# writing the NDJSON series + final report to a PVC.
+#
+# Companion: a parallel k6 Job submitted by lib/k6-job.sh provides
+# correctness traffic for the same window.
+#
+# Placeholders (expanded by envsubst from launch-soak-cluster.sh):
+#   ${SOAK_NAMESPACE}     namespace the runner Job + PVC live in
+#   ${SOAK_JOB_NAME}      unique per launch, e.g. soak-1714000000
+#   ${SOAK_IMAGE}         alpine/k8s-style image with bash+kubectl+jq+curl
+#   ${SOAK_HOURS}         run length
+#   ${SNAPSHOT_INTERVAL_S}
+#   ${CHURN_INTERVAL_S}
+#   ${CHURN_ROUTES}
+#   ${OPERATOR_NS}
+#   ${OPERATOR_SELECTOR}
+#   ${CHAOS_NS}
+#   ${GATEWAY_NAME}
+#   ${ACTIVE_DEADLINE_S}  Job hard cap, SOAK_HOURS*3600 + slack
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: soak-runner
+  namespace: ${SOAK_NAMESPACE}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: soak-runner
+rules:
+  # Resolve operator + chaperone pods, read pod IPs for direct /metrics curl.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  # Apply/delete churn HTTPRoutes (HTTPRoute lives in gateway.networking.k8s.io).
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: [httproutes]
+    verbs: [get, list, watch, create, update, patch, delete]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: soak-runner
+subjects:
+  - kind: ServiceAccount
+    name: soak-runner
+    namespace: ${SOAK_NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: soak-runner
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Holds metrics.ndjson + snapshots/*.prom + soak-report.json. After the
+# Job completes, the pod stays around (sleep tail at end of script) so a
+# kubectl cp can extract the artifacts. PVC is retained until manually
+# deleted so re-runs can write to it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: soak-data
+  namespace: ${SOAK_NAMESPACE}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${SOAK_JOB_NAME}
+  namespace: ${SOAK_NAMESPACE}
+  labels:
+    app: soak-runner
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: ${ACTIVE_DEADLINE_S}
+  ttlSecondsAfterFinished: 86400  # keep the pod for 24h after completion for kubectl cp
+  template:
+    metadata:
+      labels:
+        app: soak-runner
+    spec:
+      restartPolicy: Never
+      serviceAccountName: soak-runner
+      securityContext:
+        fsGroup: 65532  # ensure the PVC mount is group-writable for non-root images
+      containers:
+        - name: soak
+          image: ${SOAK_IMAGE}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            # ConfigMap keys can't contain "/", so the lib/ files are
+            # stored as "lib__<name>" and we fan them out into a real
+            # lib/ subdir before running soak.sh. Also synthesise a
+            # scenarios/ dir for the C09.env source path.
+            - |
+              set -euo pipefail
+              mkdir -p /work/lib /work/scenarios
+              cp /chaos/soak.sh /work/soak.sh
+              cp /chaos/C09.env /work/scenarios/C09.env
+              for f in /chaos/lib__*.sh; do
+                cp "$f" "/work/lib/$(basename "$f" | sed 's/^lib__//')"
+              done
+              chmod +x /work/soak.sh
+              cd /work
+              ./soak.sh
+              echo "soak finished — sleeping so kubectl cp can retrieve results"
+              sleep 86400
+          env:
+            - name: SOAK_HOURS
+              value: "${SOAK_HOURS}"
+            - name: SNAPSHOT_INTERVAL_S
+              value: "${SNAPSHOT_INTERVAL_S}"
+            - name: CHURN_INTERVAL_S
+              value: "${CHURN_INTERVAL_S}"
+            - name: CHURN_ROUTES
+              value: "${CHURN_ROUTES}"
+            - name: OPERATOR_NS
+              value: "${OPERATOR_NS}"
+            - name: OPERATOR_SELECTOR
+              value: "${OPERATOR_SELECTOR}"
+            - name: CHAOS_NS
+              value: "${CHAOS_NS}"
+            - name: GATEWAY_NAME
+              value: "${GATEWAY_NAME}"
+            - name: SOAK_OUTDIR
+              value: /data/C09-soak
+          volumeMounts:
+            - name: scripts
+              mountPath: /chaos
+            - name: data
+              mountPath: /data
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits:   { cpu: "1",  memory: 512Mi }
+      volumes:
+        - name: scripts
+          configMap:
+            name: soak-scripts
+            defaultMode: 0755
+        - name: data
+          persistentVolumeClaim:
+            claimName: soak-data

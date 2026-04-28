@@ -9,8 +9,11 @@ against a single-node kind cluster and pass with healthy numbers (see
 "Reference numbers" below). C02 (scale storm, oversized for single-node),
 C05 (apiserver partition), C06 (needs multi-node) and C07 (needs TLS
 fixture) are unverified end-to-end and await a real multi-node cluster.
-Several harness bugs surfaced during the kind run have been fixed —
-see "Harness bugs fixed during kind validation" below.
+C09 (long-horizon soak) is operational; thresholds ship commented out
+until a clean baseline is run and committed (see "Calibrating
+thresholds" under the C09 section). Several harness bugs surfaced
+during the kind run have been fixed — see "Harness bugs fixed during
+kind validation" below.
 
 For scenario-level reference (the table of P0/P1 scenarios and their
 pass criteria) see [`test/chaos/README.md`](test/chaos/README.md).
@@ -425,122 +428,239 @@ down). Diff against a known-good baseline with `go tool pprof -base`.
 
 ## Long-horizon soak (C09)
 
-C01–C08 run for ~3 minutes each. That catches leaks visible within the
-fault window but misses per-event leaks where N events need to accumulate
-— typically 1 goroutine per ~1k events, which takes hours to surface.
+C01–C08 catch leaks visible within their ~3-minute fault window. Per-event
+leaks (typically 1 goroutine per ~1k reconciles) need hours of sustained
+driver activity to surface. C09 fills that gap with a separate runner —
+`test/chaos/soak.sh`, *not* a `run.sh` scenario.
 
-`test/chaos/soak.sh` is a separate runner (not a `run.sh` scenario) that
-drives HTTPRoute churn continuously for `SOAK_HOURS` and takes metric
-snapshots every `SNAPSHOT_INTERVAL_S`. A linear fit through each metric's
-series gives a slope; threshold checks fail the run if the slope is
-positive beyond the scenario's tolerance.
+The runner drives continuous HTTPRoute churn for `SOAK_HOURS`, snapshots
+operator + chaperone metrics every `SNAPSHOT_INTERVAL_S`, fits a linear
+slope through each metric's series, and fails the run if any slope
+exceeds its threshold. Slopes (not endpoint deltas) — a 5-goroutine
+spike that decays is a no-op, a 0.5/min climb over 3 hours is a leak.
+
+### Pre-flight
 
 ```bash
-source ./test/chaos/scenarios/C09.env   # SOAK_HOURS, intervals, thresholds
-./test/chaos/soak.sh
+# 1. Cluster + load fixture up.
+make chaos-kind-setup
+make load-up
+
+# 2. RBAC sanity. The runner uses `kubectl proxy` for hours; your
+#    kubeconfig needs pods/proxy on both namespaces. A regular admin
+#    context has it; restricted SAs may not.
+kubectl auth can-i get pods/proxy --namespace varnish-gateway-system
+kubectl auth can-i get pods/proxy --namespace varnish-load
+# Both must answer yes.
+
+# 3. Single-replica operator. The runner picks the lexically first
+#    matching pod and warns on multi-replica — fine for kind, but in
+#    HA setups deploy a soak-only replica or filter by leader lease.
+kubectl -n varnish-gateway-system get pods \
+  -l app.kubernetes.io/component=operator
+# Should show exactly one pod.
 ```
 
-Differences from `run.sh`:
+### Run
 
-- **Continuous driver, not a fault window.** One apply+delete cycle every
-  `CHURN_INTERVAL_S` (default 60s) — the soak itself is the fault.
-- **Many snapshots.** Each appends one line to `dist/C09-soak/metrics.ndjson`;
-  raw `.prom` files kept in `dist/C09-soak/snapshots/` for pprof-style
-  dives if a slope trips.
-- **`kubectl proxy` instead of `kubectl port-forward`.** Port-forwards
-  drop on the slightest network hiccup; proxy survives pod reschedules
-  and holds connections over hours. Requires `pods/proxy` RBAC.
-- **Slopes, not deltas.** Fails on sustained trend, not endpoint delta.
-  A 5-goroutine spike that decays back to baseline is a no-op; a
-  consistent 0.5/min climb over 3 hours is a leak.
+```bash
+# Default: 3h, snapshots every 5min, 20 routes/min churn, k6 at 20 RPS.
+./test/chaos/soak.sh
 
-Each NDJSON snapshot record carries the following fields. Counters are
-preserved as raw cumulative values; rates and trends are derived in the
-fitter so a different window can be re-applied post-hoc:
+# Override duration / churn intensity inline:
+SOAK_HOURS=24 CHURN_INTERVAL_S=30 ./test/chaos/soak.sh
 
-| Field | Source | Used for |
+# The runner is foreground; submit under nohup or tmux for multi-hour
+# runs. Output lands in dist/C09-soak/.
+```
+
+| Knob (`scenarios/C09.env`) | Default | Effect |
 | --- | --- | --- |
-| `op_goroutines`, `op_open_fds`, `op_rss_bytes` | `go_goroutines`, `process_open_fds`, `process_resident_memory_bytes` | leak gauges |
-| `op_heap_inuse` | `go_memstats_heap_inuse_bytes` | Go-heap leak (less RSS noise than RSS alone) |
-| `op_workqueue_depth` | sum of `workqueue_depth` | queue not draining = leak |
-| `op_reconcile_total` | sum of `controller_runtime_reconcile_total` | reconcile cadence |
-| `op_reconcile_time_sum`, `op_reconcile_time_count` | histogram of reconcile durations | mean reconcile latency |
-| `op_reconcile_errors` | sum of `..._reconcile_errors_total` | error rate trend |
-| `op_process_start_time` | `process_start_time_seconds` | mid-run restart detection |
-| `ch_goroutines`, `ch_open_fds`, `ch_rss_bytes`, `ch_heap_inuse` | as above on chaperone | leak gauges |
-| `ch_ghost_reloads`, `ch_ghost_reload_errors` | `chaperone_ghost_reload(_errors)?_total` | reload health |
-| `ch_process_start_time` | `process_start_time_seconds` | mid-run restart detection |
+| `SOAK_HOURS` | 3 | Run length. 24h catches most of what 72h would; 72h rarely worth the cluster cost over 24h for leak detection alone. |
+| `SNAPSHOT_INTERVAL_S` | 300 | Time between scrapes. 5min × 3h → 36 samples. |
+| `CHURN_INTERVAL_S` | 60 | Apply+delete cycle. Lower = more reconcile pressure. |
+| `CHURN_ROUTES` | 20 | Routes per cycle. 20 × 60 × 3 ≈ 72k apply/delete ops over 3h. |
+| `SOAK_RPS` | 20 | k6 traffic — correctness spot-check, not the leak signal. |
 
-Output: `dist/C09-soak/soak-report.json`
+### Live monitoring
+
+While the run is in flight:
+
+```bash
+# Watch the snapshot stream. New line every SNAPSHOT_INTERVAL_S.
+tail -f dist/C09-soak/metrics.ndjson | jq -c 'del(.ts)'
+
+# Spot-check the partial slope at any point — soak-fit is happy
+# with an incomplete NDJSON.
+test/chaos/lib/soak-fit.sh dist/C09-soak/metrics.ndjson | jq
+
+# Confirm k6 is still driving traffic (correctness, not leak signal):
+tail -f dist/C09-soak/k6.log
+
+# Kill a hung soak (cleans up routes, k6, kubectl proxy via the trap):
+pkill -f 'test/chaos/soak.sh'
+```
+
+### Reading the report
+
+Final report at `dist/C09-soak/soak-report.json`. Each metric is a
+`{start, end, slope_per_min, r2}` object:
 
 ```json
 {
   "samples": 37, "duration_min": 180.0,
   "restart_detected": {"op": false, "ch": false},
   "op_goroutines":             {"start": 120, "end": 124, "slope_per_min": 0.022, "r2": 0.31},
-  "op_heap_inuse":             {"start": 3.0e+07, "end": 3.1e+07, "slope_per_min": 670, "r2": 0.42},
-  "op_rss_bytes":              {"start": 5.24e+07, "end": 5.38e+07, "slope_per_min": 7840, "r2": 0.78},
-  "op_open_fds":               {...},
-  "op_workqueue_depth":        {...},
+  "op_heap_inuse":             {"start": 30000000, "end": 31200000, "slope_per_min": 670, "r2": 0.42},
+  "op_workqueue_depth":        {"start": 0, "end": 0, "slope_per_min": 0.0, "r2": 1.0},
   "op_reconcile_rate_per_min": {"start": 30.0, "end": 30.0, "slope_per_min": 0.0, "r2": 1.0},
-  "op_reconcile_rate_trend":   {...},   /* d/dt of reconciles/min */
-  "op_reconcile_avg_ms_trend": {...},   /* d/dt of mean reconcile ms */
-  "op_reconcile_errors_per_min": {...},
-  "ch_goroutines":             {...},
-  "ch_heap_inuse":             {...},
-  "ch_ghost_reload_errors_per_min": {...}
+  "op_reconcile_rate_trend":   { ... d/dt of reconciles/min ... },
+  "op_reconcile_avg_ms_trend": { ... d/dt of mean reconcile ms ... },
+  ...
 }
 ```
 
-Thresholds (all opt-in, see `C09.env`):
+Read in this order:
+
+1. **`restart_detected`.** If either side is `true`, slopes are
+   meaningless — process restarted mid-soak (OOM-kill, kubelet
+   eviction, manual delete). Look at `dist/C09-soak/snapshots/` for
+   `.prom` files straddling the gap. The run is reported FAILED
+   regardless of slope thresholds.
+2. **`op_workqueue_depth.slope_per_min`.** Should be ≤ 0. Positive =
+   work coming in faster than reconcilers drain → reconcile-loop
+   regression.
+3. **`op_reconcile_avg_ms_trend.slope_per_min`.** ms-per-minute change
+   in mean reconcile latency. Positive = reconciles getting slower.
+4. **`op_reconcile_rate_trend.slope_per_min`.** Reconciles/min/min —
+   positive means the controller is being invoked more often over
+   time (informer thrash, requeue storm).
+5. **Goroutines / heap / fds / RSS.** Sustained positive slope with
+   r² ≥ ~0.5 is a real trend. r² < 0.3 with a small slope is noise.
+
+Each scrape's raw `.prom` files are kept in
+`dist/C09-soak/snapshots/op-<ts>.prom` and `ch-<ts>.prom` for ad-hoc
+queries (specific histogram buckets, custom label slicing, etc.).
+
+#### NDJSON field reference
+
+| Field | Source | Used for |
+| --- | --- | --- |
+| `op_goroutines`, `op_open_fds`, `op_rss_bytes` | `go_goroutines`, `process_open_fds`, `process_resident_memory_bytes` | leak gauges |
+| `op_heap_inuse` | `go_memstats_heap_inuse_bytes` | Go-heap leak (less RSS noise) |
+| `op_workqueue_depth` | sum of `workqueue_depth` | queue not draining = leak |
+| `op_reconcile_total` | sum of `controller_runtime_reconcile_total` | reconcile cadence |
+| `op_reconcile_time_sum`, `op_reconcile_time_count` | reconcile-duration histogram | mean reconcile latency |
+| `op_reconcile_errors` | sum of `..._reconcile_errors_total` | error-rate trend |
+| `op_process_start_time` | `process_start_time_seconds` | restart detection |
+| `ch_*` | as above on chaperone | matching gauges |
+| `ch_ghost_reloads`, `ch_ghost_reload_errors` | `chaperone_ghost_reload(_errors)?_total` | reload health |
+
+Markers: `phase: "podchange"` records appear when a pod gets renamed
+(e.g. chaperone reschedule). The fitter filters them out — pod renames
+don't fail the run, only `process_start_time` changes do. Scrape
+failures emit JSON `null` for the affected fields rather than 0; the
+fitter skips null samples instead of treating them as a cliff.
+
+### Failure triage
+
+When a slope threshold trips, soak.sh captures four pprof profiles per
+pod into `dist/C09-soak/pprof-fail/` before exiting:
+
+| File | What's in it |
+| --- | --- |
+| `<side>-goroutine.txt` | every goroutine, full stack — read this first |
+| `<side>-goroutine.pb.gz` | binary, for `go tool pprof` |
+| `<side>-heap.pb.gz` | live heap snapshot |
+| `<side>-allocs.pb.gz` | cumulative allocation profile |
 
 ```bash
-# Memory / leak indicators
-MAX_OP_GOROUTINE_SLOPE_PER_MIN=0.5    # +30 goroutines/h sustained → leak
-MAX_OP_HEAP_SLOPE_PER_MIN=100000      # Go heap, less noisy than RSS
-MAX_OP_RSS_SLOPE_PER_MIN=200000       # 200KB/min = 12MB/h
-MAX_OP_FDS_SLOPE_PER_MIN=0.02         # any positive slope on fds is suspect
-MAX_CH_GOROUTINE_SLOPE_PER_MIN=0.5
-MAX_CH_HEAP_SLOPE_PER_MIN=100000
-MAX_CH_FDS_SLOPE_PER_MIN=0.02
-MAX_CH_RSS_SLOPE_PER_MIN=200000
+# Goroutine-leak signature: many stacks pinned on the same function.
+less dist/C09-soak/pprof-fail/operator-goroutine.txt
+# Or just count by top-of-stack:
+awk '/^goroutine/{getline; sub(/\([^)]*\)$/, ""); print}' \
+  dist/C09-soak/pprof-fail/operator-goroutine.txt | sort | uniq -c | sort -rn | head
 
-# Reconcile health
-MAX_OP_WORKQUEUE_DEPTH_SLOPE_PER_MIN=0.1  # queue should drain, not climb
-MAX_OP_RECONCILE_ERROR_RATE_PER_MIN=0     # any sustained error rate is bad
-MAX_OP_RECONCILE_RATE_TREND=0.5           # d/dt of reconciles/min
-MAX_OP_RECONCILE_AVG_MS_TREND=1.0         # d/dt of mean reconcile ms
-MAX_CH_GHOST_RELOAD_ERROR_RATE_PER_MIN=0
+# Heap diff against a passing baseline (kept under pprof-final/ from
+# a prior good run; see "Calibrating thresholds" for the workflow).
+go tool pprof -base dist/baseline-pprof-final/operator-heap.pb.gz \
+                    dist/C09-soak/pprof-fail/operator-heap.pb.gz
+# (in pprof) top -cum
+# (in pprof) list <suspect-function>
+
+# Cumulative allocs — "where did all those bytes come from":
+go tool pprof dist/C09-soak/pprof-fail/operator-allocs.pb.gz
 ```
 
-Calibrate from a clean baseline run — real slopes are never exactly 0
-(GC cycles, informer resync, legitimate growth), and thresholds need
-headroom above the noise floor. 3h is the default for routine soaks;
-24h catches most of what longer runs would, and 72h is rarely worth the
-cluster-rental cost for leak detection alone.
+For a live profile *during* a running soak (debug locally without
+killing the run), the pprof endpoints are reachable through the
+existing kubectl proxy on port 18001:
 
-**Restart detection.** If either side's `process_start_time_seconds`
-changes mid-soak, the run fails unconditionally regardless of slope
-thresholds — a level-shifted series produces meaningless slopes. The raw
-`.prom` snapshots straddling the restart are the right place to look.
+```bash
+op_pod=$(kubectl -n varnish-gateway-system get pod \
+  -l app.kubernetes.io/component=operator \
+  -o jsonpath='{.items[0].metadata.name}')
+curl -s "http://127.0.0.1:18001/api/v1/namespaces/varnish-gateway-system/pods/${op_pod}:metrics/proxy/debug/pprof/goroutine?debug=2" \
+  | head -200
+```
 
-**Pod renames** (e.g., chaperone reschedule): tracked separately. A
-record with `phase="podchange"` is appended to the NDJSON; soak-fit
-filters these out before fitting. Renamed pods do not in themselves fail
-the run — only `process_start_time` changes do.
+A FAIL with `restart_detected.op = true` (or `.ch`) means the process
+died and respawned mid-soak; check `kubectl logs --previous` for that
+pod, then look at the `.prom` files immediately before/after the
+restart timestamp in `snapshots/`.
 
-**Scrape failures** (curl error or empty `.prom` file) emit JSON `null`
-for the affected fields rather than 0; the fitter skips null samples
-instead of treating them as a cliff in the series.
+### Calibrating thresholds
 
-**pprof on threshold trip.** Both operator and chaperone expose
-`/debug/pprof/{goroutine,heap,allocs,profile,trace}` on their existing
-metrics ports (operator 8080, chaperone 8080 in-pod). When any C09
-threshold fails, soak.sh fetches `goroutine?debug=2`, `goroutine`,
-`heap`, and `allocs` from both pods into `dist/C09-soak/pprof-fail/`. On
-a passing run, the same set is captured into `pprof-final/` as a
-baseline for future diffs. The per-scenario harness (`run.sh`) does the
-same into `dist/<ID>-pprof/` when any `MAX_*` metric threshold trips.
+The `MAX_*` knobs in `test/chaos/scenarios/C09.env` ship commented out.
+Until you've established a baseline, the soak is observation-only on
+slopes (restart detection still gates).
+
+```bash
+# 1. Run a clean baseline. No active development, no in-flight bugs;
+#    cluster idle other than the soak driver itself.
+./test/chaos/soak.sh
+cp dist/C09-soak/soak-report.json dist/baseline-soak-report.json
+cp -r dist/C09-soak/pprof-final   dist/baseline-pprof-final
+
+# 2. Read the observed slopes:
+jq '{
+  goroutines: .op_goroutines.slope_per_min,
+  heap:       .op_heap_inuse.slope_per_min,
+  rss:        .op_rss_bytes.slope_per_min,
+  fds:        .op_open_fds.slope_per_min,
+  wq_depth:   .op_workqueue_depth.slope_per_min,
+  rate_trend: .op_reconcile_rate_trend.slope_per_min,
+  ms_trend:   .op_reconcile_avg_ms_trend.slope_per_min,
+  errors:     .op_reconcile_errors_per_min.slope_per_min
+}' dist/baseline-soak-report.json
+
+# 3. Edit C09.env: uncomment each MAX_* and set it to ~3× the observed
+#    slope as headroom. Keep MAX_OP_FDS_SLOPE_PER_MIN tight (any
+#    positive trend on fds is suspect).
+
+# 4. Re-run with thresholds active; baseline must still pass:
+./test/chaos/soak.sh
+
+# 5. Commit C09.env (and ideally a copy of baseline-soak-report.json
+#    under dist/baselines/ so you can diff future regressions against
+#    a known-good slope set).
+```
+
+A "clean" baseline is *not* zero — Go's RSS drifts up from GC scavenger
+behaviour, informer caches grow with discovery churn, etc. Order-of-
+magnitude expectations on a kind dev cluster (calibrate per-cluster):
+
+| Metric | Typical clean slope |
+| --- | --- |
+| `op_goroutines.slope_per_min` | ~0–0.05 |
+| `op_heap_inuse.slope_per_min` | a few KB/min |
+| `op_rss_bytes.slope_per_min` | up to ~50 KB/min |
+| `op_open_fds.slope_per_min` | 0 |
+| `op_workqueue_depth.slope_per_min` | 0 |
+| `op_reconcile_rate_per_min.slope_per_min` | ~0 (rate flat under steady churn) |
+
+If a baseline trips a slope orders of magnitude above these, the leak
+is in the codebase, not noise — fix before calibrating.
 
 ## Reference numbers (single-node kind, 2 gateway replicas)
 
@@ -651,14 +771,20 @@ inside an action script:
 
 ## Quick-reference commands
 
-| Task                       | Command                                   |
-| -------------------------- | ----------------------------------------- |
-| Stand up kind              | `make chaos-kind-setup`                   |
-| Tear down kind             | `make chaos-kind-teardown`                |
-| Run a scenario             | `make chaos-run SCENARIO=C01`             |
-| Inspect ghost.json         | `kubectl exec ... cat /var/run/varnish/ghost.json` |
-| Analyzer JSON from ledger  | `go run ./test/load/analyze -f X.ndjson -scenario C01 -json` |
-| Metrics summary from snapshots | `test/chaos/lib/metrics-summary.sh dist/C01-metrics/` |
-| Run soak (default 3h)      | `./test/chaos/soak.sh`                    |
-| Soak slope report          | `test/chaos/lib/soak-fit.sh dist/C09-soak/metrics.ndjson` |
-| Download ledger            | `curl http://127.0.0.1:9090/download`     |
+| Task                            | Command                                   |
+| ------------------------------- | ----------------------------------------- |
+| Stand up kind                   | `make chaos-kind-setup`                   |
+| Tear down kind                  | `make chaos-kind-teardown`                |
+| Run a scenario                  | `make chaos-run SCENARIO=C01`             |
+| Run the full suite              | `make chaos-suite`                        |
+| Inspect ghost.json              | `kubectl exec ... cat /var/run/varnish/ghost.json` |
+| Analyzer JSON from ledger       | `go run ./test/load/analyze -f X.ndjson -scenario C01 -json` |
+| Per-scenario metrics summary    | `test/chaos/lib/metrics-summary.sh dist/C01-metrics/` |
+| Run soak (default 3h)           | `./test/chaos/soak.sh`                    |
+| Run 24h soak                    | `SOAK_HOURS=24 nohup ./test/chaos/soak.sh &` |
+| Live tail soak NDJSON           | `tail -f dist/C09-soak/metrics.ndjson \| jq -c 'del(.ts)'` |
+| Partial slope report (mid-run)  | `test/chaos/lib/soak-fit.sh dist/C09-soak/metrics.ndjson \| jq` |
+| Inspect captured goroutine dump | `less dist/C09-soak/pprof-fail/operator-goroutine.txt` |
+| Heap diff vs baseline           | `go tool pprof -base dist/baseline-pprof-final/operator-heap.pb.gz dist/C09-soak/pprof-fail/operator-heap.pb.gz` |
+| Stop a hung soak                | `pkill -f 'test/chaos/soak.sh'`           |
+| Download ledger                 | `curl http://127.0.0.1:9090/download`     |

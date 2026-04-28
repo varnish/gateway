@@ -30,8 +30,26 @@ source "$env_file"
 : "${SNAPSHOT_INTERVAL_S:?}"
 : "${CHURN_INTERVAL_S:?}"
 : "${CHURN_ROUTES:?}"
-: "${GATEWAY_URL:?}"
-: "${COLLECTOR_URL:?}"
+# GATEWAY_URL/COLLECTOR_URL are checked later — only required out-of-cluster
+# (in-cluster mode skips host-side k6).
+
+# Metrics ports on the two pods, looked up via kubectl proxy. Operator
+# exposes /metrics on its dedicated metrics port; chaperone serves
+# /metrics on the health port (via the same mux as /health). Defaults
+# match the published Helm chart; override if your deployment differs.
+: "${OPERATOR_METRICS_PORT:=8080}"
+: "${CHAPERONE_METRICS_PORT:=8081}"
+
+# Portable millisecond timestamp. `date +%s%3N` is GNU-only; on macOS
+# the %3N formatter is left as a literal "N" character, breaking the
+# jq --argjson ts call downstream.
+ts_ms() {
+  if command -v gdate >/dev/null 2>&1; then
+    gdate +%s%3N
+  else
+    python3 -c 'import time; print(int(time.time()*1000))'
+  fi
+}
 
 # shellcheck source=lib/common.sh
 source "$root/lib/common.sh"
@@ -46,33 +64,77 @@ gw_ns=${CHAOS_NS:-varnish-load}
 gw_name=${GATEWAY_NAME:-load}
 route_ns=${CHAOS_NS:-varnish-load}
 
-outdir="dist/C09-soak"
+# In-cluster mode: when running inside a pod, KUBERNETES_SERVICE_HOST is
+# set by the kubelet. We then talk to /metrics directly via pod IPs and
+# leave k6 to a separate Job (submitted by the host-side launcher).
+# Out-of-cluster: start kubectl proxy and run k6 on the host.
+if [[ -n "${KUBERNETES_SERVICE_HOST:-}" ]]; then
+  in_cluster=1
+else
+  in_cluster=0
+fi
+
+# Output dir defaults differ by mode: dist/ on a developer host, /data
+# in-pod (mounted PVC).
+if (( in_cluster )); then
+  : "${SOAK_OUTDIR:=/data/C09-soak}"
+else
+  : "${SOAK_OUTDIR:=dist/C09-soak}"
+fi
+outdir=$SOAK_OUTDIR
 mkdir -p "$outdir" "$outdir/snapshots"
 : >"$outdir/metrics.ndjson"
 
-proxy_port=18001
-kubectl proxy --port="$proxy_port" >/dev/null 2>&1 &
-proxy_pid=$!
+if (( ! in_cluster )); then
+  : "${GATEWAY_URL:?out-of-cluster mode needs GATEWAY_URL}"
+  : "${COLLECTOR_URL:?out-of-cluster mode needs COLLECTOR_URL}"
+  proxy_port=18001
+  kubectl proxy --port="$proxy_port" >/dev/null 2>&1 &
+  proxy_pid=$!
+else
+  proxy_port=""
+  proxy_pid=""
+fi
 
-# Track previous pod names so a mid-run rename emits a podchange marker.
+# Track the last successfully resolved pod identity so capture_pprof can
+# target the pod we last scraped, and a mid-run rename emits a podchange
+# marker. Names + IPs are kept in lockstep — both populated by resolve_pod.
 op_pod_prev=""
+op_ip_prev=""
 ch_pod_prev=""
+ch_ip_prev=""
 
-# resolve_pod NS LABEL_SELECTOR LABEL_NAME — print the chosen pod name on
-# stdout. With more than one match, picks the lexically first and warns to
-# stderr (single-replica is the assumed deployment for both sides).
+# resolve_pod NS LABEL_SELECTOR LABEL_NAME — emit "name ip" for the chosen
+# Running pod. Filters by phase=Running so a CrashLoopBackoff/Pending pod
+# that sorts first lexically doesn't capture the slot for the rest of the
+# run. With more than one match picks the lexically first and warns.
 resolve_pod() {
   local ns=$1 sel=$2 label=$3
-  local names
-  names=$(kubectl -n "$ns" get pod -l "$sel" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+  local entries
+  entries=$(kubectl -n "$ns" get pod -l "$sel" \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.podIP}{"\n"}{end}' 2>/dev/null \
     | sort)
   local count
-  count=$(printf '%s\n' "$names" | grep -c .)
+  count=$(printf '%s\n' "$entries" | grep -c .)
   if (( count > 1 )); then
     echo "soak: warning: $count $label pods match selector '$sel'; picking first" >&2
   fi
-  printf '%s\n' "$names" | head -n1
+  printf '%s\n' "$entries" | head -n1
+}
+
+# pod_url_prefix NS POD IP PORT — build the HTTP base URL for a pod's
+# server. In-cluster: direct pod-IP. Out-of-cluster: via kubectl proxy.
+# Append "/metrics" or "/debug/pprof/..." to the result. Empty echo when
+# the inputs needed for the active mode are missing — callers must guard.
+pod_url_prefix() {
+  local ns=$1 pod=$2 ip=$3 port=$4
+  if (( in_cluster )); then
+    [[ -n "$ip" ]] && printf 'http://%s:%s' "$ip" "$port"
+  else
+    [[ -n "$pod" ]] && printf 'http://127.0.0.1:%s/api/v1/namespaces/%s/pods/%s:%s/proxy' \
+      "$proxy_port" "$ns" "$pod" "$port"
+  fi
 }
 
 # null-or-value: emit the metric JSON literal when scrape ok, JSON null
@@ -89,11 +151,15 @@ nv() {
 scrape() {
   local phase=$1
   local ts op_file ch_file
-  ts=$(date +%s%3N)
+  ts=$(ts_ms)
 
-  local op_pod ch_pod
-  op_pod=$(resolve_pod "$op_ns" "$op_sel" operator || true)
-  ch_pod=$(resolve_pod "$gw_ns" "gateway.networking.k8s.io/gateway-name=$gw_name" chaperone || true)
+  local op_info ch_info op_pod="" op_ip="" ch_pod="" ch_ip=""
+  op_info=$(resolve_pod "$op_ns" "$op_sel" operator || true)
+  ch_info=$(resolve_pod "$gw_ns" "gateway.networking.k8s.io/gateway-name=$gw_name" chaperone || true)
+  # `read` returns 1 on empty input — guard so set -e doesn't kill the
+  # snapshot loop when no Running pod matches.
+  [[ -n "$op_info" ]] && read -r op_pod op_ip <<<"$op_info"
+  [[ -n "$ch_info" ]] && read -r ch_pod ch_ip <<<"$ch_info"
 
   # Mid-run pod rename → emit a marker, then update prev. (Restart in place,
   # without rename, is detected separately via process_start_time in fit.)
@@ -107,29 +173,28 @@ scrape() {
       '{ts:$ts, phase:"podchange", side:$side, from:$from, to:$to}' \
       >>"$outdir/metrics.ndjson"
   fi
-  op_pod_prev=$op_pod
-  ch_pod_prev=$ch_pod
+  op_pod_prev=$op_pod; op_ip_prev=$op_ip
+  ch_pod_prev=$ch_pod; ch_ip_prev=$ch_ip
 
   op_file="$outdir/snapshots/op-${ts}.prom"
   ch_file="$outdir/snapshots/ch-${ts}.prom"
-  : >"$op_file"; : >"$ch_file"
 
-  # Fetch both in parallel — slow proxy connections otherwise serialize
-  # two 5s timeouts back-to-back per snapshot.
-  local op_pid="" ch_pid=""
-  if [[ -n "$op_pod" ]]; then
-    local op_url="http://127.0.0.1:$proxy_port/api/v1/namespaces/$op_ns/pods/$op_pod:metrics/proxy/metrics"
-    curl -sSf -m 5 "$op_url" -o "$op_file" 2>/dev/null & op_pid=$!
+  local op_pid="" ch_pid="" op_url ch_url
+  op_url=$(pod_url_prefix "$op_ns" "$op_pod" "$op_ip" "$OPERATOR_METRICS_PORT")
+  ch_url=$(pod_url_prefix "$gw_ns" "$ch_pod" "$ch_ip" "$CHAPERONE_METRICS_PORT")
+  if [[ -n "$op_url" ]]; then
+    curl -sSf -m 5 "${op_url}/metrics" -o "$op_file" 2>/dev/null &
+    op_pid=$!
   fi
-  if [[ -n "$ch_pod" ]]; then
-    local ch_url="http://127.0.0.1:$proxy_port/api/v1/namespaces/$gw_ns/pods/$ch_pod:metrics/proxy/metrics"
-    curl -sSf -m 5 "$ch_url" -o "$ch_file" 2>/dev/null & ch_pid=$!
+  if [[ -n "$ch_url" ]]; then
+    curl -sSf -m 5 "${ch_url}/metrics" -o "$ch_file" 2>/dev/null &
+    ch_pid=$!
   fi
   local op_ok=0 ch_ok=0
   [[ -n "$op_pid" ]] && wait "$op_pid" 2>/dev/null && [[ -s "$op_file" ]] && op_ok=1
   [[ -n "$ch_pid" ]] && wait "$ch_pid" 2>/dev/null && [[ -s "$ch_file" ]] && ch_ok=1
-  (( op_ok )) || echo "soak: scrape failed: operator (pod=${op_pod:-<none>})" >&2
-  (( ch_ok )) || echo "soak: scrape failed: chaperone (pod=${ch_pod:-<none>})" >&2
+  (( op_ok )) || { rm -f "$op_file"; echo "soak: scrape failed: operator (pod=${op_pod:-<none>})" >&2; }
+  (( ch_ok )) || { rm -f "$ch_file"; echo "soak: scrape failed: chaperone (pod=${ch_pod:-<none>})" >&2; }
 
   local og of ors oh owq orec orsum orcnt oerr ostart
   og=$(nv  $op_ok "$op_file" prom_single     go_goroutines)
@@ -173,11 +238,15 @@ scrape() {
       ch_process_start_time:$cstart}' >>"$outdir/metrics.ndjson"
 }
 
-# Continuous light traffic — just enough for correctness spot-checks.
-k6 run -e GATEWAY_URL="$GATEWAY_URL" -e COLLECTOR_URL="$COLLECTOR_URL" \
-  -e RPS="${SOAK_RPS:-20}" -e DURATION="${SOAK_HOURS}h" \
-  "$root/../load/k6/run.js" >"$outdir/k6.log" 2>&1 &
-k6_pid=$!
+k6_pid=""
+if (( ! in_cluster )); then
+  # Out-of-cluster: launch k6 on the host. In-cluster mode expects a
+  # separate k6 Job submitted by the launcher (lib/k6-job.sh pattern).
+  k6 run -e GATEWAY_URL="$GATEWAY_URL" -e COLLECTOR_URL="$COLLECTOR_URL" \
+    -e RPS="${SOAK_RPS:-20}" -e DURATION="${SOAK_HOURS}h" \
+    "$root/../load/k6/run.js" >"$outdir/k6.log" 2>&1 &
+  k6_pid=$!
+fi
 
 # Churn driver in background. Generates and applies/deletes CHURN_ROUTES
 # HTTPRoutes every CHURN_INTERVAL_S. Touches both controllers per cycle.
@@ -212,7 +281,10 @@ churn_loop &
 churn_pid=$!
 
 cleanup() {
-  kill "$churn_pid" "$k6_pid" "$proxy_pid" 2>/dev/null || true
+  local pid
+  for pid in "$churn_pid" "$k6_pid" "$proxy_pid"; do
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+  done
   wait 2>/dev/null || true
   kubectl -n "$route_ns" delete httproute -l chaos-scenario=C09 --ignore-not-found >/dev/null 2>&1 || true
   rm -f "$churn_manifest"
@@ -220,14 +292,20 @@ cleanup() {
 trap cleanup EXIT
 
 # Snapshot loop — the primary observation path. Everything else is the driver.
+# We label the last in-loop scrape "final" rather than emitting a separate
+# zero-interval scrape after the loop — the latter produced a Δt≈1s window
+# with near-zero Δreconcile, which polluted the rate_trend fit.
 echo "C09-soak: running for ${SOAK_HOURS}h, snapshot every ${SNAPSHOT_INTERVAL_S}s"
 end_ts=$(( $(date +%s) + SOAK_HOURS * 3600 ))
 scrape baseline
 while (( $(date +%s) < end_ts )); do
   sleep "$SNAPSHOT_INTERVAL_S"
+  if (( $(date +%s) >= end_ts )); then
+    scrape final
+    break
+  fi
   scrape soak
 done
-scrape final
 
 # Fit and threshold-check.
 report="$outdir/soak-report.json"
@@ -275,11 +353,11 @@ check_slope "op.reconcile_avg_ms_trend"     op_reconcile_avg_ms_trend   "${MAX_O
 check_slope "ch.ghost_reload_errors_per_min" ch_ghost_reload_errors_per_min "${MAX_CH_GHOST_RELOAD_ERROR_RATE_PER_MIN:-}"
 
 capture_pprof() {
-  local out=$1
-  local op_base="http://127.0.0.1:${proxy_port}/api/v1/namespaces/${op_ns}/pods/${op_pod_prev}:metrics/proxy"
-  local ch_base="http://127.0.0.1:${proxy_port}/api/v1/namespaces/${gw_ns}/pods/${ch_pod_prev}:metrics/proxy"
-  [[ -n "$op_pod_prev" ]] && pprof_fetch_set "$op_base" "$out" operator
-  [[ -n "$ch_pod_prev" ]] && pprof_fetch_set "$ch_base" "$out" chaperone
+  local out=$1 op_base ch_base
+  op_base=$(pod_url_prefix "$op_ns" "$op_pod_prev" "$op_ip_prev" "$OPERATOR_METRICS_PORT")
+  ch_base=$(pod_url_prefix "$gw_ns" "$ch_pod_prev" "$ch_ip_prev" "$CHAPERONE_METRICS_PORT")
+  [[ -n "$op_base" ]] && pprof_fetch_set "$op_base" "$out" operator
+  [[ -n "$ch_base" ]] && pprof_fetch_set "$ch_base" "$out" chaperone
 }
 
 if (( fail )); then
