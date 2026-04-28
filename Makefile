@@ -319,7 +319,17 @@ kind-create:
 	./docs/development/kind-metallb.sh
 
 kind-delete:
-	$(KIND) delete cluster --name $(KIND_CLUSTER_NAME)
+	-$(KIND) delete cluster --name $(KIND_CLUSTER_NAME)
+	@# Force-remove any containers still labeled for this cluster (kind crashed mid-create, etc.).
+	@stale=$$(docker ps -aq --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER_NAME)"); \
+	if [ -n "$$stale" ]; then echo "Removing stale kind containers: $$stale"; docker rm -f -v $$stale; fi
+	@# Drop volumes labeled for this cluster.
+	@vols=$$(docker volume ls -q --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER_NAME)"); \
+	if [ -n "$$vols" ]; then echo "Removing stale kind volumes: $$vols"; docker volume rm $$vols; fi
+	@# Remove the shared kind bridge network only if no other kind clusters remain.
+	@if [ -z "$$($(KIND) get clusters 2>/dev/null)" ] && docker network inspect kind >/dev/null 2>&1; then \
+		echo "Removing kind docker network"; docker network rm kind >/dev/null || true; \
+	fi
 
 kind-load:
 	$(KIND) load docker-image $(OPERATOR_IMAGE):$(VERSION) --name $(KIND_CLUSTER_NAME)
