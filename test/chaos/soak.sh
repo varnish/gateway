@@ -35,6 +35,10 @@ source "$env_file"
 
 # shellcheck source=lib/common.sh
 source "$root/lib/common.sh"
+# shellcheck source=lib/prom-extract.sh
+source "$root/lib/prom-extract.sh"
+# shellcheck source=lib/pprof-capture.sh
+source "$root/lib/pprof-capture.sh"
 
 op_ns=${OPERATOR_NS:-varnish-gateway-system}
 op_sel=${OPERATOR_SELECTOR:-app.kubernetes.io/component=operator}
@@ -50,39 +54,123 @@ proxy_port=18001
 kubectl proxy --port="$proxy_port" >/dev/null 2>&1 &
 proxy_pid=$!
 
-op_pod=$(kubectl -n "$op_ns" get pod -l "$op_sel" \
-  -o jsonpath='{.items[0].metadata.name}')
-ch_pod=$(kubectl -n "$gw_ns" get pod -l "gateway.networking.k8s.io/gateway-name=$gw_name" \
-  -o jsonpath='{.items[0].metadata.name}')
+# Track previous pod names so a mid-run rename emits a podchange marker.
+op_pod_prev=""
+ch_pod_prev=""
 
-# Track the chaperone pod name — reschedules change it; we re-resolve each snapshot.
+# resolve_pod NS LABEL_SELECTOR LABEL_NAME — print the chosen pod name on
+# stdout. With more than one match, picks the lexically first and warns to
+# stderr (single-replica is the assumed deployment for both sides).
+resolve_pod() {
+  local ns=$1 sel=$2 label=$3
+  local names
+  names=$(kubectl -n "$ns" get pod -l "$sel" \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | sort)
+  local count
+  count=$(printf '%s\n' "$names" | grep -c .)
+  if (( count > 1 )); then
+    echo "soak: warning: $count $label pods match selector '$sel'; picking first" >&2
+  fi
+  printf '%s\n' "$names" | head -n1
+}
+
+# null-or-value: emit the metric JSON literal when scrape ok, JSON null
+# when not. Used inside scrape() to keep the per-field block readable.
+nv() {
+  local ok=$1 file=$2 fn=$3 metric=$4
+  if (( ok )); then "$fn" "$file" "$metric"; else echo "null"; fi
+}
+
+# Snapshot one cycle. Re-resolves pod names per call; writes raw .prom files
+# to snapshots/, extracts the metrics we fit on, and appends one NDJSON line.
+# Fields are emitted as JSON null when a scrape fails (curl error or empty
+# .prom file), so soak-fit.sh can skip rather than treat as zero.
 scrape() {
   local phase=$1
-  local op_url="http://127.0.0.1:$proxy_port/api/v1/namespaces/$op_ns/pods/$op_pod:metrics/proxy/metrics"
-  local ch_url
-  ch_pod=$(kubectl -n "$gw_ns" get pod -l "gateway.networking.k8s.io/gateway-name=$gw_name" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-  [[ -n "$ch_pod" ]] && ch_url="http://127.0.0.1:$proxy_port/api/v1/namespaces/$gw_ns/pods/$ch_pod:metrics/proxy/metrics"
-
   local ts op_file ch_file
   ts=$(date +%s%3N)
+
+  local op_pod ch_pod
+  op_pod=$(resolve_pod "$op_ns" "$op_sel" operator || true)
+  ch_pod=$(resolve_pod "$gw_ns" "gateway.networking.k8s.io/gateway-name=$gw_name" chaperone || true)
+
+  # Mid-run pod rename → emit a marker, then update prev. (Restart in place,
+  # without rename, is detected separately via process_start_time in fit.)
+  if [[ -n "$op_pod_prev" && "$op_pod" != "$op_pod_prev" ]]; then
+    jq -cn --argjson ts "$ts" --arg side op --arg from "$op_pod_prev" --arg to "$op_pod" \
+      '{ts:$ts, phase:"podchange", side:$side, from:$from, to:$to}' \
+      >>"$outdir/metrics.ndjson"
+  fi
+  if [[ -n "$ch_pod_prev" && "$ch_pod" != "$ch_pod_prev" ]]; then
+    jq -cn --argjson ts "$ts" --arg side ch --arg from "$ch_pod_prev" --arg to "$ch_pod" \
+      '{ts:$ts, phase:"podchange", side:$side, from:$from, to:$to}' \
+      >>"$outdir/metrics.ndjson"
+  fi
+  op_pod_prev=$op_pod
+  ch_pod_prev=$ch_pod
+
   op_file="$outdir/snapshots/op-${ts}.prom"
   ch_file="$outdir/snapshots/ch-${ts}.prom"
-  curl -sS -m 5 "$op_url" -o "$op_file" || : >"$op_file"
-  [[ -n "${ch_url:-}" ]] && curl -sS -m 5 "$ch_url" -o "$ch_file" || : >"$ch_file"
+  : >"$op_file"; : >"$ch_file"
 
-  # One-line extract. Reuses the single_metric awk pattern from metrics-summary.sh.
-  local og of ors cg cf
-  og=$(awk '$0 ~ /^go_goroutines($| )/ { print $NF+0; exit }' "$op_file")
-  of=$(awk '$0 ~ /^process_open_fds($| )/ { print $NF+0; exit }' "$op_file")
-  ors=$(awk '$0 ~ /^process_resident_memory_bytes($| )/ { print $NF+0; exit }' "$op_file")
-  cg=$(awk '$0 ~ /^go_goroutines($| )/ { print $NF+0; exit }' "$ch_file")
-  cf=$(awk '$0 ~ /^process_open_fds($| )/ { print $NF+0; exit }' "$ch_file")
+  # Fetch both in parallel — slow proxy connections otherwise serialize
+  # two 5s timeouts back-to-back per snapshot.
+  local op_pid="" ch_pid=""
+  if [[ -n "$op_pod" ]]; then
+    local op_url="http://127.0.0.1:$proxy_port/api/v1/namespaces/$op_ns/pods/$op_pod:metrics/proxy/metrics"
+    curl -sSf -m 5 "$op_url" -o "$op_file" 2>/dev/null & op_pid=$!
+  fi
+  if [[ -n "$ch_pod" ]]; then
+    local ch_url="http://127.0.0.1:$proxy_port/api/v1/namespaces/$gw_ns/pods/$ch_pod:metrics/proxy/metrics"
+    curl -sSf -m 5 "$ch_url" -o "$ch_file" 2>/dev/null & ch_pid=$!
+  fi
+  local op_ok=0 ch_ok=0
+  [[ -n "$op_pid" ]] && wait "$op_pid" 2>/dev/null && [[ -s "$op_file" ]] && op_ok=1
+  [[ -n "$ch_pid" ]] && wait "$ch_pid" 2>/dev/null && [[ -s "$ch_file" ]] && ch_ok=1
+  (( op_ok )) || echo "soak: scrape failed: operator (pod=${op_pod:-<none>})" >&2
+  (( ch_ok )) || echo "soak: scrape failed: chaperone (pod=${ch_pod:-<none>})" >&2
+
+  local og of ors oh owq orec orsum orcnt oerr ostart
+  og=$(nv  $op_ok "$op_file" prom_single     go_goroutines)
+  of=$(nv  $op_ok "$op_file" prom_single     process_open_fds)
+  ors=$(nv $op_ok "$op_file" prom_single     process_resident_memory_bytes)
+  oh=$(nv  $op_ok "$op_file" prom_single     go_memstats_heap_inuse_bytes)
+  owq=$(nv $op_ok "$op_file" prom_sum        workqueue_depth)
+  orec=$(nv  $op_ok "$op_file" prom_sum        controller_runtime_reconcile_total)
+  orsum=$(nv $op_ok "$op_file" prom_sum_float controller_runtime_reconcile_time_seconds_sum)
+  orcnt=$(nv $op_ok "$op_file" prom_sum        controller_runtime_reconcile_time_seconds_count)
+  oerr=$(nv  $op_ok "$op_file" prom_sum        controller_runtime_reconcile_errors_total)
+  ostart=$(nv $op_ok "$op_file" prom_single     process_start_time_seconds)
+
+  local cg cf crss ch_h cgr cgrerr cstart
+  cg=$(nv     $ch_ok "$ch_file" prom_single     go_goroutines)
+  cf=$(nv     $ch_ok "$ch_file" prom_single     process_open_fds)
+  crss=$(nv   $ch_ok "$ch_file" prom_single     process_resident_memory_bytes)
+  ch_h=$(nv   $ch_ok "$ch_file" prom_single     go_memstats_heap_inuse_bytes)
+  cgr=$(nv    $ch_ok "$ch_file" prom_sum        chaperone_ghost_reloads_total)
+  cgrerr=$(nv $ch_ok "$ch_file" prom_sum        chaperone_ghost_reload_errors_total)
+  cstart=$(nv $ch_ok "$ch_file" prom_single     process_start_time_seconds)
+
   jq -cn --argjson ts "$ts" --arg phase "$phase" \
-    --argjson og "${og:-0}" --argjson of "${of:-0}" --argjson ors "${ors:-0}" \
-    --argjson cg "${cg:-0}" --argjson cf "${cf:-0}" \
-    '{ts:$ts, phase:$phase, op_goroutines:$og, op_open_fds:$of, op_rss_bytes:$ors,
-      ch_goroutines:$cg, ch_open_fds:$cf}' >>"$outdir/metrics.ndjson"
+    --argjson og "$og" --argjson of "$of" --argjson ors "$ors" \
+    --argjson oh "$oh" --argjson owq "$owq" --argjson orec "$orec" \
+    --argjson orsum "$orsum" --argjson orcnt "$orcnt" --argjson oerr "$oerr" \
+    --argjson ostart "$ostart" \
+    --argjson cg "$cg" --argjson cf "$cf" --argjson crss "$crss" \
+    --argjson ch_h "$ch_h" --argjson cgr "$cgr" --argjson cgrerr "$cgrerr" \
+    --argjson cstart "$cstart" \
+    '{ts:$ts, phase:$phase,
+      op_goroutines:$og, op_open_fds:$of, op_rss_bytes:$ors,
+      op_heap_inuse:$oh, op_workqueue_depth:$owq,
+      op_reconcile_total:$orec,
+      op_reconcile_time_sum:$orsum, op_reconcile_time_count:$orcnt,
+      op_reconcile_errors:$oerr,
+      op_process_start_time:$ostart,
+      ch_goroutines:$cg, ch_open_fds:$cf, ch_rss_bytes:$crss,
+      ch_heap_inuse:$ch_h,
+      ch_ghost_reloads:$cgr, ch_ghost_reload_errors:$cgrerr,
+      ch_process_start_time:$cstart}' >>"$outdir/metrics.ndjson"
 }
 
 # Continuous light traffic — just enough for correctness spot-checks.
@@ -147,6 +235,21 @@ report="$outdir/soak-report.json"
 cat "$report"
 
 fail=0
+
+# Mid-run restart of either side level-shifts the series; slopes are
+# meaningless. Always fail (regardless of threshold knobs) and tell the
+# operator to look at the .prom snapshots around the restart.
+op_restart=$(jq -r '.restart_detected.op // false' "$report")
+ch_restart=$(jq -r '.restart_detected.ch // false' "$report")
+if [[ "$op_restart" == "true" ]]; then
+  echo "FAIL: operator restarted mid-soak (process_start_time changed); slopes inconclusive"
+  fail=1
+fi
+if [[ "$ch_restart" == "true" ]]; then
+  echo "FAIL: chaperone restarted mid-soak (process_start_time changed); slopes inconclusive"
+  fail=1
+fi
+
 check_slope() {
   local label=$1 field=$2 limit=$3
   [[ -z "$limit" ]] && return 0
@@ -155,10 +258,37 @@ check_slope() {
     echo "FAIL: ${label}=${v}/min > ${limit}/min"; fail=1
   fi
 }
-check_slope "op.goroutines" op_goroutines "${MAX_OP_GOROUTINE_SLOPE_PER_MIN:-}"
-check_slope "op.rss_bytes"  op_rss_bytes  "${MAX_OP_RSS_SLOPE_PER_MIN:-}"
-check_slope "op.open_fds"   op_open_fds   "${MAX_OP_FDS_SLOPE_PER_MIN:-}"
-check_slope "ch.goroutines" ch_goroutines "${MAX_CH_GOROUTINE_SLOPE_PER_MIN:-}"
+# Memory / leak indicators
+check_slope "op.goroutines"      op_goroutines      "${MAX_OP_GOROUTINE_SLOPE_PER_MIN:-}"
+check_slope "op.heap_inuse"      op_heap_inuse      "${MAX_OP_HEAP_SLOPE_PER_MIN:-}"
+check_slope "op.rss_bytes"       op_rss_bytes       "${MAX_OP_RSS_SLOPE_PER_MIN:-}"
+check_slope "op.open_fds"        op_open_fds        "${MAX_OP_FDS_SLOPE_PER_MIN:-}"
+check_slope "ch.goroutines"      ch_goroutines      "${MAX_CH_GOROUTINE_SLOPE_PER_MIN:-}"
+check_slope "ch.heap_inuse"      ch_heap_inuse      "${MAX_CH_HEAP_SLOPE_PER_MIN:-}"
+check_slope "ch.open_fds"        ch_open_fds        "${MAX_CH_FDS_SLOPE_PER_MIN:-}"
+check_slope "ch.rss_bytes"       ch_rss_bytes       "${MAX_CH_RSS_SLOPE_PER_MIN:-}"
+# Reconcile health
+check_slope "op.workqueue_depth"            op_workqueue_depth          "${MAX_OP_WORKQUEUE_DEPTH_SLOPE_PER_MIN:-}"
+check_slope "op.reconcile_errors_per_min"   op_reconcile_errors_per_min "${MAX_OP_RECONCILE_ERROR_RATE_PER_MIN:-}"
+check_slope "op.reconcile_rate_trend"       op_reconcile_rate_trend     "${MAX_OP_RECONCILE_RATE_TREND:-}"
+check_slope "op.reconcile_avg_ms_trend"     op_reconcile_avg_ms_trend   "${MAX_OP_RECONCILE_AVG_MS_TREND:-}"
+check_slope "ch.ghost_reload_errors_per_min" ch_ghost_reload_errors_per_min "${MAX_CH_GHOST_RELOAD_ERROR_RATE_PER_MIN:-}"
 
-(( fail )) && { echo "C09-soak FAILED"; exit 1; }
+capture_pprof() {
+  local out=$1
+  local op_base="http://127.0.0.1:${proxy_port}/api/v1/namespaces/${op_ns}/pods/${op_pod_prev}:metrics/proxy"
+  local ch_base="http://127.0.0.1:${proxy_port}/api/v1/namespaces/${gw_ns}/pods/${ch_pod_prev}:metrics/proxy"
+  [[ -n "$op_pod_prev" ]] && pprof_fetch_set "$op_base" "$out" operator
+  [[ -n "$ch_pod_prev" ]] && pprof_fetch_set "$ch_base" "$out" chaperone
+}
+
+if (( fail )); then
+  capture_pprof "$outdir/pprof-fail"
+  echo "C09-soak FAILED"
+  exit 1
+fi
+
+# Unconditional capture on success — gives a baseline pprof to diff against
+# future failures.
+capture_pprof "$outdir/pprof-final"
 echo "C09-soak PASSED"

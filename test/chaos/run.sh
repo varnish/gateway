@@ -44,6 +44,8 @@ source "$root/lib/common.sh"
 source "$root/lib/k6-job.sh"
 # shellcheck source=lib/metrics-scrape.sh
 source "$root/lib/metrics-scrape.sh"
+# shellcheck source=lib/pprof-capture.sh
+source "$root/lib/pprof-capture.sh"
 
 : "${GATEWAY_URL:=http://${GATEWAY_NAME}.${CHAOS_NS}.svc.cluster.local}"
 : "${COLLECTOR_URL:=http://ledger-collector.${CHAOS_NS}.svc.cluster.local:8080}"
@@ -233,6 +235,14 @@ if [[ -n "$metrics_summary" ]]; then
   echo "$metrics_summary" >"dist/${id}-metrics.json"
   mkdir -p "dist/${id}-metrics"
   cp "$metrics_dir"/*.prom "dist/${id}-metrics/" 2>/dev/null || true
+fi
+
+# On any threshold trip, capture pprof from both pods before the
+# port-forwards get torn down in cleanup. METRICS_*_PORT come from
+# metrics-scrape.sh (still bound at this point in the run).
+if (( fail )) && (( metrics_ok )); then
+  pprof_fetch_set "http://127.0.0.1:${METRICS_OP_PORT}" "dist/${id}-pprof" operator
+  pprof_fetch_set "http://127.0.0.1:${METRICS_CH_PORT}" "dist/${id}-pprof" chaperone
 fi
 
 summary="total=$total drop_ratio=$drop_ratio non_2xx=$non_2xx misroutes=$misroutes converge_ms=$converge_ms"

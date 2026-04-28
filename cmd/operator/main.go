@@ -4,6 +4,8 @@ import (
 	_ "embed"
 	"flag"
 	"log/slog"
+	"net/http"
+	"net/http/pprof"
 	"os"
 	"strings"
 	"time"
@@ -81,10 +83,22 @@ func main() {
 	renewDeadline := 30 * time.Second
 	retryPeriod := 5 * time.Second
 
+	// pprof is mounted on the metrics server (same port). The metrics
+	// service is ClusterIP-only so this stays internal; chaos/soak runs
+	// fetch profiles via kubectl proxy when a slope threshold trips.
+	pprofHandlers := map[string]http.Handler{
+		"/debug/pprof/":        http.HandlerFunc(pprof.Index),
+		"/debug/pprof/cmdline": http.HandlerFunc(pprof.Cmdline),
+		"/debug/pprof/profile": http.HandlerFunc(pprof.Profile),
+		"/debug/pprof/symbol":  http.HandlerFunc(pprof.Symbol),
+		"/debug/pprof/trace":   http.HandlerFunc(pprof.Trace),
+	}
+
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: server.Options{
-			BindAddress: metricsAddr,
+			BindAddress:   metricsAddr,
+			ExtraHandlers: pprofHandlers,
 		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,

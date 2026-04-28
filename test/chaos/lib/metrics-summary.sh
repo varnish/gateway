@@ -17,66 +17,34 @@ set -euo pipefail
 
 dir=${1:?snapshot dir required}
 
-# sum_metric <file> <metric_name>
-# Sum all samples whose series name matches exactly (ignores labels).
-sum_metric() {
-  local f=$1 name=$2
-  [[ -f "$f" ]] || { echo 0; return; }
-  awk -v name="$name" '
-    $0 ~ "^"name"($|{| )" {
-      # value is the last field
-      v = $NF
-      s += v + 0
-    }
-    END { printf "%.0f", s+0 }
-  ' "$f"
-}
+# shellcheck source=prom-extract.sh
+source "$(dirname "$0")/prom-extract.sh"
 
-# As sum_metric, but preserves float precision (for histogram _sum series
-# measured in seconds).
-sum_metric_float() {
-  local f=$1 name=$2
-  [[ -f "$f" ]] || { echo 0; return; }
-  awk -v name="$name" '
-    $0 ~ "^"name"($|{| )" { s += $NF + 0 }
-    END { printf "%.6f", s+0 }
-  ' "$f"
-}
+op_goroutines_start=$(prom_single "$dir/fault_start-operator.prom" go_goroutines)
+op_goroutines_end=$(prom_single "$dir/scenario_end-operator.prom" go_goroutines)
+op_fds_start=$(prom_single "$dir/fault_start-operator.prom" process_open_fds)
+op_fds_end=$(prom_single "$dir/scenario_end-operator.prom" process_open_fds)
+op_rss_start=$(prom_single "$dir/fault_start-operator.prom" process_resident_memory_bytes)
+op_rss_end=$(prom_single "$dir/scenario_end-operator.prom" process_resident_memory_bytes)
 
-single_metric() {
-  local f=$1 name=$2
-  [[ -f "$f" ]] || { echo 0; return; }
-  awk -v name="$name" '
-    $0 ~ "^"name"($| )" { v = $NF + 0; found = 1; exit }
-    END { if (!found) v = 0; printf "%.0f", v }
-  ' "$f"
-}
+ch_goroutines_start=$(prom_single "$dir/fault_start-chaperone.prom" go_goroutines)
+ch_goroutines_end=$(prom_single "$dir/scenario_end-chaperone.prom" go_goroutines)
+ch_fds_start=$(prom_single "$dir/fault_start-chaperone.prom" process_open_fds)
+ch_fds_end=$(prom_single "$dir/scenario_end-chaperone.prom" process_open_fds)
 
-op_goroutines_start=$(single_metric "$dir/fault_start-operator.prom" go_goroutines)
-op_goroutines_end=$(single_metric "$dir/scenario_end-operator.prom" go_goroutines)
-op_fds_start=$(single_metric "$dir/fault_start-operator.prom" process_open_fds)
-op_fds_end=$(single_metric "$dir/scenario_end-operator.prom" process_open_fds)
-op_rss_start=$(single_metric "$dir/fault_start-operator.prom" process_resident_memory_bytes)
-op_rss_end=$(single_metric "$dir/scenario_end-operator.prom" process_resident_memory_bytes)
+op_wq_depth_end=$(prom_sum "$dir/scenario_end-operator.prom" workqueue_depth)
 
-ch_goroutines_start=$(single_metric "$dir/fault_start-chaperone.prom" go_goroutines)
-ch_goroutines_end=$(single_metric "$dir/scenario_end-chaperone.prom" go_goroutines)
-ch_fds_start=$(single_metric "$dir/fault_start-chaperone.prom" process_open_fds)
-ch_fds_end=$(single_metric "$dir/scenario_end-chaperone.prom" process_open_fds)
-
-op_wq_depth_end=$(sum_metric "$dir/scenario_end-operator.prom" workqueue_depth)
-
-op_reconciles_start=$(sum_metric "$dir/fault_start-operator.prom" controller_runtime_reconcile_total)
-op_reconciles_end=$(sum_metric "$dir/fault_end-operator.prom"   controller_runtime_reconcile_total)
-op_reconcile_errors_start=$(sum_metric "$dir/fault_start-operator.prom" controller_runtime_reconcile_errors_total)
-op_reconcile_errors_end=$(sum_metric "$dir/fault_end-operator.prom"     controller_runtime_reconcile_errors_total)
+op_reconciles_start=$(prom_sum "$dir/fault_start-operator.prom" controller_runtime_reconcile_total)
+op_reconciles_end=$(prom_sum "$dir/fault_end-operator.prom"   controller_runtime_reconcile_total)
+op_reconcile_errors_start=$(prom_sum "$dir/fault_start-operator.prom" controller_runtime_reconcile_errors_total)
+op_reconcile_errors_end=$(prom_sum "$dir/fault_end-operator.prom"     controller_runtime_reconcile_errors_total)
 
 # Histogram: _sum is total seconds spent reconciling, _count is the number of
 # reconciles. Δsum / Δcount over the fault window gives mean latency.
-op_rtime_sum_start=$(sum_metric_float "$dir/fault_start-operator.prom" controller_runtime_reconcile_time_seconds_sum)
-op_rtime_sum_end=$(sum_metric_float   "$dir/fault_end-operator.prom"   controller_runtime_reconcile_time_seconds_sum)
-op_rtime_count_start=$(sum_metric "$dir/fault_start-operator.prom" controller_runtime_reconcile_time_seconds_count)
-op_rtime_count_end=$(sum_metric   "$dir/fault_end-operator.prom"   controller_runtime_reconcile_time_seconds_count)
+op_rtime_sum_start=$(prom_sum_float "$dir/fault_start-operator.prom" controller_runtime_reconcile_time_seconds_sum)
+op_rtime_sum_end=$(prom_sum_float   "$dir/fault_end-operator.prom"   controller_runtime_reconcile_time_seconds_sum)
+op_rtime_count_start=$(prom_sum "$dir/fault_start-operator.prom" controller_runtime_reconcile_time_seconds_count)
+op_rtime_count_end=$(prom_sum   "$dir/fault_end-operator.prom"   controller_runtime_reconcile_time_seconds_count)
 op_reconcile_avg_ms=$(awk -v s0="$op_rtime_sum_start" -v s1="$op_rtime_sum_end" \
   -v c0="$op_rtime_count_start" -v c1="$op_rtime_count_end" 'BEGIN{
     dc = c1 - c0
@@ -84,10 +52,10 @@ op_reconcile_avg_ms=$(awk -v s0="$op_rtime_sum_start" -v s1="$op_rtime_sum_end" 
     printf "%.2f", (s1 - s0) / dc * 1000
   }')
 
-ch_ghost_reloads_start=$(sum_metric "$dir/fault_start-chaperone.prom" chaperone_ghost_reloads_total)
-ch_ghost_reloads_end=$(sum_metric "$dir/fault_end-chaperone.prom"     chaperone_ghost_reloads_total)
-ch_ghost_reload_errors_start=$(sum_metric "$dir/fault_start-chaperone.prom" chaperone_ghost_reload_errors_total)
-ch_ghost_reload_errors_end=$(sum_metric "$dir/fault_end-chaperone.prom"     chaperone_ghost_reload_errors_total)
+ch_ghost_reloads_start=$(prom_sum "$dir/fault_start-chaperone.prom" chaperone_ghost_reloads_total)
+ch_ghost_reloads_end=$(prom_sum "$dir/fault_end-chaperone.prom"     chaperone_ghost_reloads_total)
+ch_ghost_reload_errors_start=$(prom_sum "$dir/fault_start-chaperone.prom" chaperone_ghost_reload_errors_total)
+ch_ghost_reload_errors_end=$(prom_sum "$dir/fault_end-chaperone.prom"     chaperone_ghost_reload_errors_total)
 
 # Fault-window timestamps: the ledger-based markers (second column of the
 # chaos record) aren't available here; instead use wall clock between the

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"strconv"
@@ -368,6 +369,13 @@ func run() error {
 	mux.HandleFunc("/drain", makeDrainHandler(dashState))
 	mux.HandleFunc("/debug/backends", makeBackendsHandler(vadm))
 	mux.Handle("/metrics", promhttp.HandlerFor(promReg, promhttp.HandlerOpts{}))
+	// pprof on the same mux. Service is ClusterIP-only; chaos soaks fetch
+	// profiles via kubectl proxy when a slope threshold trips.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	healthServer := &http.Server{
 		Addr:    cfg.HealthAddr,

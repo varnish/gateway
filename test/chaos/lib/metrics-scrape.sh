@@ -14,8 +14,8 @@
 # Port-forward ports are chosen from the 18000s range to avoid colliding
 # with the short-lived collector port-forward that run.sh already owns.
 
-_METRICS_OP_PORT=18090
-_METRICS_CH_PORT=18091
+METRICS_OP_PORT=18090
+METRICS_CH_PORT=18091
 _METRICS_OP_PF_PID=
 _METRICS_CH_PF_PID=
 _METRICS_OUTDIR=
@@ -42,17 +42,17 @@ metrics_scrape_start() {
   echo "$ch_pod" >"$_METRICS_OUTDIR/.chaperone-pod"
 
   kubectl -n "$op_ns" port-forward "pod/$op_pod" \
-    "$_METRICS_OP_PORT:8080" >/dev/null 2>&1 &
+    "$METRICS_OP_PORT:8080" >/dev/null 2>&1 &
   _METRICS_OP_PF_PID=$!
   kubectl -n "$gw_ns" port-forward "pod/$ch_pod" \
-    "$_METRICS_CH_PORT:8080" >/dev/null 2>&1 &
+    "$METRICS_CH_PORT:8080" >/dev/null 2>&1 &
   _METRICS_CH_PF_PID=$!
 
   # Wait up to 10s for both endpoints to respond.
   local deadline=$((SECONDS + 10)) op_ok=0 ch_ok=0
   while (( SECONDS < deadline )); do
-    (( op_ok )) || curl -sSf -m 1 "http://127.0.0.1:$_METRICS_OP_PORT/metrics" -o /dev/null 2>/dev/null && op_ok=1
-    (( ch_ok )) || curl -sSf -m 1 "http://127.0.0.1:$_METRICS_CH_PORT/metrics" -o /dev/null 2>/dev/null && ch_ok=1
+    (( op_ok )) || curl -sSf -m 1 "http://127.0.0.1:$METRICS_OP_PORT/metrics" -o /dev/null 2>/dev/null && op_ok=1
+    (( ch_ok )) || curl -sSf -m 1 "http://127.0.0.1:$METRICS_CH_PORT/metrics" -o /dev/null 2>/dev/null && ch_ok=1
     (( op_ok && ch_ok )) && return 0
     sleep 0.2
   done
@@ -64,9 +64,9 @@ metrics_scrape_start() {
 metrics_snapshot() {
   local marker=${1:?marker required}
   [[ -z "$_METRICS_OUTDIR" ]] && return 0
-  curl -sS -m 3 "http://127.0.0.1:$_METRICS_OP_PORT/metrics" \
+  curl -sS -m 3 "http://127.0.0.1:$METRICS_OP_PORT/metrics" \
     -o "$_METRICS_OUTDIR/${marker}-operator.prom" || true
-  curl -sS -m 3 "http://127.0.0.1:$_METRICS_CH_PORT/metrics" \
+  curl -sS -m 3 "http://127.0.0.1:$METRICS_CH_PORT/metrics" \
     -o "$_METRICS_OUTDIR/${marker}-chaperone.prom" || true
 }
 
