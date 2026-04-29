@@ -28,7 +28,13 @@ source "$root/lib/k6-job.sh"
 : "${COLLECTOR_URL:=http://ledger-collector.${CHAOS_NS}.svc.cluster.local:8080}"
 
 duration_s=$(( SOAK_HOURS * 3600 ))
-deadline_s=$(( duration_s + 600 ))   # +10min slack
+# Deadline = soak duration + post-run cp window + 10min slack. The Job's
+# entrypoint sleeps 86400 after the soak so a debug-pod-free `kubectl cp`
+# has ~24h. activeDeadlineSeconds <= duration+slack would kill the pod
+# right as it enters that sleep, dropping the cp window. (We can still
+# recover from the PVC via a transient pod, but the in-place path is
+# what `launch-soak-cluster.sh` documents.)
+deadline_s=$(( duration_s + 86400 + 600 ))
 
 soak_job_name="soak-$(date +%s)"
 
