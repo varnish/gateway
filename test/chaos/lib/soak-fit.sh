@@ -128,8 +128,13 @@ restart_detected() {
 }
 
 samples=$(echo "$data" | wc -l | tr -d ' ')
-first_ts=$(echo "$data" | jq -r 'select(.ts) | .ts' | head -1)
-last_ts=$(echo "$data"  | jq -r 'select(.ts) | .ts' | tail -1)
+# Don't pipe `echo "$data" | jq | head -1` etc.: with set -o pipefail,
+# head exiting after the first line closes the pipe and SIGPIPEs jq,
+# which fails the assignment once $data exceeds the pipe buffer (~64KB,
+# tripped around the 3h soak mark). Read once, slice with bash.
+all_ts=$(echo "$data" | jq -r 'select(.ts) | .ts')
+first_ts=${all_ts%%$'\n'*}
+last_ts=${all_ts##*$'\n'}
 duration_min=$(awk -v a="$last_ts" -v b="$first_ts" 'BEGIN{printf "%.1f", (a-b)/60000}')
 
 op_restart=$(restart_detected op_process_start_time)
