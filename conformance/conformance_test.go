@@ -18,7 +18,6 @@ func TestConformance(t *testing.T) {
 
 	opts.GatewayClassName = "varnish"
 	opts.CleanupBaseResources = true
-	opts.AllowCRDsMismatch = true
 
 	opts.ConformanceProfiles = sets.New[suite.ConformanceProfileName](
 		suite.GatewayHTTPConformanceProfileName,
