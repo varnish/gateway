@@ -64,9 +64,13 @@ jobs:
       image: debian:trixie-slim
       options: --user root
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
       - name: Install Varnish and build tools
         run: |
           export DEBIAN_FRONTEND=noninteractive
+          VARNISH_VERSION=$(awk -F'"' '/^  varnishVersion:/{print $2; exit}' charts/varnish-gateway/values.yaml)
           apt-get update
           apt-get install -y curl gpg dirmngr
           mkdir -p /etc/apt/keyrings
@@ -80,10 +84,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential pkg-config clang libclang-dev git \
-            varnish varnish-dev
-
-      - name: Checkout
-        uses: actions/checkout@v6
+            "varnish=${VARNISH_VERSION}*" "varnish-dev=${VARNISH_VERSION}*"
 
       - name: Set up Rust
         run: |
@@ -101,3 +102,22 @@ jobs:
 
       - name: Run VTC integration tests
         run: cd ghost && cargo test --release run_vtc_tests
+
+  helm-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: '3.14.0'
+
+      # Lints the chart, validates values.schema.json, and renders the chart
+      # against every fixture in charts/varnish-gateway/test/fixtures. Catches
+      # nil-pointer regressions from new top-level value keys without a
+      # `(.Values.X).foo` style guard — the failure mode that broke
+      # --reuse-values across the 0.18.5 → 0.20.0 upgrade.
+      - name: Run helm-test
+        run: make helm-test

@@ -203,6 +203,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Read pinned Varnish version
+        id: varnish
+        run: echo "version=$(awk -F'\"' '/^  varnishVersion:/{print $2; exit}' charts/varnish-gateway/values.yaml)" >> $GITHUB_OUTPUT
+
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -210,6 +214,8 @@ jobs:
           context: .
           file: docker/chaperone.Dockerfile
           platforms: ${{ matrix.platform }}
+          build-args: |
+            VARNISH_VERSION=${{ steps.varnish.outputs.version }}
           outputs: type=image,name=${{ env.IMAGE_PREFIX }}/gateway-chaperone,push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=chaperone-${{ matrix.platform }}
           cache-to: type=gha,scope=chaperone-${{ matrix.platform }},mode=max

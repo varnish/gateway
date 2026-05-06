@@ -1,4 +1,4 @@
-{{- if .Values.dashboards.enabled }}
+{{- if (.Values.dashboards).enabled }}
 {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
 {{- $name := regexReplaceAll "\\.json$" (base $path) "" }}
 ---

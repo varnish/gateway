@@ -1,5 +1,7 @@
 VERSION := $(shell cat .version)
 CHART_VERSION := $(shell cat .version | sed 's/^v//')
+# Single source of truth: charts/varnish-gateway/values.yaml.
+VARNISH_VERSION := $(shell awk -F'"' '/^  varnishVersion:/{print $$2; exit}' charts/varnish-gateway/values.yaml)
 REGISTRY ?= ghcr.io/varnish
 OPERATOR_IMAGE := $(REGISTRY)/gateway-operator
 CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
@@ -7,7 +9,7 @@ CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 
 .PHONY: help test build build-linux docker clean vendor act
 .PHONY: build-go test-go test-envtest envtest install-envtest build-ghost test-ghost
-.PHONY: helm-lint helm-template
+.PHONY: helm-lint helm-template helm-test
 .PHONY: test-conformance test-conformance-report test-conformance-single
 .PHONY: kind-create kind-delete kind-load kind-deploy test-conformance-kind
 .PHONY: manifests generate verify-manifests
@@ -172,7 +174,7 @@ docker-operator:
 	docker tag $(OPERATOR_IMAGE):$(VERSION) $(OPERATOR_IMAGE):latest
 
 docker-chaperone:
-	docker build -t $(CHAPERONE_IMAGE):$(VERSION) -f docker/chaperone.Dockerfile .
+	docker build --build-arg VARNISH_VERSION=$(VARNISH_VERSION) -t $(CHAPERONE_IMAGE):$(VERSION) -f docker/chaperone.Dockerfile .
 	docker tag $(CHAPERONE_IMAGE):$(VERSION) $(CHAPERONE_IMAGE):latest
 
 # ============================================================================
@@ -380,6 +382,17 @@ helm-lint:
 
 helm-template:
 	helm template $(RELEASE_NAME) $(CHART_PATH) --debug
+
+# Render the chart against every fixture in test/fixtures/values-*.yaml.
+# Catches nil-pointer regressions from new top-level value keys (mirrors the
+# `--reuse-values` failure mode that broke the 0.18.5 → 0.20.0 upgrade).
+helm-test: helm-lint
+	@helm template $(RELEASE_NAME) $(CHART_PATH) >/dev/null
+	@for f in $(CHART_PATH)/test/fixtures/values-*.yaml; do \
+		echo "==> rendering against $$f"; \
+		helm template $(RELEASE_NAME) $(CHART_PATH) -f $$f >/dev/null || exit 1; \
+	done
+	@echo "All chart fixture renders OK."
 
 # ============================================================================
 # Code generation (controller-gen)
