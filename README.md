@@ -9,6 +9,8 @@
 
 Kubernetes [Gateway API](https://gateway-api.sigs.k8s.io/) implementation using Varnish. Passes the Gateway API v1.5.0 conformance suite for the HTTPRoute profile, including core and some extended features.
 
+📖 **Documentation: [gateway.varnish.org](https://gateway.varnish.org/)**
+
 ## Container Images
 
 Pre-built images are available on GitHub Container Registry:
@@ -18,7 +20,7 @@ ghcr.io/varnish/gateway-operator
 ghcr.io/varnish/gateway-chaperone
 ```
 
-Images are public and require no authentication to pull. Currently amd64 only.
+Images are public and require no authentication to pull. Available for linux/amd64 and linux/arm64.
 
 ## Architecture
 
@@ -57,7 +59,7 @@ Images are public and require no authentication to pull. Currently amd64 only.
 - Generates VCL preamble + user VCL (concatenated)
 - Writes routing rules to `routing.json` (via ConfigMap)
 
-**Chaperone** - Runs alongside each Varnish instance:
+**Chaperone** - Runs varnishd as a child process in each gateway pod:
 - Watches EndpointSlices, writes backend IPs to `ghost.json`
 - Triggers ghost reload via HTTP (`/.varnish-ghost/reload`)
 - Hot-reloads VCL via varnishadm when main.vcl changes
