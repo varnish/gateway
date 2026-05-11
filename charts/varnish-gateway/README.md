@@ -45,11 +45,15 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 | `gatewayClass.name` | Name of the GatewayClass | `varnish` |
 | `gatewayClass.controllerName` | Controller identifier | `varnish-software.com/gateway` |
 | `gatewayClass.createDefaultParams` | Create default GatewayClassParameters | `true` |
-| `gatewayClass.defaultParams.userVCL.enabled` | Enable user VCL configuration | `true` |
-| `gatewayClass.defaultParams.userVCL.content` | Default VCL for initial install (not overwritten on upgrade) | See values.yaml |
+| `gatewayClass.defaultParams.userVCL.enabled` | Reference a user VCL ConfigMap from the default GatewayClassParameters | `true` |
+| `gatewayClass.defaultParams.userVCL.configMap.name` | Name of the ConfigMap containing user VCL (must be created separately) | `varnish-user-vcl` |
+| `gatewayClass.defaultParams.userVCL.configMap.key` | Key inside the ConfigMap that holds the VCL | `user.vcl` |
 | `gatewayClass.defaultParams.logging.enabled` | Enable logging | `true` |
 | `gatewayClass.defaultParams.logging.mode` | Logging mode (varnishlog or varnishncsa) | `varnishlog` |
 | `gatewayClass.defaultParams.varnishdExtraArgs` | Extra varnishd arguments | See values.yaml |
+| `gatewayClass.defaultParams.extraInitContainers` | Extra init containers for gateway pods (e.g. VMOD downloaders) | `[]` |
+| `gatewayClass.defaultParams.extraVolumes` | Extra volumes for gateway pods | `[]` |
+| `gatewayClass.defaultParams.extraVolumeMounts` | Extra volume mounts for the varnish container | `[]` |
 
 ### Chaperone Configuration
 
@@ -60,6 +64,21 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 | `chaperone.image.pullPolicy` | Chaperone image pull policy | `IfNotPresent` |
 | `chaperone.imagePullSecrets` | Image pull secrets for chaperone pods | `""` |
 
+### Observability
+
+Requires the prometheus-operator CRDs (`monitoring.coreos.com`) — e.g. from
+[kube-prometheus-stack](https://github.com/prometheus-community/helm-charts/tree/main/charts/kube-prometheus-stack).
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `serviceMonitor.enabled` | Create ServiceMonitor (operator) and PodMonitor (chaperone) | `false` |
+| `serviceMonitor.interval` | Scrape interval | `30s` |
+| `serviceMonitor.scrapeTimeout` | Scrape timeout | `10s` |
+| `serviceMonitor.labels` | Extra labels on the ServiceMonitor/PodMonitor (e.g. `release: <prometheus-release>`) | `{}` |
+| `dashboards.enabled` | Render the JSON files under `dashboards/` as Grafana-sidecar-discoverable ConfigMaps | `false` |
+| `dashboards.labels` | Labels applied to dashboard ConfigMaps (default matches kube-prometheus-stack's sidecar selector) | `{grafana_dashboard: "1"}` |
+| `dashboards.annotations` | Annotations on dashboard ConfigMaps (e.g. `grafana_folder: Varnish Gateway`) | `{}` |
+
 ### Other Configuration
 
 | Parameter | Description | Default |
@@ -67,6 +86,8 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 | `namespace` | Namespace for operator deployment | `varnish-gateway-system` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `serviceAccount.create` | Create service account | `true` |
+| `commonLabels` | Extra labels added to all resources | `{}` |
+| `commonAnnotations` | Extra annotations added to all resources | `{}` |
 
 ## Examples
 
@@ -80,9 +101,27 @@ helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
 
 ### Customize VCL configuration
 
+User VCL is loaded from a ConfigMap that you create separately. The chart only
+holds the *reference*:
+
+```bash
+# 1. Create the ConfigMap containing your VCL
+kubectl create configmap varnish-user-vcl \
+  --namespace varnish-gateway-system \
+  --from-file=user.vcl=./my-custom.vcl
+
+# 2. Install the chart — the defaults already point at
+#    ConfigMap "varnish-user-vcl", key "user.vcl"
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
+  --namespace varnish-gateway-system --create-namespace
+```
+
+To point the chart at a differently-named ConfigMap:
+
 ```bash
 helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
-  --set-file gatewayClass.defaultParams.userVCL.content=./my-custom.vcl
+  --set gatewayClass.defaultParams.userVCL.configMap.name=my-vcl \
+  --set gatewayClass.defaultParams.userVCL.configMap.key=main.vcl
 ```
 
 ### Disable default GatewayClassParameters
