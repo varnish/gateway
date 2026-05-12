@@ -7,7 +7,7 @@
   <a href="https://codecov.io/github/varnish/gateway"><img src="https://codecov.io/github/varnish/gateway/graph/badge.svg" alt="codecov"></a>
 </p>
 
-Kubernetes [Gateway API](https://gateway-api.sigs.k8s.io/) implementation using Varnish. Passes the Gateway API v1.5.0 conformance suite for the HTTPRoute profile, including core and some extended features.
+Kubernetes [Gateway API](https://gateway-api.sigs.k8s.io/) implementation using Varnish. A [conformant v1.5 implementation](https://gateway-api.sigs.k8s.io/implementations/v1.5/) for the HTTPRoute profile, covering core and several extended features.
 
 📖 **Documentation: [gateway.varnish.org](https://gateway.varnish.org/)**
 
