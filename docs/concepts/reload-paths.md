@@ -9,7 +9,7 @@ that actually needs to move.
 
 | Change                               | Path                  | Mechanism                                         | Cache impact                |
 | ------------------------------------ | --------------------- | ------------------------------------------------- | --------------------------- |
-| HTTPRoute, Service endpoints         | Ghost HTTP reload     | Chaperone POSTs to `/.varnish-ghost/reload`       | None — cache preserved      |
+| HTTPRoute, Service endpoints         | Ghost HTTP reload     | Chaperone GETs `/.varnish-ghost/reload`           | None — cache preserved      |
 | User VCL, `VarnishCachePolicy`       | varnishadm VCL reload | Chaperone issues `vcl.load` + `vcl.use`           | None — cache preserved      |
 | Listener ports, image, varnishd args | Rolling pod restart   | Infrastructure hash annotation change on pod spec | Cache lost on each pod roll |
 
@@ -24,8 +24,9 @@ Every reconcile of the Gateway controller computes an `InfrastructureConfig`
 that varnishd reads at startup and cannot reconfigure on the fly:
 image, `varnishdExtraArgs`, logging configuration, image pull secrets,
 the sorted list of listener sockets, extra volumes/mounts/init
-containers, and whether backend TLS is in use. Its SHA-256 is written
-to the Deployment's pod template as `varnish.io/infra-hash`.
+containers, topology spread constraints, and whether backend TLS is in
+use. Its SHA-256 is written to the Deployment's pod template as
+`varnish.io/infra-hash`.
 
 If the hash doesn't change, the pod template doesn't change, and
 Kubernetes leaves pods alone. If it does change, Kubernetes performs a
@@ -58,7 +59,7 @@ issued.
 
 ### How the reload is delivered
 
-Chaperone sends an HTTP `GET /.varnish-ghost/reload` over the loopback
+Chaperone issues `GET /.varnish-ghost/reload` over the loopback
 `ghost-reload` socket (`127.0.0.1:1969`). The request is handled by
 the ghost VMOD inside varnishd, which reparses `ghost.json` and swaps
 its internal router atomically. In-flight requests already past the

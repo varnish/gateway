@@ -66,34 +66,34 @@ Additional command-line arguments passed to varnishd. Each array element is a se
 
 ## Environment Variables
 
-Chaperone reads these environment variables. The operator sets most of them automatically.
+Chaperone reads these environment variables. The operator sets most of them automatically when it builds the gateway pod, so the "Chaperone default" column documents what chaperone falls back to when run standalone — in operator-managed pods the operator-set value is what you'll see in practice.
 
 ### Varnishd Process
 
-| Variable              | Default       | Description                                                                    |
-| --------------------- | ------------- | ------------------------------------------------------------------------------ |
-| `VARNISH_LISTEN`      | `:80,http`    | Listen address(es) for varnishd (`-a` flag). Semicolon-separated for multiple. |
-| `VARNISH_STORAGE`     | `malloc,256m` | Storage backend(s) (`-s` flag). Semicolon-separated for multiple.              |
-| `VARNISH_ADMIN_PORT`  | `6082`        | Admin socket port (`-M` flag)                                                  |
-| `VARNISH_DIR`         | _(empty)_     | Varnish working directory (`-n` flag). Empty uses varnish default.             |
-| `VARNISHD_EXTRA_ARGS` | _(none)_      | Additional varnishd args. Semicolon-separated. Set via GatewayClassParameters. |
+| Variable              | Chaperone default | Description                                                                                                                                                                                       |
+| --------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VARNISH_LISTEN`      | `http=:80`        | Listen address(es) for varnishd (`-a` flag). Semicolon-separated for multiple. The operator builds this from Gateway listeners in `{proto}-{port}=:{port},{proto}` form, so the default never applies to operator-managed pods. |
+| `VARNISH_STORAGE`     | `malloc,256m`     | Storage backend(s) (`-s` flag). Semicolon-separated for multiple.                                                                                                                                 |
+| `VARNISH_ADMIN_PORT`  | `6082`            | Admin socket port (`-M` flag)                                                                                                                                                                     |
+| `VARNISH_DIR`         | _(empty)_         | Varnish working directory (`-n` flag). Empty uses varnish default. The operator sets `/var/run/varnish/vsm`.                                                                                      |
+| `VARNISHD_EXTRA_ARGS` | _(none)_          | Additional varnishd args. Semicolon-separated. Set via GatewayClassParameters.                                                                                                                    |
 
 ### Paths
 
-| Variable              | Default                       | Description                                          |
-| --------------------- | ----------------------------- | ---------------------------------------------------- |
-| `WORK_DIR`            | `/var/run/varnish`            | Chaperone working directory (secrets, runtime files) |
-| `VCL_PATH`            | `/var/run/varnish/main.vcl`   | Path to VCL file (watched for changes)               |
-| `ROUTING_CONFIG_PATH` | `/etc/varnish/routing.json`   | Routing config from operator                         |
-| `GHOST_CONFIG_PATH`   | `/var/run/varnish/ghost.json` | Generated ghost config output                        |
+| Variable            | Chaperone default             | Description                                                                                                                                          |
+| ------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WORK_DIR`          | `/var/run/varnish`            | Chaperone working directory (secrets, runtime files)                                                                                                 |
+| `VCL_PATH`          | `/var/run/varnish/main.vcl`   | Path to VCL file (watched for changes). The operator sets `/etc/varnish/main.vcl`, mounted from the gateway's ConfigMap.                             |
+| `CONFIGMAP_NAME`    | `gateway-vcl`                 | Name of the ConfigMap that holds `routing.json` and `main.vcl`. Chaperone watches this directly via the Kubernetes informer rather than a file path. |
+| `GHOST_CONFIG_PATH` | `/var/run/varnish/ghost.json` | Generated ghost config output                                                                                                                        |
 
 ### Runtime
 
-| Variable            | Default          | Description                                                                  |
-| ------------------- | ---------------- | ---------------------------------------------------------------------------- |
-| `NAMESPACE`         | `default`        | Kubernetes namespace for EndpointSlice watching                              |
-| `HEALTH_ADDR`       | `:8080`          | Health/readiness endpoint address                                            |
-| `VARNISH_HTTP_ADDR` | `localhost:1969` | Varnish HTTP address for ghost reload requests (dedicated loopback listener) |
+| Variable            | Chaperone default | Description                                                                                                                                |
+| ------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NAMESPACE`         | `default`         | Kubernetes namespace for EndpointSlice watching                                                                                            |
+| `HEALTH_ADDR`       | `:8080`           | Health/readiness endpoint address. The operator sets `:8081` and points the readiness probe at it, so operator-managed pods listen on 8081. |
+| `VARNISH_HTTP_ADDR` | `localhost:1969`  | Varnish HTTP address for ghost reload requests (dedicated loopback listener)                                                               |
 
 ### Semicolon-separated values
 

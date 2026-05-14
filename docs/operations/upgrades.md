@@ -16,7 +16,7 @@ The Gateway API CRDs (`Gateway`, `HTTPRoute`, etc.) are upstream and upgraded se
 
 - **Operator and gateway image must match.** The operator sets the gateway image via the `GATEWAY_IMAGE` environment variable at install time; the Helm chart wires this from `chaperone.image.repository` + `chaperone.image.tag`, with the tag defaulting to the chart's `appVersion`. Individual GatewayClasses can override this via `GatewayClassParameters.spec.image` — typically to load [custom VMODs](custom-vmods.md). In both cases, the image must be built from a matching release of the stock gateway image; ghost's reload protocol and chaperone's config schema can change between minor versions.
 - **CRD changes are called out in release notes.** When the CRD schema changes, the release notes include an explicit "CRD changes" section and a `kubectl apply` snippet. CRDs are strictly additive within a minor version.
-- **Gateway API version.** Each release is tested against a specific Gateway API version (currently v1.4.0). Newer Gateway API releases usually work but are not guaranteed; older releases may be missing types the operator consumes.
+- **Gateway API version.** Each release is tested against a specific Gateway API version (currently v1.5.0). Newer Gateway API releases usually work but are not guaranteed; older releases may be missing types the operator consumes.
 
 ## Upgrade with Helm
 

@@ -6,8 +6,10 @@ access.
 
 ## Health endpoints
 
-Chaperone exposes HTTP endpoints on the health address, port 8080 by
-default via the `HEALTH_ADDR` environment variable.
+Chaperone exposes HTTP endpoints on the health address. In
+operator-managed pods this is port 8081 (the operator sets
+`HEALTH_ADDR=:8081` and points the readiness probe at it); standalone
+chaperone falls back to `:8080` if the variable is unset.
 
 | Path              | Method | Description                                                                                           |
 | ----------------- | ------ | ----------------------------------------------------------------------------------------------------- |

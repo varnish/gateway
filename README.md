@@ -147,9 +147,14 @@ The dashboard updates every second and highlights changes as they happen. It is 
       "routes": [
         {
           "path_match": {"type": "PathPrefix", "value": "/v2"},
-          "backends": [
-            {"address": "10.0.0.1", "port": 8080, "weight": 100},
-            {"address": "10.0.0.2", "port": 8080, "weight": 100}
+          "backend_groups": [
+            {
+              "weight": 100,
+              "backends": [
+                {"address": "10.0.0.1", "port": 8080},
+                {"address": "10.0.0.2", "port": 8080}
+              ]
+            }
           ],
           "priority": 10300,
           "rule_index": 0
@@ -159,6 +164,8 @@ The dashboard updates every second and highlights changes as they happen. It is 
   }
 }
 ```
+
+Weights belong to backend groups (services), not individual pods. Selection is two-level: pick a group by weight, then pick a pod within the group at random.
 
 ## Known Limitations
 
