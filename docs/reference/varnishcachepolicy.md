@@ -56,7 +56,7 @@ spec:
 | `forcedTTL` | Duration | required* | Forced TTL, ignores origin Cache-Control entirely |
 | `grace` | Duration | `0` | Serve stale while revalidating (equivalent to `stale-while-revalidate`) |
 | `keep` | Duration | `0` | Serve stale when backend is down (equivalent to `stale-if-error`) |
-| `requestCoalescing` | bool | `true` | Collapsed forwarding for concurrent requests to the same uncached object |
+| `requestCoalescing` | bool | `true` | Collapsed forwarding for concurrent requests to the same uncached object. Setting to `false` is not yet supported (pending varnish-rs API). |
 | `cacheKey.headers` | []string | `[]` | Request headers to include in cache key |
 | `cacheKey.queryParameters.include` | []string | all | Allowlist of query params in cache key |
 | `cacheKey.queryParameters.exclude` | []string | none | Denylist of query params from cache key |
@@ -100,14 +100,20 @@ Used when the origin doesn't send Cache-Control headers. Origin headers always t
 
 ### forcedTTL — Operator wins
 
-Ignores all origin Cache-Control headers. Use when you know better than the origin.
+Overrides origin Cache-Control headers (except `no-store`/`private`, see below).
+Use when you know better than the origin.
 
 | Origin sends | Result |
 |---|---|
 | No Cache-Control | TTL = `forcedTTL` value |
 | `Cache-Control: max-age=60` | TTL = `forcedTTL` value (ignored) |
-| `Cache-Control: no-store` | TTL = `forcedTTL` value (ignored) |
 | `Set-Cookie` present | TTL = `forcedTTL` value (header stripped) |
+
+**Cannot override**: `Cache-Control: no-store` and `Cache-Control: private` both
+cause Varnish to mark the response uncacheable before `vcl_backend_response` runs.
+This is a Varnish runtime limitation — `beresp.uncacheable` is write-once-to-true
+and cannot be reverted. In these cases the response is not cached regardless of
+`forcedTTL`.
 
 ## Status and Conditions
 
