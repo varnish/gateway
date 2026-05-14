@@ -54,7 +54,24 @@ pub struct RouteRequestResult {
     pub log_msgs: Vec<(LogTag, String)>,
     /// Whether to bypass the cache entirely (return(pass) in VCL terms).
     pub pass: bool,
-    // TODO: re-add hash_ignore_busy when varnish-rs exposes set_hash_ignore_busy().
+    /// Whether to set req.hash_ignore_busy so concurrent requests for the
+    /// same hash do not wait on the in-flight fetch. Only meaningful when
+    /// `pass` is false (pass mode skips lookup entirely).
+    pub hash_ignore_busy: bool,
+}
+
+impl Default for RouteRequestResult {
+    /// Conservative pass-through default: no backend, no caching directives.
+    /// Used for early-return paths that bail out of routing.
+    fn default() -> Self {
+        Self {
+            backend: None,
+            route_name: None,
+            log_msgs: Vec::new(),
+            pass: true,
+            hash_ignore_busy: false,
+        }
+    }
 }
 
 /// Director for a single virtual host
@@ -273,12 +290,7 @@ impl VhostDirector {
             listener,
         ) {
             Some(r) => r,
-            None => return RouteRequestResult {
-                backend: None,
-                route_name: None,
-                log_msgs,
-                pass: true,
-            },
+            None => return RouteRequestResult { log_msgs, ..Default::default() },
         };
         let backend_groups = match_result.backend_groups;
         let matched_filters = match_result.filters.as_ref();
@@ -340,10 +352,9 @@ impl VhostDirector {
                             format!("Failed to serialize redirect config: {}", e),
                         ));
                         return RouteRequestResult {
-                            backend: None,
                             route_name: route_name.clone(),
                             log_msgs,
-                            pass: true,
+                            ..Default::default()
                         };
                     }
                 };
@@ -354,10 +365,9 @@ impl VhostDirector {
                         format!("Failed to set redirect config header: {}", e),
                     ));
                     return RouteRequestResult {
-                        backend: None,
                         route_name: route_name.clone(),
                         log_msgs,
-                        pass: true,
+                        ..Default::default()
                     };
                 }
 
@@ -365,7 +375,7 @@ impl VhostDirector {
                     backend: self.redirect_backend.as_ref().map(|r| r.0.clone()),
                     route_name: route_name.clone(),
                     log_msgs,
-                    pass: true,
+                    ..Default::default()
                 };
             }
 
@@ -390,7 +400,8 @@ impl VhostDirector {
         }
 
         // Determine cache behavior from policy
-        let pass = apply_cache_policy_headers(http, &match_result, &query_string_owned);
+        let (pass, hash_ignore_busy) =
+            apply_cache_policy_headers(http, &match_result, &query_string_owned);
 
         // Select backend using two-level weighted random:
         // Level 1: pick a group by weight
@@ -403,6 +414,7 @@ impl VhostDirector {
                     route_name,
                     log_msgs,
                     pass,
+                    hash_ignore_busy,
                 };
             }
         };
@@ -418,6 +430,7 @@ impl VhostDirector {
                 route_name,
                 log_msgs,
                 pass,
+                hash_ignore_busy,
             },
         };
 
@@ -426,6 +439,7 @@ impl VhostDirector {
             route_name,
             log_msgs,
             pass,
+            hash_ignore_busy,
         }
     }
 }
@@ -538,16 +552,23 @@ fn match_routes<'a>(
 /// - `X-Ghost-Grace: <N>s` → set beresp.grace
 /// - `X-Ghost-Keep: <N>s` → set beresp.keep
 /// - `X-Ghost-Cache-Key-Extra: <data>` → additional hash_data() input
+///
+/// Returns `(pass, hash_ignore_busy)`:
+///
+/// - `pass` → bypass the cache entirely (no policy, or a bypass header matched).
+/// - `hash_ignore_busy` → enter the cache but skip the waitinglist, so concurrent
+///   requests for the same hash each issue their own fetch (collapsed forwarding off).
+///   Only meaningful when `pass` is false.
 fn apply_cache_policy_headers(
     http: &mut HttpHeaders,
     match_result: &RouteMatchResult,
     query_string: &Option<String>,
-) -> bool {
+) -> (bool, bool) {
     let cache_policy = match match_result.cache_policy {
         Some(cp) => cp,
         None => {
             // No cache policy → pass-through mode (no caching)
-            return true;
+            return (true, false);
         }
     };
 
@@ -556,7 +577,7 @@ fn apply_cache_policy_headers(
         match bypass {
             BypassHeaderCompiled::Present { name } => {
                 if http.header(name).is_some() {
-                    return true;
+                    return (true, false);
                 }
             }
             BypassHeaderCompiled::Regex { name, regex } => {
@@ -569,7 +590,7 @@ fn apply_cache_policy_headers(
                         },
                     };
                     if regex.is_match(val_str) {
-                        return true;
+                        return (true, false);
                     }
                 }
             }
@@ -626,9 +647,10 @@ fn apply_cache_policy_headers(
         }
     }
 
-    // Cache policy present → do not pass (enable caching)
-    // TODO: hash_ignore_busy = !request_coalescing when varnish-rs exposes the API
-    false
+    // Cache policy present → do not pass (enable caching).
+    // request_coalescing=false → set hash_ignore_busy so concurrent requests
+    // for the same hash do not collapse onto the in-flight fetch.
+    (false, !cache_policy.request_coalescing)
 }
 
 /// Filter query parameters based on include/exclude lists.

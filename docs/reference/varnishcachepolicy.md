@@ -56,7 +56,7 @@ spec:
 | `forcedTTL` | Duration | required* | Forced TTL, ignores origin Cache-Control entirely |
 | `grace` | Duration | `0` | Serve stale while revalidating (equivalent to `stale-while-revalidate`) |
 | `keep` | Duration | `0` | Serve stale when backend is down (equivalent to `stale-if-error`) |
-| `requestCoalescing` | bool | `true` | Collapsed forwarding for concurrent requests to the same uncached object. Setting to `false` is not yet supported (pending varnish-rs API). |
+| `requestCoalescing` | bool | `true` | Collapsed forwarding for concurrent requests to the same uncached object |
 | `cacheKey.headers` | []string | `[]` | Request headers to include in cache key |
 | `cacheKey.queryParameters.include` | []string | all | Allowlist of query params in cache key |
 | `cacheKey.queryParameters.exclude` | []string | none | Denylist of query params from cache key |

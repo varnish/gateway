@@ -572,12 +572,7 @@ impl GhostDirector {
     ) -> vhost_director::RouteRequestResult {
         let host = match get_host_header(http) {
             Some(h) => h,
-            None => return vhost_director::RouteRequestResult {
-                backend: None,
-                route_name: None,
-                log_msgs: Vec::new(),
-                pass: true,
-            },
+            None => return vhost_director::RouteRequestResult::default(),
         };
 
         let directors = self.vhost_directors.load();
@@ -585,9 +580,7 @@ impl GhostDirector {
             Some(dir) => dir,
             None => return vhost_director::RouteRequestResult {
                 backend: Some(self.not_found_backend.0.clone()),
-                route_name: None,
-                log_msgs: Vec::new(),
-                pass: true,
+                ..Default::default()
             },
         };
 
