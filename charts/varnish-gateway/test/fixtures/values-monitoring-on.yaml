@@ -1,0 +1,8 @@
+# Exercises the ServiceMonitor / PodMonitor / dashboard ConfigMap templates
+# that are gated off by default.
+serviceMonitor:
+  enabled: true
+  labels:
+    release: prom-stack
+dashboards:
+  enabled: true

@@ -1,0 +1,13 @@
+# Simulates `helm upgrade --reuse-values` from a release that predates the
+# `serviceMonitor` and `dashboards` top-level keys (introduced in chart 0.20.0).
+#
+# Setting them to null is the only way to exercise the nil-safe template
+# guards via `helm template`, which always merges defaults from values.yaml
+# and so cannot otherwise reproduce the missing-key state that --reuse-values
+# produces in real upgrades.
+#
+# A render against this fixture must succeed; if a future change adds a new
+# top-level key without a `(.Values.X).foo` style guard, this fixture will
+# fail with a nil-pointer error and surface the regression in CI.
+serviceMonitor: null
+dashboards: null
