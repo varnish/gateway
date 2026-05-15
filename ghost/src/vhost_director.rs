@@ -749,298 +749,6 @@ fn extract_path_and_query(url: &str) -> (&str, Option<&str>) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::director::{PathMatchCompiled, WeightedBackendGroup};
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_extract_path_and_query() {
-        assert_eq!(extract_path_and_query("/api/users"), ("/api/users", None));
-        assert_eq!(
-            extract_path_and_query("/api/users?foo=bar"),
-            ("/api/users", Some("foo=bar"))
-        );
-        assert_eq!(
-            extract_path_and_query("/api/users#fragment"),
-            ("/api/users", None)
-        );
-        assert_eq!(
-            extract_path_and_query("/api/users?foo=bar#fragment"),
-            ("/api/users", Some("foo=bar"))
-        );
-        assert_eq!(extract_path_and_query(""), ("/", None));
-        assert_eq!(extract_path_and_query("?query"), ("/", Some("query")));
-    }
-
-    #[test]
-    fn test_select_backend_from_groups_single() {
-        let groups = vec![WeightedBackendGroup {
-            weight: 100,
-            backends: vec!["10.0.0.1:8080".to_string()],
-        }];
-        let selected = select_backend_from_groups(&groups).unwrap();
-        assert_eq!(selected, "10.0.0.1:8080");
-    }
-
-    #[test]
-    fn test_select_backend_from_groups_distribution() {
-        // Two groups: 90% to group1 (2 pods), 10% to group2 (2 pods)
-        let groups = vec![
-            WeightedBackendGroup {
-                weight: 90,
-                backends: vec![
-                    "10.0.0.1:8080".to_string(),
-                    "10.0.0.2:8080".to_string(),
-                ],
-            },
-            WeightedBackendGroup {
-                weight: 10,
-                backends: vec![
-                    "10.0.0.3:8080".to_string(),
-                    "10.0.0.4:8080".to_string(),
-                ],
-            },
-        ];
-
-        // Run many selections and check distribution
-        let mut group1_count = 0;
-        let mut group2_count = 0;
-        for _ in 0..1000 {
-            let selected = select_backend_from_groups(&groups).unwrap();
-            if selected == "10.0.0.1:8080" || selected == "10.0.0.2:8080" {
-                group1_count += 1;
-            } else {
-                group2_count += 1;
-            }
-        }
-
-        // Allow for statistical variance (should be roughly 900:100)
-        assert!(
-            group1_count > 800,
-            "group1 selected {} times, expected ~900",
-            group1_count
-        );
-        assert!(
-            group2_count < 200,
-            "group2 selected {} times, expected ~100",
-            group2_count
-        );
-    }
-
-    #[test]
-    fn test_select_backend_from_groups_empty() {
-        let groups: Vec<WeightedBackendGroup> = vec![];
-        assert!(select_backend_from_groups(&groups).is_none());
-    }
-
-    #[test]
-    fn test_select_backend_from_groups_uniform_within_group() {
-        // Single group with 2 pods — should distribute ~50/50
-        let groups = vec![WeightedBackendGroup {
-            weight: 100,
-            backends: vec![
-                "10.0.0.1:8080".to_string(),
-                "10.0.0.2:8080".to_string(),
-            ],
-        }];
-
-        let mut counts = HashMap::new();
-        for _ in 0..1000 {
-            let selected = select_backend_from_groups(&groups).unwrap();
-            *counts.entry(selected.to_string()).or_insert(0) += 1;
-        }
-
-        let count_1 = *counts.get("10.0.0.1:8080").unwrap_or(&0);
-        let count_2 = *counts.get("10.0.0.2:8080").unwrap_or(&0);
-
-        // Each should get roughly 500 (allow wide margin)
-        assert!(
-            count_1 > 350 && count_1 < 650,
-            "10.0.0.1 selected {} times, expected ~500",
-            count_1
-        );
-        assert!(
-            count_2 > 350 && count_2 < 650,
-            "10.0.0.2 selected {} times, expected ~500",
-            count_2
-        );
-    }
-
-    #[test]
-    fn test_match_routes_no_path_match() {
-        // Route with no path match should match all paths
-        let routes = vec![RouteEntry {
-            path_match: None,
-            method: None,
-            headers: Vec::new(),
-            query_params: Vec::new(),
-            filters: None,
-            backend_groups: vec![WeightedBackendGroup {
-                weight: 100,
-                backends: vec!["10.0.0.1:8080".to_string()],
-            }],
-            listeners: Vec::new(),
-            route_name: None,
-            priority: 100,
-            rule_index: 0,
-            cache_policy: None,
-            bypass_headers: Vec::new(),
-        }];
-
-        // This test doesn't use HttpHeaders, so we can't fully test it here
-        // But we can verify the route structure is correct
-        assert_eq!(routes.len(), 1);
-        assert!(routes[0].path_match.is_none());
-        assert_eq!(routes[0].backend_groups.len(), 1);
-    }
-
-    #[test]
-    fn test_match_routes_path_prefix() {
-        let routes = vec![RouteEntry {
-            path_match: Some(PathMatchCompiled::PathPrefix("/api".to_string())),
-            method: None,
-            headers: Vec::new(),
-            query_params: Vec::new(),
-            filters: None,
-            backend_groups: vec![WeightedBackendGroup {
-                weight: 100,
-                backends: vec!["10.0.0.1:8080".to_string()],
-            }],
-            listeners: Vec::new(),
-            route_name: None,
-            priority: 100,
-            rule_index: 0,
-            cache_policy: None,
-            bypass_headers: Vec::new(),
-        }];
-
-        // Verify route structure
-        assert_eq!(routes.len(), 1);
-        assert!(routes[0].path_match.is_some());
-    }
-
-    #[test]
-    fn test_vhost_director_has_backends() {
-        let backend_pool = Arc::new(BackendPool::new());
-
-        // Director with routes that have backends
-        let director = VhostDirector::new(
-            "api.example.com".to_string(),
-            vec![RouteEntry {
-                path_match: None,
-                method: None,
-                headers: Vec::new(),
-                query_params: Vec::new(),
-                filters: None,
-                backend_groups: vec![WeightedBackendGroup {
-                    weight: 100,
-                    backends: vec!["10.0.0.1:8080".to_string()],
-                }],
-                listeners: Vec::new(),
-                route_name: None,
-                priority: 100,
-                rule_index: 0,
-                cache_policy: None,
-                bypass_headers: Vec::new(),
-            }],
-            backend_pool.clone(),
-            None,
-            None,
-        );
-
-        assert!(director.has_backends());
-
-        // Director with no routes
-        let empty_director = VhostDirector::new(
-            "empty.example.com".to_string(),
-            vec![],
-            backend_pool,
-            None,
-            None,
-        );
-
-        assert!(!empty_director.has_backends());
-    }
-
-    #[test]
-    fn test_vhost_director_stats() {
-        let backend_pool = Arc::new(BackendPool::new());
-        let director = VhostDirector::new(
-            "api.example.com".to_string(),
-            vec![],
-            backend_pool,
-            None,
-            None,
-        );
-
-        // Initial stats should be zero
-        assert_eq!(director.stats().total_requests(), 0);
-
-        // Record a request
-        director.stats().record_request("10.0.0.1:8080");
-        assert_eq!(director.stats().total_requests(), 1);
-    }
-
-    #[test]
-    fn test_replace_first_segment_heuristic() {
-        // Basic case: replace first segment
-        assert_eq!(
-            replace_first_segment_heuristic("/v1/users", "/v2"),
-            "/v2/users"
-        );
-
-        // Multiple segments (replaces first segment, preserves remainder)
-        assert_eq!(
-            replace_first_segment_heuristic("/api/v1/users/123", "/api/v2"),
-            "/api/v2/v1/users/123"
-        );
-
-        // Root path
-        assert_eq!(replace_first_segment_heuristic("/", "/v2"), "/v2");
-
-        // Single segment (no remainder) - should not add trailing slash
-        assert_eq!(replace_first_segment_heuristic("/v1", "/v2"), "/v2");
-
-        // Trailing slash in new prefix is trimmed
-        assert_eq!(
-            replace_first_segment_heuristic("/v1/users", "/v2/"),
-            "/v2/users"
-        );
-    }
-
-    #[test]
-    fn test_route_match_result_struct() {
-        use crate::config::RouteFilters;
-
-        let groups = vec![WeightedBackendGroup {
-            weight: 100,
-            backends: vec!["10.0.0.1:8080".to_string()],
-        }];
-
-        let path_match = PathMatchCompiled::PathPrefix("/api/v1".to_string());
-        let filters = Arc::new(RouteFilters {
-            request_header_modifier: None,
-            response_header_modifier: None,
-            request_redirect: None,
-            url_rewrite: None,
-        });
-
-        let result = RouteMatchResult {
-            backend_groups: &groups,
-            filters: Some(filters.clone()),
-            matched_path: Some(&path_match),
-            route_name: Some("default/my-route"),
-            cache_policy: None,
-            bypass_headers: &[],
-        };
-
-        assert_eq!(result.backend_groups.len(), 1);
-        assert!(result.filters.is_some());
-        assert!(result.matched_path.is_some());
-    }
-}
 
 fn apply_request_header_filter(
     http: &mut HttpHeaders,
@@ -1321,4 +1029,296 @@ fn store_filter_context(http: &mut HttpHeaders, filters: &Arc<RouteFilters>) -> 
     }
 
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::director::{PathMatchCompiled, WeightedBackendGroup};
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_extract_path_and_query() {
+        assert_eq!(extract_path_and_query("/api/users"), ("/api/users", None));
+        assert_eq!(
+            extract_path_and_query("/api/users?foo=bar"),
+            ("/api/users", Some("foo=bar"))
+        );
+        assert_eq!(
+            extract_path_and_query("/api/users#fragment"),
+            ("/api/users", None)
+        );
+        assert_eq!(
+            extract_path_and_query("/api/users?foo=bar#fragment"),
+            ("/api/users", Some("foo=bar"))
+        );
+        assert_eq!(extract_path_and_query(""), ("/", None));
+        assert_eq!(extract_path_and_query("?query"), ("/", Some("query")));
+    }
+
+    #[test]
+    fn test_select_backend_from_groups_single() {
+        let groups = vec![WeightedBackendGroup {
+            weight: 100,
+            backends: vec!["10.0.0.1:8080".to_string()],
+        }];
+        let selected = select_backend_from_groups(&groups).unwrap();
+        assert_eq!(selected, "10.0.0.1:8080");
+    }
+
+    #[test]
+    fn test_select_backend_from_groups_distribution() {
+        // Two groups: 90% to group1 (2 pods), 10% to group2 (2 pods)
+        let groups = vec![
+            WeightedBackendGroup {
+                weight: 90,
+                backends: vec![
+                    "10.0.0.1:8080".to_string(),
+                    "10.0.0.2:8080".to_string(),
+                ],
+            },
+            WeightedBackendGroup {
+                weight: 10,
+                backends: vec![
+                    "10.0.0.3:8080".to_string(),
+                    "10.0.0.4:8080".to_string(),
+                ],
+            },
+        ];
+
+        // Run many selections and check distribution
+        let mut group1_count = 0;
+        let mut group2_count = 0;
+        for _ in 0..1000 {
+            let selected = select_backend_from_groups(&groups).unwrap();
+            if selected == "10.0.0.1:8080" || selected == "10.0.0.2:8080" {
+                group1_count += 1;
+            } else {
+                group2_count += 1;
+            }
+        }
+
+        // Allow for statistical variance (should be roughly 900:100)
+        assert!(
+            group1_count > 800,
+            "group1 selected {} times, expected ~900",
+            group1_count
+        );
+        assert!(
+            group2_count < 200,
+            "group2 selected {} times, expected ~100",
+            group2_count
+        );
+    }
+
+    #[test]
+    fn test_select_backend_from_groups_empty() {
+        let groups: Vec<WeightedBackendGroup> = vec![];
+        assert!(select_backend_from_groups(&groups).is_none());
+    }
+
+    #[test]
+    fn test_select_backend_from_groups_uniform_within_group() {
+        // Single group with 2 pods — should distribute ~50/50
+        let groups = vec![WeightedBackendGroup {
+            weight: 100,
+            backends: vec![
+                "10.0.0.1:8080".to_string(),
+                "10.0.0.2:8080".to_string(),
+            ],
+        }];
+
+        let mut counts = HashMap::new();
+        for _ in 0..1000 {
+            let selected = select_backend_from_groups(&groups).unwrap();
+            *counts.entry(selected.to_string()).or_insert(0) += 1;
+        }
+
+        let count_1 = *counts.get("10.0.0.1:8080").unwrap_or(&0);
+        let count_2 = *counts.get("10.0.0.2:8080").unwrap_or(&0);
+
+        // Each should get roughly 500 (allow wide margin)
+        assert!(
+            count_1 > 350 && count_1 < 650,
+            "10.0.0.1 selected {} times, expected ~500",
+            count_1
+        );
+        assert!(
+            count_2 > 350 && count_2 < 650,
+            "10.0.0.2 selected {} times, expected ~500",
+            count_2
+        );
+    }
+
+    #[test]
+    fn test_match_routes_no_path_match() {
+        // Route with no path match should match all paths
+        let routes = [RouteEntry {
+            path_match: None,
+            method: None,
+            headers: Vec::new(),
+            query_params: Vec::new(),
+            filters: None,
+            backend_groups: vec![WeightedBackendGroup {
+                weight: 100,
+                backends: vec!["10.0.0.1:8080".to_string()],
+            }],
+            listeners: Vec::new(),
+            route_name: None,
+            priority: 100,
+            rule_index: 0,
+            cache_policy: None,
+            bypass_headers: Vec::new(),
+        }];
+
+        // This test doesn't use HttpHeaders, so we can't fully test it here
+        // But we can verify the route structure is correct
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].path_match.is_none());
+        assert_eq!(routes[0].backend_groups.len(), 1);
+    }
+
+    #[test]
+    fn test_match_routes_path_prefix() {
+        let routes = [RouteEntry {
+            path_match: Some(PathMatchCompiled::PathPrefix("/api".to_string())),
+            method: None,
+            headers: Vec::new(),
+            query_params: Vec::new(),
+            filters: None,
+            backend_groups: vec![WeightedBackendGroup {
+                weight: 100,
+                backends: vec!["10.0.0.1:8080".to_string()],
+            }],
+            listeners: Vec::new(),
+            route_name: None,
+            priority: 100,
+            rule_index: 0,
+            cache_policy: None,
+            bypass_headers: Vec::new(),
+        }];
+
+        // Verify route structure
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].path_match.is_some());
+    }
+
+    #[test]
+    fn test_vhost_director_has_backends() {
+        let backend_pool = Arc::new(BackendPool::new());
+
+        // Director with routes that have backends
+        let director = VhostDirector::new(
+            "api.example.com".to_string(),
+            vec![RouteEntry {
+                path_match: None,
+                method: None,
+                headers: Vec::new(),
+                query_params: Vec::new(),
+                filters: None,
+                backend_groups: vec![WeightedBackendGroup {
+                    weight: 100,
+                    backends: vec!["10.0.0.1:8080".to_string()],
+                }],
+                listeners: Vec::new(),
+                route_name: None,
+                priority: 100,
+                rule_index: 0,
+                cache_policy: None,
+                bypass_headers: Vec::new(),
+            }],
+            backend_pool.clone(),
+            None,
+            None,
+        );
+
+        assert!(director.has_backends());
+
+        // Director with no routes
+        let empty_director = VhostDirector::new(
+            "empty.example.com".to_string(),
+            vec![],
+            backend_pool,
+            None,
+            None,
+        );
+
+        assert!(!empty_director.has_backends());
+    }
+
+    #[test]
+    fn test_vhost_director_stats() {
+        let backend_pool = Arc::new(BackendPool::new());
+        let director = VhostDirector::new(
+            "api.example.com".to_string(),
+            vec![],
+            backend_pool,
+            None,
+            None,
+        );
+
+        // Initial stats should be zero
+        assert_eq!(director.stats().total_requests(), 0);
+
+        // Record a request
+        director.stats().record_request("10.0.0.1:8080");
+        assert_eq!(director.stats().total_requests(), 1);
+    }
+
+    #[test]
+    fn test_replace_first_segment_heuristic() {
+        // Basic case: replace first segment
+        assert_eq!(
+            replace_first_segment_heuristic("/v1/users", "/v2"),
+            "/v2/users"
+        );
+
+        // Multiple segments (replaces first segment, preserves remainder)
+        assert_eq!(
+            replace_first_segment_heuristic("/api/v1/users/123", "/api/v2"),
+            "/api/v2/v1/users/123"
+        );
+
+        // Root path
+        assert_eq!(replace_first_segment_heuristic("/", "/v2"), "/v2");
+
+        // Single segment (no remainder) - should not add trailing slash
+        assert_eq!(replace_first_segment_heuristic("/v1", "/v2"), "/v2");
+
+        // Trailing slash in new prefix is trimmed
+        assert_eq!(
+            replace_first_segment_heuristic("/v1/users", "/v2/"),
+            "/v2/users"
+        );
+    }
+
+    #[test]
+    fn test_route_match_result_struct() {
+        use crate::config::RouteFilters;
+
+        let groups = vec![WeightedBackendGroup {
+            weight: 100,
+            backends: vec!["10.0.0.1:8080".to_string()],
+        }];
+
+        let path_match = PathMatchCompiled::PathPrefix("/api/v1".to_string());
+        let filters = Arc::new(RouteFilters {
+            request_header_modifier: None,
+            response_header_modifier: None,
+            request_redirect: None,
+            url_rewrite: None,
+        });
+
+        let result = RouteMatchResult {
+            backend_groups: &groups,
+            filters: Some(filters.clone()),
+            matched_path: Some(&path_match),
+            route_name: Some("default/my-route"),
+            cache_policy: None,
+            bypass_headers: &[],
+        };
+
+        assert_eq!(result.backend_groups.len(), 1);
+        assert!(result.filters.is_some());
+        assert!(result.matched_path.is_some());
+    }
 }

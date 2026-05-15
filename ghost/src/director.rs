@@ -420,7 +420,7 @@ pub fn build_vhost_directors(
 
     // Sort wildcards by descending suffix length so more specific patterns match first
     // (e.g., *.bar.example.com before *.example.com)
-    wildcards.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    wildcards.sort_by_key(|w| std::cmp::Reverse(w.0.len()));
 
     Ok(VhostDirectorMap { exact, wildcards })
 }
@@ -1002,7 +1002,7 @@ mod tests {
         // but only if wildcards are sorted by specificity. Since VhostDirectorMap
         // is built by build_vhost_directors which sorts, let's simulate the sort:
         let mut wildcards = directors.wildcards;
-        wildcards.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        wildcards.sort_by_key(|w| std::cmp::Reverse(w.0.len()));
         let sorted_directors = VhostDirectorMap {
             exact: directors.exact,
             wildcards,
