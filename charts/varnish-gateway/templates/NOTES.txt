@@ -1,3 +1,35 @@
+{{- if .Release.IsUpgrade }}
+{{ .Chart.Name }} upgraded to chart {{ .Chart.Version }} (app {{ .Chart.AppVersion }}).
+
+Release: {{ .Release.Name }}
+Namespace: {{ include "varnish-gateway.namespace" . }}
+
+Chaperone image: {{ .Values.chaperone.image.repository }}:{{ .Values.chaperone.image.tag | default .Chart.AppVersion }}
+{{- with (.Values.chaperone).varnishVersion }}
+Bundled Varnish: {{ . }}
+  → If you load custom VMODs, they must be built against this Varnish version.
+    See: https://github.com/varnish/gateway/blob/main/docs/operations/custom-vmods.md
+{{- end }}
+
+Recommended upgrade command
+---------------------------
+Use --reset-then-reuse-values --force-conflicts (NOT --reuse-values) so new
+top-level value keys introduced by this chart version inherit defaults
+instead of crashing the template render with a nil-pointer error:
+
+    helm upgrade {{ .Release.Name }} oci://ghcr.io/varnish/charts/varnish-gateway \
+        --version {{ .Chart.Version }} \
+        --namespace {{ include "varnish-gateway.namespace" . }} \
+        --reset-then-reuse-values \
+        --force-conflicts
+
+Per-release upgrade notes and breaking changes:
+  https://github.com/varnish/gateway/blob/main/docs/operations/upgrades.md
+
+Verify the rollout:
+  kubectl -n {{ include "varnish-gateway.namespace" . }} rollout status deployment/varnish-gateway-operator
+  kubectl get gateway -A
+{{- else }}
 Thank you for installing {{ .Chart.Name }}!
 
 Your release is named {{ .Release.Name }}.
@@ -8,6 +40,10 @@ Gateway API Resources Created:
   - GatewayClass: {{ .Values.gatewayClass.name }}
 {{- if .Values.gatewayClass.createDefaultParams }}
   - GatewayClassParameters: {{ .Values.gatewayClass.defaultParams.name }}
+{{- end }}
+{{- with (.Values.chaperone).varnishVersion }}
+
+Chaperone bundles Varnish {{ . }}. Custom VMODs must be built against this version.
 {{- end }}
 
 To get started:
@@ -66,3 +102,4 @@ To get started:
 For more information, visit:
   - Documentation: https://github.com/varnish/gateway
   - Issues: https://github.com/varnish/gateway/issues
+{{- end }}

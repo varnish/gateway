@@ -129,6 +129,13 @@ chaperone:
   # Image pull secrets for chaperone pods (comma-separated list)
   imagePullSecrets: ""
 
+  # Varnish version bundled in the chaperone image. This is the single
+  # source of truth: the Dockerfile, Makefile, and CI all read it from
+  # here. Users can template VMOD download URLs against this value and
+  # verify VMOD compatibility before upgrading. When updating, also
+  # rebuild the chaperone image and confirm `varnishd -V` matches.
+  varnishVersion: "9.0.1"
+
 # RBAC configuration
 rbac:
   # Create RBAC resources

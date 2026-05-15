@@ -1,0 +1,137 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "varnish-gateway values",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "namespace": { "type": "string", "minLength": 1 },
+    "operator": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 0 },
+        "image": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+            "tag": { "type": "string" }
+          }
+        },
+        "imagePullSecrets": { "type": "array" },
+        "leaderElection": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": { "enabled": { "type": "boolean" } }
+        },
+        "resources": { "type": "object" },
+        "nodeSelector": { "type": "object" },
+        "securityContext": { "type": "object" },
+        "livenessProbe": { "type": "object" },
+        "readinessProbe": { "type": "object" }
+      }
+    },
+    "gatewayClass": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "controllerName": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "createDefaultParams": { "type": "boolean" },
+        "defaultParams": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "userVCL": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "configMap": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "name": { "type": "string" },
+                    "key": { "type": "string" }
+                  }
+                }
+              }
+            },
+            "logging": {
+              "type": "object",
+              "additionalProperties": true,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "mode": { "type": "string", "enum": ["varnishlog", "varnishncsa"] },
+                "format": { "type": "string" },
+                "extraArgs": { "type": "array" }
+              }
+            },
+            "varnishdExtraArgs": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "extraInitContainers": { "type": "array" },
+            "extraVolumes": { "type": "array" },
+            "extraVolumeMounts": { "type": "array" }
+          }
+        }
+      }
+    },
+    "chaperone": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "image": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+            "tag": { "type": "string" }
+          }
+        },
+        "imagePullSecrets": { "type": "string" },
+        "varnishVersion": { "type": "string" }
+      }
+    },
+    "rbac": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "create": { "type": "boolean" } }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "create": { "type": "boolean" },
+        "annotations": { "type": "object" },
+        "name": { "type": "string" }
+      }
+    },
+    "serviceMonitor": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "interval": { "type": "string", "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$" },
+        "scrapeTimeout": { "type": "string", "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$" },
+        "labels": { "type": "object" }
+      }
+    },
+    "dashboards": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "labels": { "type": "object" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "commonLabels": { "type": "object" },
+    "commonAnnotations": { "type": "object" }
+  }
+}
