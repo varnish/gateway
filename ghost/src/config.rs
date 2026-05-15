@@ -163,15 +163,9 @@ pub struct CachePolicy {
     pub grace_seconds: u32,
     #[serde(default)]
     pub keep_seconds: u32,
-    #[serde(default = "default_request_coalescing")]
-    pub request_coalescing: bool,
     pub cache_key: Option<CacheKeyConfig>,
     #[serde(default)]
     pub bypass_headers: Vec<BypassHeaderConfig>,
-}
-
-fn default_request_coalescing() -> bool {
-    true
 }
 
 /// Route filters container

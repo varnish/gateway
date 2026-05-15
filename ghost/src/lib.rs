@@ -266,13 +266,6 @@ mod ghost {
                 ctx.log(tag, &msg);
             }
 
-            // hash_ignore_busy must be set before lookup, i.e. in vcl_recv.
-            // apply_cache_policy_headers only ever sets the flag when not in
-            // pass mode, so no further guarding is needed here.
-            if result.hash_ignore_busy {
-                ctx.raw.validated_req().set_hash_ignore_busy(1);
-            }
-
             // Signal pass via header instead of ctx.set_pass() so that
             // user VCL concatenated after the preamble vcl_recv still runs.
             // The postamble vcl_recv checks this header and calls return(pass).

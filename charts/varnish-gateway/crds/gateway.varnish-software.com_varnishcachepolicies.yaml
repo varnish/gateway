@@ -136,12 +136,6 @@ spec:
                   Equivalent to stale-if-error in HTTP semantics.
                   Default: 0 (disabled)
                 type: string
-              requestCoalescing:
-                description: |-
-                  RequestCoalescing enables collapsed forwarding: when multiple clients request
-                  the same uncached object simultaneously, only one request goes to the backend.
-                  Default: true
-                type: boolean
               targetRef:
                 description: |-
                   TargetRef identifies the Gateway or HTTPRoute this policy applies to.

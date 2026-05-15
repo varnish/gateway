@@ -80,7 +80,7 @@ Two separate reload paths, both zero-downtime:
 
 By default, Varnish Gateway operates as a pure reverse proxy with **no caching**. Every request passes through to the backend.
 
-To enable caching, create a **VarnishCachePolicy** (VCP) targeting a Gateway, HTTPRoute, or individual route rule. VCP controls TTL, grace/keep, request coalescing, cache key customization, and bypass conditions.
+To enable caching, create a **VarnishCachePolicy** (VCP) targeting a Gateway, HTTPRoute, or individual route rule. VCP controls TTL, grace/keep, cache key customization, and bypass conditions.
 
 ```yaml
 apiVersion: gateway.varnish-software.com/v1alpha1

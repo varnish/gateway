@@ -413,9 +413,7 @@ func isOlder(a, b *gatewayparamsv1alpha1.VarnishCachePolicy) bool {
 
 // specToCachePolicy converts a VCP spec to a ghost.CachePolicy for routing.json.
 func specToCachePolicy(spec *gatewayparamsv1alpha1.VarnishCachePolicySpec) *ghost.CachePolicy {
-	cp := &ghost.CachePolicy{
-		RequestCoalescing: true, // default
-	}
+	cp := &ghost.CachePolicy{}
 
 	if spec.DefaultTTL != nil {
 		seconds := int(math.Round(spec.DefaultTTL.Duration.Seconds()))
@@ -430,9 +428,6 @@ func specToCachePolicy(spec *gatewayparamsv1alpha1.VarnishCachePolicySpec) *ghos
 	}
 	if spec.Keep != nil {
 		cp.KeepSeconds = int(math.Round(spec.Keep.Duration.Seconds()))
-	}
-	if spec.RequestCoalescing != nil {
-		cp.RequestCoalescing = *spec.RequestCoalescing
 	}
 
 	if spec.CacheKey != nil {

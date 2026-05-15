@@ -58,12 +58,6 @@ type VarnishCachePolicySpec struct {
 	// +optional
 	Keep *metav1.Duration `json:"keep,omitempty"`
 
-	// RequestCoalescing enables collapsed forwarding: when multiple clients request
-	// the same uncached object simultaneously, only one request goes to the backend.
-	// Default: true
-	// +optional
-	RequestCoalescing *bool `json:"requestCoalescing,omitempty"`
-
 	// CacheKey customizes what makes a cache entry unique.
 	// +optional
 	CacheKey *CacheKeySpec `json:"cacheKey,omitempty"`

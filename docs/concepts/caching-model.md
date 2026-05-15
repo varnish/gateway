@@ -27,8 +27,6 @@ targeted scope:
   `forcedTTL` (origin headers ignored).
 - **Stale serving** — `grace` (stale-while-revalidate) and `keep`
   (stale-if-error).
-- **Request coalescing** — whether concurrent requests for the same
-  uncached object collapse into a single origin fetch.
 - **Cache key** — which request headers and query parameters participate.
 - **Bypass** — request conditions (e.g., `Authorization` header, session
   cookie) that force pass mode on a per-request basis.

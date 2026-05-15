@@ -136,9 +136,6 @@ type CachePolicy struct {
 	// KeepSeconds is how long to keep stale objects when backends are sick.
 	KeepSeconds int `json:"keep_seconds"`
 
-	// RequestCoalescing enables collapsed forwarding.
-	RequestCoalescing bool `json:"request_coalescing"`
-
 	// CacheKey customizes the cache key composition.
 	CacheKey *CacheKeyConfig `json:"cache_key,omitempty"`
 

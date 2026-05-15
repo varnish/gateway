@@ -54,10 +54,6 @@ func durationPtr(d time.Duration) *metav1.Duration {
 	return &metav1.Duration{Duration: d}
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 func stringPtr(s string) *string {
 	return &s
 }
@@ -296,31 +292,6 @@ func TestSpecToCachePolicy(t *testing.T) {
 				}
 				if cp.KeepSeconds != 7200 {
 					t.Errorf("KeepSeconds = %d, want 7200", cp.KeepSeconds)
-				}
-			},
-		},
-		{
-			name: "requestCoalescing defaults to true",
-			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
-				TargetRef:  vcpTargetRef("HTTPRoute", "r", nil),
-				DefaultTTL: durationPtr(60 * time.Second),
-			},
-			verify: func(t *testing.T, cp *ghost.CachePolicy) {
-				if !cp.RequestCoalescing {
-					t.Error("RequestCoalescing should default to true")
-				}
-			},
-		},
-		{
-			name: "requestCoalescing explicitly disabled",
-			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
-				TargetRef:         vcpTargetRef("HTTPRoute", "r", nil),
-				DefaultTTL:        durationPtr(60 * time.Second),
-				RequestCoalescing: boolPtr(false),
-			},
-			verify: func(t *testing.T, cp *ghost.CachePolicy) {
-				if cp.RequestCoalescing {
-					t.Error("RequestCoalescing should be false")
 				}
 			},
 		},

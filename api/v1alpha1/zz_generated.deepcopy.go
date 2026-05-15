@@ -501,11 +501,6 @@ func (in *VarnishCachePolicySpec) DeepCopyInto(out *VarnishCachePolicySpec) {
 		*out = new(metav1.Duration)
 		**out = **in
 	}
-	if in.RequestCoalescing != nil {
-		in, out := &in.RequestCoalescing, &out.RequestCoalescing
-		*out = new(bool)
-		**out = **in
-	}
 	if in.CacheKey != nil {
 		in, out := &in.CacheKey, &out.CacheKey
 		*out = new(CacheKeySpec)

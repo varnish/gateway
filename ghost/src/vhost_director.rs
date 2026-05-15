@@ -54,10 +54,6 @@ pub struct RouteRequestResult {
     pub log_msgs: Vec<(LogTag, String)>,
     /// Whether to bypass the cache entirely (return(pass) in VCL terms).
     pub pass: bool,
-    /// Whether to set req.hash_ignore_busy so concurrent requests for the
-    /// same hash do not wait on the in-flight fetch. Only meaningful when
-    /// `pass` is false (pass mode skips lookup entirely).
-    pub hash_ignore_busy: bool,
 }
 
 impl Default for RouteRequestResult {
@@ -69,7 +65,6 @@ impl Default for RouteRequestResult {
             route_name: None,
             log_msgs: Vec::new(),
             pass: true,
-            hash_ignore_busy: false,
         }
     }
 }
@@ -400,8 +395,7 @@ impl VhostDirector {
         }
 
         // Determine cache behavior from policy
-        let (pass, hash_ignore_busy) =
-            apply_cache_policy_headers(http, &match_result, &query_string_owned);
+        let pass = apply_cache_policy_headers(http, &match_result, &query_string_owned);
 
         // Select backend using two-level weighted random:
         // Level 1: pick a group by weight
@@ -414,7 +408,6 @@ impl VhostDirector {
                     route_name,
                     log_msgs,
                     pass,
-                    hash_ignore_busy,
                 };
             }
         };
@@ -430,7 +423,6 @@ impl VhostDirector {
                 route_name,
                 log_msgs,
                 pass,
-                hash_ignore_busy,
             },
         };
 
@@ -439,7 +431,6 @@ impl VhostDirector {
             route_name,
             log_msgs,
             pass,
-            hash_ignore_busy,
         }
     }
 }
@@ -553,22 +544,18 @@ fn match_routes<'a>(
 /// - `X-Ghost-Keep: <N>s` → set beresp.keep
 /// - `X-Ghost-Cache-Key-Extra: <data>` → additional hash_data() input
 ///
-/// Returns `(pass, hash_ignore_busy)`:
-///
-/// - `pass` → bypass the cache entirely (no policy, or a bypass header matched).
-/// - `hash_ignore_busy` → enter the cache but skip the waitinglist, so concurrent
-///   requests for the same hash each issue their own fetch (collapsed forwarding off).
-///   Only meaningful when `pass` is false.
+/// Returns `true` when the request should bypass the cache entirely (no policy,
+/// or a bypass header matched); `false` when caching applies.
 fn apply_cache_policy_headers(
     http: &mut HttpHeaders,
     match_result: &RouteMatchResult,
     query_string: &Option<String>,
-) -> (bool, bool) {
+) -> bool {
     let cache_policy = match match_result.cache_policy {
         Some(cp) => cp,
         None => {
             // No cache policy → pass-through mode (no caching)
-            return (true, false);
+            return true;
         }
     };
 
@@ -577,7 +564,7 @@ fn apply_cache_policy_headers(
         match bypass {
             BypassHeaderCompiled::Present { name } => {
                 if http.header(name).is_some() {
-                    return (true, false);
+                    return true;
                 }
             }
             BypassHeaderCompiled::Regex { name, regex } => {
@@ -590,7 +577,7 @@ fn apply_cache_policy_headers(
                         },
                     };
                     if regex.is_match(val_str) {
-                        return (true, false);
+                        return true;
                     }
                 }
             }
@@ -648,9 +635,7 @@ fn apply_cache_policy_headers(
     }
 
     // Cache policy present → do not pass (enable caching).
-    // request_coalescing=false → set hash_ignore_busy so concurrent requests
-    // for the same hash do not collapse onto the in-flight fetch.
-    (false, !cache_policy.request_coalescing)
+    false
 }
 
 /// Filter query parameters based on include/exclude lists.
