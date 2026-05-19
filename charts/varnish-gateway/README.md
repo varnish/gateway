@@ -59,8 +59,8 @@ The following table lists the configurable parameters of the Varnish Gateway cha
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `chaperone.image.repository` | Chaperone image repository | `ghcr.io/varnish/gateway-chaperone` |
-| `chaperone.image.tag` | Chaperone image tag (defaults to chart appVersion) | `""` |
+| `chaperone.image.repository` | Chaperone image repository. Override to ship a custom image (extra VMODs, internal patches); you own the operator/chaperone compatibility when you do. | `ghcr.io/varnish/gateway-chaperone` |
+| `chaperone.image.tag` | Chaperone image tag. Defaults to chart appVersion so operator and chaperone stay lockstep; override only if you also own the compatibility. | `""` |
 | `chaperone.image.pullPolicy` | Chaperone image pull policy | `IfNotPresent` |
 | `chaperone.imagePullSecrets` | Image pull secrets for chaperone pods | `""` |
 

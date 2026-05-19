@@ -120,7 +120,20 @@ gatewayClass:
 
 # Chaperone (gateway data plane) configuration
 chaperone:
-  # Chaperone container image (used by operator to create Gateway pods)
+  # Chaperone container image (used by operator to create Gateway pods).
+  #
+  # The empty `tag` defaults to the chart's appVersion, which keeps the
+  # operator and chaperone in lockstep — they are built, tested, and
+  # released together as a matched pair.
+  #
+  # Overriding `repository` or `tag` is supported for users who need to
+  # ship a custom chaperone image (extra VMODs, internal patches, a
+  # different base, etc.). If you do this, you own the compatibility
+  # contract: the operator assumes the chaperone understands the
+  # routing.json / ghost.json / VCL formats it emits, and mismatches
+  # will surface as runtime errors rather than upgrade-time validation.
+  # The safest pattern is to base your custom image on the matching
+  # upstream tag and rebuild it whenever you bump the chart.
   image:
     repository: ghcr.io/varnish/gateway-chaperone
     pullPolicy: IfNotPresent
