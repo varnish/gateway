@@ -597,6 +597,9 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	// Attach BackendTLSPolicy to each route
 	r.attachBackendTLS(ctx, collectedRoutes)
 
+	// Attach ExternalProxy hints for routes whose Service is type ExternalName
+	r.attachExternalProxies(ctx, collectedRoutes)
+
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)
 	for _, route := range collectedRoutes {
@@ -735,6 +738,62 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 	}
 }
 
+// attachExternalProxies resolves routes whose backend Service is of type
+// ExternalName and attaches an ExternalProxy hint. The ghost VMOD uses this
+// to drive its internal HTTP client instead of looking up native backends.
+// TLS is inferred from the Service port's appProtocol == "https"; a
+// BackendTLSPolicy attached via attachBackendTLS will still apply (its
+// hostname overrides SNI in the synthetic backend).
+func (r *HTTPRouteReconciler) attachExternalProxies(ctx context.Context, collectedRoutes []ghost.Route) {
+	type svcInfo struct {
+		externalName string
+		ports        []corev1.ServicePort
+	}
+
+	cache := make(map[types.NamespacedName]*svcInfo)
+	for i := range collectedRoutes {
+		cr := &collectedRoutes[i]
+		if cr.Service == "" {
+			continue
+		}
+		key := types.NamespacedName{Namespace: cr.Namespace, Name: cr.Service}
+		info, cached := cache[key]
+		if !cached {
+			var svc corev1.Service
+			if err := r.Get(ctx, key, &svc); err == nil &&
+				svc.Spec.Type == corev1.ServiceTypeExternalName &&
+				svc.Spec.ExternalName != "" {
+				info = &svcInfo{
+					externalName: svc.Spec.ExternalName,
+					ports:        svc.Spec.Ports,
+				}
+			}
+			cache[key] = info
+		}
+		if info == nil {
+			continue
+		}
+
+		// For ExternalName services buildServicePortMap skips translation, so
+		// cr.Port equals the BackendRef.port (the Service port the user wrote).
+		cr.ExternalProxy = &ghost.ExternalProxy{
+			Hostname: info.externalName,
+			Port:     cr.Port,
+			TLS:      portUsesHTTPS(info.ports, cr.Port),
+		}
+	}
+}
+
+// portUsesHTTPS reports whether the named Service port has appProtocol=https.
+func portUsesHTTPS(ports []corev1.ServicePort, port int) bool {
+	for _, sp := range ports {
+		if int(sp.Port) == port {
+			return sp.AppProtocol != nil && strings.EqualFold(*sp.AppProtocol, "https")
+		}
+	}
+	return false
+}
+
 // findHTTPRoutesForBackendTLSPolicy returns reconcile requests for HTTPRoutes
 // whose backend Services are targeted by the given BackendTLSPolicy.
 func (r *HTTPRouteReconciler) findHTTPRoutesForBackendTLSPolicy(ctx context.Context, obj client.Object) []reconcile.Request {
@@ -828,6 +887,13 @@ func (r *HTTPRouteReconciler) buildServicePortMap(ctx context.Context, routes []
 						"service", fmt.Sprintf("%s/%s", backendNS, backend.Name),
 						"error", err)
 					continue // leave unmapped, falls through to service port
+				}
+
+				// ExternalName services have no underlying pods, so targetPort
+				// translation doesn't apply — the ghost VMOD's external proxy
+				// connects directly to the externalName on the BackendRef port.
+				if svc.Spec.Type == corev1.ServiceTypeExternalName {
+					continue
 				}
 
 				// Find matching port in Service spec

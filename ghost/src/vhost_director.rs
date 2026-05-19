@@ -416,8 +416,8 @@ impl VhostDirector {
         self.stats.record_request(backend_key);
 
         // Look up in backend pool
-        let backend = match self.backend_pool.get(backend_key) {
-            Some(b) => b,
+        let entry = match self.backend_pool.get(backend_key) {
+            Some(e) => e,
             None => return RouteRequestResult {
                 backend: None,
                 route_name,
@@ -427,7 +427,7 @@ impl VhostDirector {
         };
 
         RouteRequestResult {
-            backend: Some(AsRef::<BackendRef>::as_ref(&*backend).clone()),
+            backend: Some(entry.backend_ref()),
             route_name,
             log_msgs,
             pass,

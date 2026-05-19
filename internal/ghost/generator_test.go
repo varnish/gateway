@@ -107,6 +107,59 @@ func TestGenerate(t *testing.T) {
 	}
 }
 
+func TestGenerateExternalProxyPassthrough(t *testing.T) {
+	routingConfig := &RoutingConfig{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
+			"media.example.com": {
+				Routes: []Route{
+					{
+						PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/media"},
+						Service:   "s3-media",
+						Namespace: "web2026",
+						Port:      443,
+						Weight:    100,
+						Priority:  10700,
+						ExternalProxy: &ExternalProxy{
+							Hostname: "web2026-assets.s3.nl-ams.scw.cloud",
+							Port:     443,
+							TLS:      true,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// No EndpointSlices for ExternalName services — chaperone must produce
+	// the route anyway, with the ExternalProxy carried through.
+	config := Generate(routingConfig, ServiceEndpoints{})
+
+	vhost, ok := config.VHosts["media.example.com"]
+	if !ok {
+		t.Fatal("media.example.com vhost not found")
+	}
+	if len(vhost.Routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(vhost.Routes))
+	}
+	if len(vhost.Routes[0].BackendGroups) != 1 {
+		t.Fatalf("expected 1 backend group, got %d", len(vhost.Routes[0].BackendGroups))
+	}
+	g := vhost.Routes[0].BackendGroups[0]
+	if g.ExternalProxy == nil {
+		t.Fatal("expected ExternalProxy set on backend group")
+	}
+	if g.ExternalProxy.Hostname != "web2026-assets.s3.nl-ams.scw.cloud" {
+		t.Errorf("unexpected hostname: %q", g.ExternalProxy.Hostname)
+	}
+	if g.ExternalProxy.Port != 443 || !g.ExternalProxy.TLS {
+		t.Errorf("unexpected ExternalProxy port=%d tls=%v", g.ExternalProxy.Port, g.ExternalProxy.TLS)
+	}
+	if len(g.Backends) != 0 {
+		t.Errorf("expected zero native backends for external proxy group, got %d", len(g.Backends))
+	}
+}
+
 func TestGenerateNoEndpoints(t *testing.T) {
 	routingConfig := &RoutingConfig{
 		Version: 2,

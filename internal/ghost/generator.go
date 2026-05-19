@@ -288,7 +288,19 @@ func Generate(routingConfig *RoutingConfig, endpoints ServiceEndpoints) *Config 
 // After service-port-to-target-port resolution in the operator, route.Port contains the
 // target port that matches what EndpointSlice reports. When the target port is a named
 // port (route.Port == 0, route.PortName != ""), filtering is done by port name instead.
+//
+// When route.ExternalProxy is set (Service of type ExternalName), the route bypasses
+// EndpointSlice lookup entirely and the BackendGroup carries the external proxy hint
+// directly to ghost.json — the ghost VMOD handles DNS and connection management.
 func routeToBackendGroup(route Route, endpoints ServiceEndpoints) BackendGroup {
+	if route.ExternalProxy != nil {
+		return BackendGroup{
+			Weight:        route.Weight,
+			Backends:      []Backend{},
+			ExternalProxy: route.ExternalProxy,
+		}
+	}
+
 	key := ServiceKey(route.Namespace, route.Service)
 	eps, ok := endpoints[key]
 	if !ok {

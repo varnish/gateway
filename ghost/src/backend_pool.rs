@@ -1,30 +1,61 @@
 //! Backend management for Ghost VMOD
 //!
-//! This module provides utilities for creating and managing native Varnish backends.
-//! Backends are stored per-director instance (not globally) due to thread safety constraints.
+//! This module provides utilities for creating and managing both native
+//! Varnish backends and synthetic external proxy backends. Backends are
+//! stored per-director instance (not globally) due to thread safety constraints.
 
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::config::BackendTLS;
-use varnish::vcl::{Ctx, NativeBackend, NativeBackendBuilder, VclError};
+use crate::config::{BackendTLS, ExternalProxy};
+use crate::external_backend::{warm_runtime, ExternalBackend, ExternalBody};
+use varnish::vcl::{Backend, BackendRef, Ctx, NativeBackend, NativeBackendBuilder, VclError};
+
+/// Entry stored in the BackendPool. Native backends wrap real Varnish backend
+/// handles; External backends wrap a synthetic VclBackend driven by reqwest.
+#[derive(Clone)]
+pub enum BackendEntry {
+    Native(Arc<NativeBackend>),
+    External(Arc<Backend<ExternalBackend, ExternalBody>>),
+}
+
+impl std::fmt::Debug for BackendEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendEntry::Native(_) => f.write_str("Native(..)"),
+            BackendEntry::External(_) => f.write_str("External(..)"),
+        }
+    }
+}
+
+impl BackendEntry {
+    /// Borrow the inner `BackendRef` regardless of variant.
+    pub fn backend_ref(&self) -> BackendRef {
+        match self {
+            BackendEntry::Native(b) => AsRef::<BackendRef>::as_ref(b.as_ref()).clone(),
+            BackendEntry::External(b) => b.as_ref().as_ref().clone(),
+        }
+    }
+}
 
 /// Backend pool for a single director instance
 ///
-/// Each director owns its own backends. Backends are indexed by "address:port"
-/// and reused across config reloads within the same director.
+/// Each director owns its own backends. Backends are indexed by their key
+/// (e.g. `"address:port"` for native, `"external:scheme://host:port"` for
+/// external proxies) and reused across config reloads within the same director.
 /// Backends are wrapped in Arc for efficient cloning during hot-reload.
 #[derive(Clone, Debug)]
 pub struct BackendPool {
-    backends: HashMap<String, Arc<NativeBackend>>,
+    backends: HashMap<String, BackendEntry>,
 }
 
 // SAFETY: NativeBackend wraps VCL_BACKEND pointers which are thread-safe in Varnish.
 // Multiple worker threads can concurrently access backends through shared VCL state.
 // The raw pointer is an opaque handle managed by Varnish's backend infrastructure
-// with its own synchronization guarantees.
+// with its own synchronization guarantees. Backend<ExternalBackend, _> also
+// wraps a VCL_BACKEND handle managed by Varnish under the same guarantees.
 unsafe impl Send for BackendPool {}
 unsafe impl Sync for BackendPool {}
 
@@ -76,7 +107,7 @@ impl BackendPool {
         let addr = SocketAddr::new(ip, port);
 
         // Create backend with builder
-        let backend_name = format!("ghost_{}", key.replace([':', '.', '/'], "_"));
+        let backend_name = format!("ghost_{}", sanitize_backend_name(&key));
         let c_name = CString::new(backend_name)
             .map_err(|e| VclError::new(format!("Invalid backend name: {}", e)))?;
         let builder = NativeBackendBuilder::new_ip(&c_name, addr);
@@ -110,7 +141,41 @@ impl BackendPool {
         // SAFETY: NativeBackend contains VCL_BACKEND pointers which are thread-safe
         // in Varnish's model. See BackendPool's Send+Sync impl for details.
         #[allow(clippy::arc_with_non_send_sync)]
-        self.backends.insert(key.clone(), Arc::new(backend));
+        self.backends
+            .insert(key.clone(), BackendEntry::Native(Arc::new(backend)));
+
+        Ok(key)
+    }
+
+    /// Get or create a synthetic external proxy backend.
+    ///
+    /// The key encodes the upstream tuple so different (hostname, port, tls)
+    /// combinations get distinct synthetic backends with stable VBE stats.
+    /// Internally, the backend's reqwest::Client manages DNS resolution and
+    /// connection pooling — Varnish only ever sees one VBE per ExternalName
+    /// regardless of how many origin IPs reqwest rotates through.
+    pub fn get_or_create_external(
+        &mut self,
+        ctx: &mut Ctx,
+        proxy: &ExternalProxy,
+    ) -> Result<String, VclError> {
+        let scheme = if proxy.tls { "https" } else { "http" };
+        let key = format!("external:{}://{}:{}", scheme, proxy.hostname, proxy.port);
+
+        if self.backends.contains_key(&key) {
+            return Ok(key);
+        }
+
+        // Pay tokio startup at reload time, not on the first proxied request.
+        warm_runtime();
+
+        let impl_ = ExternalBackend::new(proxy)?;
+        let backend_name = format!("ghost_{}", sanitize_backend_name(&key));
+        let backend = Backend::new(ctx, "ghost", &backend_name, impl_, false)?;
+
+        #[allow(clippy::arc_with_non_send_sync)]
+        self.backends
+            .insert(key.clone(), BackendEntry::External(Arc::new(backend)));
 
         Ok(key)
     }
@@ -118,7 +183,7 @@ impl BackendPool {
     /// Look up a backend in the pool by key
     ///
     /// Returns None if the backend doesn't exist (shouldn't happen in normal use).
-    pub fn get(&self, key: &str) -> Option<Arc<NativeBackend>> {
+    pub fn get(&self, key: &str) -> Option<BackendEntry> {
         self.backends.get(key).cloned()
     }
 
@@ -141,6 +206,13 @@ impl BackendPool {
         self.backends
             .retain(|key, _backend| keys_to_keep.contains(key));
     }
+}
+
+/// Map a backend key into a valid Varnish backend name (alphanumeric + underscore).
+fn sanitize_backend_name(key: &str) -> String {
+    key.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 #[cfg(test)]

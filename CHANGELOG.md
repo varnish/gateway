@@ -30,6 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`topologySpreadConstraints` on GatewayClassParameters.** Allows operators
   to spread gateway pods across nodes/zones; changes trigger a rolling
   restart via the infrastructure hash. Plumbed through the bundled CRD.
+- **ExternalName Service backends.** HTTPRoutes whose backendRef points at a
+  Service of type ExternalName are now proxied through a `reqwest`-backed
+  synthetic backend inside the ghost VMOD instead of being silently dropped
+  from `ghost.json`. One synthetic Varnish backend is kept per (hostname,
+  port, TLS) tuple — reqwest's connection pool and DNS resolver hide
+  rotating cloud IPs underneath, so Varnish's per-backend VBE stats stay
+  stable across IP rotation. Wire schema gains
+  `BackendGroup.external_proxy` (mutually exclusive with `backends`);
+  the operator detects ExternalName Services, fills the field, and infers
+  TLS from `Service.spec.ports[].appProtocol == "https"`. Request bodies
+  are not yet forwarded — non-idempotent methods log a warning in
+  varnishlog. Closes the silent-drop bug where `ResolvedRefs=True` was
+  reported but the route returned `500 no backends available`.
 
 ### Helm chart
 

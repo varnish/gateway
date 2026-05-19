@@ -21,10 +21,25 @@ type Backend struct {
 // This enables correct weighted traffic distribution: the weight belongs to
 // the service group (not individual pods), and selection is two-level:
 // (1) pick a group by weight, (2) pick a random pod within the group.
+//
+// A group is either a native backend group (Backends populated) or an external
+// proxy group (ExternalProxy populated). The two are mutually exclusive.
 type BackendGroup struct {
-	Weight     int        `json:"weight"`
-	Backends   []Backend  `json:"backends"`
-	BackendTLS *BackendTLS `json:"backend_tls,omitempty"`
+	Weight        int            `json:"weight"`
+	Backends      []Backend      `json:"backends"`
+	BackendTLS    *BackendTLS    `json:"backend_tls,omitempty"`
+	ExternalProxy *ExternalProxy `json:"external_proxy,omitempty"`
+}
+
+// ExternalProxy describes an external HTTP(S) origin reached via the ghost
+// VMOD's built-in HTTP client. Used for Kubernetes Services of type
+// ExternalName: ghost maintains one stable synthetic backend per (Hostname,
+// Port, TLS) tuple, so DNS rotation and connection pooling stay hidden from
+// Varnish's per-backend stats.
+type ExternalProxy struct {
+	Hostname string `json:"hostname"`
+	Port     int    `json:"port"`
+	TLS      bool   `json:"tls"`
 }
 
 // RoutingRule defines which Kubernetes service handles a vhost.
@@ -183,6 +198,10 @@ type Route struct {
 	RuleIndex   int               `json:"rule_index"`             // Original rule ordering for tiebreaking
 	CachePolicy *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
 	BackendTLS  *BackendTLS       `json:"backend_tls,omitempty"`  // TLS config from BackendTLSPolicy
+	// ExternalProxy is set when the route's backendRef points to a Service of
+	// type ExternalName. The chaperone passes this through to ghost.json
+	// without performing EndpointSlice lookup.
+	ExternalProxy *ExternalProxy `json:"external_proxy,omitempty"`
 }
 
 // VHostRouting represents routing configuration for a vhost with path-based rules.

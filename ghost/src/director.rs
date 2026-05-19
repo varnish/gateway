@@ -18,7 +18,7 @@ use varnish::vcl::{
 };
 
 use crate::backend_pool::BackendPool;
-use crate::config::{Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
+use crate::config::{BackendGroup, Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
 use crate::internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
@@ -234,6 +234,33 @@ impl VhostDirectorMap {
     }
 }
 
+/// Resolve a config `BackendGroup` into a `WeightedBackendGroup` by registering
+/// its backends with the pool. External-proxy groups yield one synthetic
+/// backend per upstream; native groups yield one entry per resolved pod IP.
+fn resolve_backend_group(
+    ctx: &mut Ctx,
+    backend_pool: &mut BackendPool,
+    group: &BackendGroup,
+) -> Result<WeightedBackendGroup, VclError> {
+    let mut backend_keys = Vec::new();
+    if let Some(ref ep) = group.external_proxy {
+        backend_keys.push(backend_pool.get_or_create_external(ctx, ep)?);
+    } else {
+        for backend in &group.backends {
+            backend_keys.push(backend_pool.get_or_create(
+                ctx,
+                &backend.address,
+                backend.port,
+                group.backend_tls.as_ref(),
+            )?);
+        }
+    }
+    Ok(WeightedBackendGroup {
+        weight: group.weight,
+        backends: backend_keys,
+    })
+}
+
 /// Build vhost directors from configuration
 ///
 /// Creates a VhostDirector for each vhost in the config. Each director handles
@@ -259,22 +286,8 @@ pub fn build_vhost_directors(
         for route in &vhost.routes {
             let mut groups = Vec::new();
 
-            // Create backend groups
             for group in &route.backend_groups {
-                let mut backend_keys = Vec::new();
-                for backend in &group.backends {
-                    let key = backend_pool.get_or_create(
-                        ctx,
-                        &backend.address,
-                        backend.port,
-                        group.backend_tls.as_ref(),
-                    )?;
-                    backend_keys.push(key);
-                }
-                groups.push(WeightedBackendGroup {
-                    weight: group.weight,
-                    backends: backend_keys,
-                });
+                groups.push(resolve_backend_group(ctx, backend_pool, group)?);
             }
 
             let path_match = match route.path_match.as_ref() {
@@ -361,20 +374,7 @@ pub fn build_vhost_directors(
         if !vhost.default_backends.is_empty() {
             let mut default_groups = Vec::new();
             for group in &vhost.default_backends {
-                let mut backend_keys = Vec::new();
-                for backend in &group.backends {
-                    let key = backend_pool.get_or_create(
-                        ctx,
-                        &backend.address,
-                        backend.port,
-                        group.backend_tls.as_ref(),
-                    )?;
-                    backend_keys.push(key);
-                }
-                default_groups.push(WeightedBackendGroup {
-                    weight: group.weight,
-                    backends: backend_keys,
-                });
+                default_groups.push(resolve_backend_group(ctx, backend_pool, group)?);
             }
             route_entries.push(RouteEntry {
                 path_match: None,

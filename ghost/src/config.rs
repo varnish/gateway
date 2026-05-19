@@ -28,17 +28,41 @@ pub struct BackendTLS {
     pub hostname: String,
 }
 
+/// External HTTP(S) origin proxied via ghost's built-in HTTP client.
+/// Used for Kubernetes Services of type ExternalName. Ghost keeps one
+/// stable synthetic backend per (hostname, port, tls) tuple, hiding DNS
+/// rotation and connection pooling from Varnish's per-backend stats.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExternalProxy {
+    pub hostname: String,
+    pub port: u16,
+    #[serde(default)]
+    pub tls: bool,
+}
+
 /// A group of backends sharing a weight for correct weighted traffic distribution.
 /// Selection is two-level: (1) pick a group by weight, (2) pick a random pod within the group.
+///
+/// A group is either a native backend group (`backends` populated) or an
+/// external proxy group (`external_proxy` populated). The two are mutually
+/// exclusive — when `external_proxy` is set, `backends` must be empty and is
+/// ignored.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BackendGroup {
     #[serde(default = "default_weight")]
     pub weight: u32,
+    #[serde(default)]
     pub backends: Vec<Backend>,
     /// TLS configuration for connecting to backends in this group.
     /// When present, Varnish will use TLS for backend connections.
+    /// Only applies to native `backends`; for `external_proxy`, use
+    /// `ExternalProxy::tls` and `ExternalProxy::sni`.
     #[serde(default)]
     pub backend_tls: Option<BackendTLS>,
+    /// External proxy target. When set, requests are forwarded by the ghost
+    /// VMOD's HTTP client instead of via native Varnish backends.
+    #[serde(default)]
+    pub external_proxy: Option<ExternalProxy>,
 }
 
 /// Mirrors Gateway API's HTTPPathMatch types for URL routing decisions.
@@ -272,7 +296,7 @@ fn validate(config: &Config) -> Result<(), String> {
 
             for (g, group) in route.backend_groups.iter().enumerate() {
                 let group_ctx = format!("{} group {}", route_ctx, g);
-                validate_backends(&group_ctx, &group.backends)?;
+                validate_backend_group(&group_ctx, group)?;
             }
 
             if let Some(ref path_match) = route.path_match {
@@ -295,9 +319,9 @@ fn validate(config: &Config) -> Result<(), String> {
         }
 
         for (g, group) in vhost.default_backends.iter().enumerate() {
-            validate_backends(
+            validate_backend_group(
                 &format!("{} default_backends group {}", hostname, g),
-                &group.backends,
+                group,
             )?;
         }
     }
@@ -337,6 +361,27 @@ fn validate_hostname(hostname: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Validate a backend group: either a native group with backends, or an
+/// external proxy group. The two modes are mutually exclusive.
+fn validate_backend_group(context: &str, group: &BackendGroup) -> Result<(), String> {
+    if let Some(ref ep) = group.external_proxy {
+        if !group.backends.is_empty() {
+            return Err(format!(
+                "{}: external_proxy and backends are mutually exclusive",
+                context
+            ));
+        }
+        if ep.hostname.is_empty() {
+            return Err(format!("{}: external_proxy.hostname cannot be empty", context));
+        }
+        if ep.port == 0 {
+            return Err(format!("{}: external_proxy.port cannot be 0", context));
+        }
+        return Ok(());
+    }
+    validate_backends(context, &group.backends)
 }
 
 /// Guard against misconfigured endpoints that would cause request failures.
@@ -725,6 +770,97 @@ mod tests {
         assert!(group.backend_tls.is_some());
         let tls = group.backend_tls.as_ref().unwrap();
         assert_eq!(tls.hostname, "api.internal.example.com");
+    }
+
+    #[test]
+    fn test_external_proxy_parsing() {
+        let file = write_config(
+            r#"{
+                "version": 2,
+                "vhosts": {
+                    "media.example.com": {
+                        "routes": [
+                            {
+                                "path_match": {"type": "PathPrefix", "value": "/media"},
+                                "backend_groups": [
+                                    {
+                                        "weight": 100,
+                                        "backends": [],
+                                        "external_proxy": {
+                                            "hostname": "web2026-assets.s3.nl-ams.scw.cloud",
+                                            "port": 443,
+                                            "tls": true
+                                        }
+                                    }
+                                ],
+                                "priority": 10700
+                            }
+                        ]
+                    }
+                }
+            }"#,
+        );
+
+        let config = load(file.path()).unwrap();
+        let group = &config.vhosts["media.example.com"].routes[0].backend_groups[0];
+        let ep = group.external_proxy.as_ref().expect("expected external_proxy");
+        assert_eq!(ep.hostname, "web2026-assets.s3.nl-ams.scw.cloud");
+        assert_eq!(ep.port, 443);
+        assert!(ep.tls);
+        assert!(group.backends.is_empty());
+    }
+
+    #[test]
+    fn test_external_proxy_mutex_with_backends() {
+        // A group cannot carry both backends and external_proxy.
+        let file = write_config(
+            r#"{
+                "version": 2,
+                "vhosts": {
+                    "media.example.com": {
+                        "routes": [
+                            {
+                                "backend_groups": [{
+                                    "weight": 100,
+                                    "backends": [{"address": "10.0.0.1", "port": 8080}],
+                                    "external_proxy": {"hostname": "h", "port": 443, "tls": true}
+                                }],
+                                "priority": 100
+                            }
+                        ]
+                    }
+                }
+            }"#,
+        );
+        let err = load(file.path()).expect_err("expected validation error");
+        assert!(
+            err.contains("external_proxy and backends are mutually exclusive"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_external_proxy_rejects_empty_hostname() {
+        let file = write_config(
+            r#"{
+                "version": 2,
+                "vhosts": {
+                    "media.example.com": {
+                        "routes": [{
+                            "backend_groups": [{
+                                "weight": 100,
+                                "backends": [],
+                                "external_proxy": {"hostname": "", "port": 443, "tls": true}
+                            }],
+                            "priority": 100
+                        }]
+                    }
+                }
+            }"#,
+        );
+        let err = load(file.path()).expect_err("expected validation error");
+        assert!(err.contains("hostname cannot be empty"), "unexpected error: {}", err);
     }
 
     #[test]

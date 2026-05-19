@@ -17,6 +17,13 @@ arc-swap = "1.7"
 rand = "0.8"
 regex = "1.10"
 time = { version = "0.3", features = ["formatting", "parsing"] }
+# External proxy backend for Service of type ExternalName.
+# Reqwest's connection pool and DNS resolver hide rotating upstream IPs
+# behind a single synthetic Varnish backend (one VBE per ExternalName).
+reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio-stream = "0.1"
+bytes = "1"
 
 [build-dependencies]
 cc = "1"

@@ -34,6 +34,7 @@ fn local_socket<'a>(ctx: &'a Ctx<'a>) -> Option<&'a str> {
 mod backend_pool;
 mod config;
 mod director;
+mod external_backend;
 pub mod format;
 mod internal_error_backend;
 mod not_found_backend;

@@ -15,6 +15,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
+
+	"github.com/varnish/gateway/internal/ghost"
 )
 
 func newHTTPRouteTestReconciler(scheme *runtime.Scheme, objs ...runtime.Object) *HTTPRouteReconciler {
@@ -1746,6 +1748,183 @@ func TestReconcile_CrossNamespace_BlockedBackendExcludedFromRouting(t *testing.T
 	routingJSON := updatedCM.Data["routing.json"]
 	if strings.Contains(routingJSON, "backend-svc") {
 		t.Error("routing.json should NOT contain blocked cross-namespace backend")
+	}
+}
+
+// TestAttachExternalProxies covers the ExternalName Service detection path:
+// routes pointing at an ExternalName service must come back with an
+// ExternalProxy hint populated (including TLS inferred from appProtocol),
+// while ClusterIP-backed routes must remain untouched.
+func TestAttachExternalProxies(t *testing.T) {
+	scheme := newTestScheme()
+
+	httpsAP := "https"
+	externalSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "s3-media", Namespace: "web2026"},
+		Spec: corev1.ServiceSpec{
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: "web2026-assets.s3.nl-ams.scw.cloud",
+			Ports: []corev1.ServicePort{
+				{Port: 443, AppProtocol: &httpsAP},
+			},
+		},
+	}
+	clusterSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "web2026"},
+		Spec: corev1.ServiceSpec{
+			Type:  corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{{Port: 3000, TargetPort: intstr.FromInt(3000)}},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, externalSvc, clusterSvc)
+
+	routes := []ghost.Route{
+		{
+			Hostname:  "preview.varnish-software.com",
+			PathMatch: &ghost.PathMatch{Type: ghost.PathMatchPathPrefix, Value: "/media"},
+			Service:   "s3-media",
+			Namespace: "web2026",
+			Port:      443,
+			Weight:    100,
+		},
+		{
+			Hostname:  "preview.varnish-software.com",
+			Service:   "web",
+			Namespace: "web2026",
+			Port:      3000,
+			Weight:    100,
+		},
+	}
+
+	r.attachExternalProxies(context.Background(), routes)
+
+	if routes[0].ExternalProxy == nil {
+		t.Fatal("expected ExternalProxy on the s3-media route")
+	}
+	if routes[0].ExternalProxy.Hostname != "web2026-assets.s3.nl-ams.scw.cloud" {
+		t.Errorf("unexpected hostname: %q", routes[0].ExternalProxy.Hostname)
+	}
+	if routes[0].ExternalProxy.Port != 443 {
+		t.Errorf("unexpected port: %d", routes[0].ExternalProxy.Port)
+	}
+	if !routes[0].ExternalProxy.TLS {
+		t.Error("expected TLS=true (inferred from appProtocol=https)")
+	}
+
+	if routes[1].ExternalProxy != nil {
+		t.Errorf("ClusterIP-backed route should not have ExternalProxy, got %+v",
+			routes[1].ExternalProxy)
+	}
+}
+
+// TestReconcile_ExternalNameBackend exercises the full reconcile path with an
+// ExternalName Service: routing.json must carry external_proxy and the
+// HTTPRoute status must report ResolvedRefs=True with no spurious downgrade.
+func TestReconcile_ExternalNameBackend(t *testing.T) {
+	scheme := newTestScheme()
+
+	allNS := gatewayv1.NamespacesFromAll
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "varnish-gateway", Namespace: "varnish-gateway-system"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish",
+			Listeners: []gatewayv1.Listener{
+				{
+					Name:     "https",
+					Port:     443,
+					Protocol: gatewayv1.HTTPSProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{From: &allNS},
+					},
+				},
+			},
+		},
+	}
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "varnish-gateway-vcl", Namespace: "varnish-gateway-system"},
+		Data:       map[string]string{"main.vcl": "vcl 4.1;\n"},
+	}
+	httpsAP := "https"
+	externalSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "s3-media", Namespace: "web2026"},
+		Spec: corev1.ServiceSpec{
+			Type:         corev1.ServiceTypeExternalName,
+			ExternalName: "web2026-assets.s3.nl-ams.scw.cloud",
+			Ports: []corev1.ServicePort{{Port: 443, AppProtocol: &httpsAP}},
+		},
+	}
+
+	gwName := gatewayv1.ObjectName("varnish-gateway")
+	gwNS := gatewayv1.Namespace("varnish-gateway-system")
+	sectionName := gatewayv1.SectionName("https")
+	pathPrefix := gatewayv1.PathMatchPathPrefix
+	pathValue := "/media/"
+
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-https", Namespace: "web2026"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					{Name: gwName, Namespace: &gwNS, SectionName: &sectionName},
+				},
+			},
+			Hostnames: []gatewayv1.Hostname{"preview.varnish-software.com"},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{
+					Matches: []gatewayv1.HTTPRouteMatch{{
+						Path: &gatewayv1.HTTPPathMatch{Type: &pathPrefix, Value: &pathValue},
+					}},
+					BackendRefs: []gatewayv1.HTTPBackendRef{{
+						BackendRef: gatewayv1.BackendRef{
+							BackendObjectReference: gatewayv1.BackendObjectReference{
+								Name: "s3-media",
+								Port: ptr(gatewayv1.PortNumber(443)),
+							},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme, gateway, cm, externalSvc, route)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "web-https", Namespace: "web2026"},
+	}); err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+
+	var updatedCM corev1.ConfigMap
+	if err := r.Get(context.Background(),
+		types.NamespacedName{Name: "varnish-gateway-vcl", Namespace: "varnish-gateway-system"},
+		&updatedCM); err != nil {
+		t.Fatalf("failed to read ConfigMap: %v", err)
+	}
+	routingJSON := updatedCM.Data["routing.json"]
+	if !strings.Contains(routingJSON, "external_proxy") {
+		t.Errorf("routing.json missing external_proxy hint:\n%s", routingJSON)
+	}
+	if !strings.Contains(routingJSON, "web2026-assets.s3.nl-ams.scw.cloud") {
+		t.Errorf("routing.json missing externalName:\n%s", routingJSON)
+	}
+
+	var updatedRoute gatewayv1.HTTPRoute
+	if err := r.Get(context.Background(),
+		types.NamespacedName{Name: "web-https", Namespace: "web2026"},
+		&updatedRoute); err != nil {
+		t.Fatalf("failed to read HTTPRoute: %v", err)
+	}
+	if len(updatedRoute.Status.Parents) == 0 {
+		t.Fatal("expected at least one parent status entry")
+	}
+	for _, p := range updatedRoute.Status.Parents {
+		for _, c := range p.Conditions {
+			if c.Type == string(gatewayv1.RouteConditionResolvedRefs) && c.Status != metav1.ConditionTrue {
+				t.Errorf("expected ResolvedRefs=True for ExternalName backend, got %s (%s)", c.Status, c.Message)
+			}
+		}
 	}
 }
 

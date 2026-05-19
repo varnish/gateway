@@ -1,0 +1,65 @@
+varnishtest "ghost external proxy via reqwest-backed synthetic backend"
+
+# Upstream — simulates an ExternalName target like an S3 endpoint.
+# Don't constrain Host here — reqwest builds it from the upstream URL.
+server s1 {
+    rxreq
+    expect req.url == "/media/asset.png"
+    txresp -hdr "X-From: upstream" -body "binary-blob"
+} -start
+
+# Write ghost.json with an external_proxy group instead of native backends.
+# The address points at the VTC server so reqwest connects to it via plain HTTP.
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "preview.example.com": {
+            "routes": [
+                {
+                    "path_match": {"type": "PathPrefix", "value": "/media"},
+                    "backend_groups": [{
+                        "weight": 100,
+                        "backends": [],
+                        "external_proxy": {
+                            "hostname": "${s1_addr}",
+                            "port": ${s1_port},
+                            "tls": false
+                        }
+                    }],
+                    "priority": 10700,
+                    "route_name": "web2026/web-https"
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = router.recv();
+        if (req.http.X-Ghost-Pass == "true") {
+            return (pass);
+        }
+    }
+} -start
+
+client c1 {
+    txreq -url "/media/asset.png" -hdr "Host: preview.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.http.X-From == "upstream"
+    expect resp.body == "binary-blob"
+} -run
