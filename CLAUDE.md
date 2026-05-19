@@ -70,6 +70,8 @@ the cluster.
 
 The `.version` file and git tags are managed by [bump](https://github.com/perbu/bump). It's installed as a Go tool dependency.
 
+Update `CHANGELOG.md` on every release.
+
 ```bash
 # Bump patch version (v0.1.2 -> v0.1.3)
 go tool bump -patch
