@@ -289,23 +289,30 @@ act:
 # Gateway API Conformance Tests (requires live cluster with operator deployed)
 # ============================================================================
 
+CONFORMANCE_IMPL_FLAGS = \
+	--gateway-class=varnish \
+	--organization="Varnish Software AS" \
+	--project="Varnish Gateway" \
+	--url=https://gateway.varnish.org \
+	--version=$(VERSION) \
+	--contact=@perbu
+
 test-conformance:
 	go test -tags=conformance -v -timeout 600s -count=1 ./conformance/ \
-		-args --gateway-class=varnish
+		-args $(CONFORMANCE_IMPL_FLAGS)
 
 test-conformance-report:
 	@mkdir -p $(CURDIR)/dist
-	CONFORMANCE_REPORT_PATH=$(CURDIR)/dist/conformance-report.yaml \
-	GATEWAY_VERSION=$(VERSION) \
 	go test -tags=conformance -v -timeout 600s -count=1 ./conformance/ \
-		-args --gateway-class=varnish
+		-args $(CONFORMANCE_IMPL_FLAGS) \
+		      --report-output=$(CURDIR)/dist/conformance-report.yaml
 
 test-conformance-single:
 ifndef TEST
 	$(error TEST is required. Usage: make test-conformance-single TEST=HTTPRouteMethodMatching)
 endif
 	go test -tags=conformance -v -timeout 600s -count=1 ./conformance/ \
-		-args --gateway-class=varnish --run-test=$(TEST)
+		-args $(CONFORMANCE_IMPL_FLAGS) --run-test=$(TEST)
 
 # ============================================================================
 # Kind cluster for conformance testing
