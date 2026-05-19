@@ -47,3 +47,59 @@ testdata
 - Other patterns match directory names at any depth
 - Lines starting with `#` are comments
 
+### .bump.toml — bumping additional files
+
+To bump version strings in files outside the `.version` convention (`Cargo.toml`, `package.json`, Helm charts, custom YAML, etc.), add a `.bump.toml` at the repository root. Each `[[file]]` block points at a single file and either picks a named `format` preset or specifies custom `replace` rules.
+
+```toml
+# Use built-in presets for common ecosystems.
+[[file]]
+path = "Cargo.toml"
+format = "cargo"
+
+[[file]]
+path = "package.json"
+format = "npm"
+
+[[file]]
+path = "charts/myapp/Chart.yaml"
+format = "chart"
+
+# Or define custom regex replacements. Patterns are multi-line by default,
+# so ^ and $ anchor to line boundaries.
+[[file]]
+path = "deploy.yaml"
+replace = [
+  { match = '^version: .*$',                template = 'version: {version}' },
+  { match = '^(\s*)image: myorg/app:.*$',   template = '${1}image: myorg/app:{tag}' },
+]
+```
+
+#### Built-in presets
+
+| Preset  | What it rewrites                                                              |
+|---------|-------------------------------------------------------------------------------|
+| `cargo` | `version = "..."` line in a `Cargo.toml` `[package]` block                    |
+| `npm`   | top-level `"version": "..."` in a `package.json`                              |
+| `chart` | both `version:` and `appVersion:` lines in a Helm `Chart.yaml`                |
+
+All presets preserve the v-prefix convention of each matched line: `version = "1.0.0"` stays bare, `version = "v1.0.0"` stays prefixed. A file with mixed conventions is handled per match (e.g. `version: 0.5.0` next to `appVersion: "v1.0.0"` keeps each one's prefix).
+
+#### Template variables
+
+Templates support these placeholders, expanded before the regex replacement runs:
+
+- `{auto}` — preserves the v-prefix convention of the matched text (recommended; used by all built-in presets)
+- `{version}` — bare semver, always without `v` prefix (e.g. `1.2.3`)
+- `{tag}` — semver always with `v` prefix (e.g. `v1.2.3`)
+- `{major}`, `{minor}`, `{patch}` — individual components
+
+Regex backreferences (`$1`, `${1}`) pass through to the replacement, so you can capture and preserve indentation as shown in the deploy.yaml example above.
+
+#### Failure modes
+
+- **Zero matches** for any rule is a hard error — the bump is aborted before any commit or tag. This catches typos in patterns that would otherwise silently leave files at the old version.
+- **Multiple matches** are all replaced.
+- A file may use `format` *or* `replace`, not both.
+- Unknown preset names and structurally invalid configs are rejected before any file is written.
+

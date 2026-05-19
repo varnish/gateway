@@ -21,7 +21,7 @@ require (
 require (
 	al.essio.dev/pkg/shellescape v1.5.1 // indirect
 	dario.cat/mergo v1.0.0 // indirect
-	github.com/BurntSushi/toml v1.4.0 // indirect
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -64,7 +64,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
 	github.com/pelletier/go-toml v1.9.5 // indirect
-	github.com/perbu/bump v0.8.0 // indirect
+	github.com/perbu/bump v0.9.0 // indirect
 	github.com/pjbgf/sha1cd v0.3.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect

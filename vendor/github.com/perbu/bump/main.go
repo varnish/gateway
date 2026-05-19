@@ -405,6 +405,16 @@ func updateVersionFiles(repo *git.Repository, cfg config, output io.Writer, newV
 		return fmt.Errorf("failed to load .bumpignore: %w", err)
 	}
 
+	// Load .bump.toml and fail fast on structural errors (unknown preset,
+	// missing path, etc.) before touching the worktree.
+	bumpCfg, err := loadBumpConfig(bumpConfigPath)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", bumpConfigPath, err)
+	}
+	if err := validateConfig(bumpCfg); err != nil {
+		return err
+	}
+
 	// Track if any files were updated
 	filesUpdated := 0
 
@@ -475,6 +485,13 @@ func updateVersionFiles(repo *git.Repository, cfg config, output io.Writer, newV
 	if err != nil {
 		return fmt.Errorf("failed to walk directory: %w", err)
 	}
+
+	// Apply .bump.toml file rules. Any zero-match or read error aborts before commit.
+	configUpdated, err := applyBumpConfig(repo, bumpCfg, cfg.dryRun, output, newVersion)
+	if err != nil {
+		return err
+	}
+	filesUpdated += configUpdated
 
 	// Only commit if not in dry-run mode and files were actually updated
 	if !cfg.dryRun && filesUpdated > 0 {
