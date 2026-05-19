@@ -192,12 +192,6 @@ impl BackendPool {
         self.backends.len()
     }
 
-    /// Check if the pool is empty
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.backends.is_empty()
-    }
-
     /// Remove all backends except those in the provided set of keys
     ///
     /// This is used during config reload to clean up backends that are
@@ -242,6 +236,5 @@ mod tests {
     fn test_backend_pool_creation() {
         let pool = BackendPool::new();
         assert_eq!(pool.len(), 0);
-        assert!(pool.is_empty());
     }
 }

@@ -22,21 +22,9 @@ use crate::config::{BackendGroup, Config, HeaderMatch, MatchType, PathMatch, Pat
 use crate::internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
+use crate::sync_wrapper::SendSyncBackendRef;
 use crate::vhost_director;
 use crate::vhost_director::VhostDirector;
-
-/// Wrapper for BackendRef that implements Send + Sync
-///
-/// SAFETY: BackendRef wraps a VCL_BACKEND opaque Varnish handle designed for
-/// multi-threaded use. While individual Varnish workers are single-threaded,
-/// we use Arc and atomic operations because multiple workers may access the
-/// same director concurrently (via shared VCL state). The raw pointer is
-/// managed by Varnish's backend infrastructure which provides its own
-/// synchronization guarantees.
-struct SendSyncBackendRef(BackendRef);
-
-unsafe impl Send for SendSyncBackendRef {}
-unsafe impl Sync for SendSyncBackendRef {}
 
 /// A group of backends sharing a weight for correct weighted traffic distribution.
 /// Selection is two-level: (1) pick a group by weight, (2) pick a random pod within the group.
@@ -456,25 +444,30 @@ pub struct GhostDirector {
     last_error: RwLock<Option<String>>,
 }
 
-/// Return type for GhostDirector::new() containing all necessary components
-pub type GhostDirectorCreationResult = (
-    GhostDirector,
-    Backend<NotFoundBackend, NotFoundBody>,
-    Backend<RedirectBackend, RedirectBody>,
-    Backend<InternalErrorBackend, InternalErrorBody>,
-);
+/// Bundle returned by [`GhostDirectorBundle::new`].
+///
+/// The three synthetic `Backend` values must outlive the director — clones of
+/// their `BackendRef`s are stored inside it. The caller is expected to keep
+/// the whole bundle alive (typically as fields on the owning VMOD object).
+pub struct GhostDirectorBundle {
+    pub director: GhostDirector,
+    pub not_found: Backend<NotFoundBackend, NotFoundBody>,
+    pub redirect: Backend<RedirectBackend, RedirectBody>,
+    pub internal_error: Backend<InternalErrorBackend, InternalErrorBody>,
+}
 
-impl GhostDirector {
-    /// Create a new Ghost director with vhost directors
+impl GhostDirectorBundle {
+    /// Create a new Ghost director plus the synthetic backends it depends on.
     ///
-    /// Returns (director, not_found_backend, redirect_backend). The Backends must be kept alive
-    /// for the lifetime of the director.
+    /// The synthetic backends inside the returned bundle must be kept alive for
+    /// the lifetime of the director — the director only holds (Send + Sync)
+    /// clones of their `BackendRef`s.
     pub fn new(
         ctx: &mut Ctx,
         vhost_directors: Arc<VhostDirectorMap>,
         backends: BackendPool,
         config_path: PathBuf,
-    ) -> Result<GhostDirectorCreationResult, VclError> {
+    ) -> Result<Self, VclError> {
         // Create synthetic 404 backend
         let not_found_backend = Backend::new(ctx, "ghost", "ghost_404", NotFoundBackend, false)?;
         let not_found_ref = SendSyncBackendRef(not_found_backend.as_ref().clone());
@@ -489,7 +482,7 @@ impl GhostDirector {
             Backend::new(ctx, "ghost", "ghost_500", InternalErrorBackend, false)?;
         let internal_error_ref = SendSyncBackendRef(internal_error_backend.as_ref().clone());
 
-        let director = Self {
+        let director = GhostDirector {
             vhost_directors: ArcSwap::new(Arc::clone(&vhost_directors)),
             backends: ArcSwap::new(Arc::new(backends)),
             config_path,
@@ -499,13 +492,16 @@ impl GhostDirector {
             last_error: RwLock::new(None),
         };
 
-        Ok((
+        Ok(GhostDirectorBundle {
             director,
-            not_found_backend,
-            redirect_backend,
-            internal_error_backend,
-        ))
+            not_found: not_found_backend,
+            redirect: redirect_backend,
+            internal_error: internal_error_backend,
+        })
     }
+}
+
+impl GhostDirector {
 
     /// Reload configuration from disk
     pub fn reload(&self, ctx: &mut Ctx) -> Result<(), String> {

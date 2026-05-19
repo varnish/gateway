@@ -40,11 +40,12 @@ mod internal_error_backend;
 mod not_found_backend;
 mod redirect_backend;
 mod stats;
+mod sync_wrapper;
 mod vhost_director;
 
 use backend_pool::BackendPool;
 use config::ResponseHeaderFilter;
-use director::{GhostDirector, SharedGhostDirector};
+use director::{GhostDirector, GhostDirectorBundle, SharedGhostDirector};
 use internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use not_found_backend::{NotFoundBackend, NotFoundBody};
 use redirect_backend::{RedirectBackend, RedirectBody};
@@ -207,8 +208,12 @@ mod ghost {
             };
             let backend_pool = BackendPool::new();
 
-            let (ghost_director_impl, not_found_backend, redirect_backend, internal_error_backend) =
-                GhostDirector::new(ctx, Arc::new(empty_directors), backend_pool, config_path)?;
+            let GhostDirectorBundle {
+                director: ghost_director_impl,
+                not_found: not_found_backend,
+                redirect: redirect_backend,
+                internal_error: internal_error_backend,
+            } = GhostDirectorBundle::new(ctx, Arc::new(empty_directors), backend_pool, config_path)?;
 
             // Pre-load config if the file already exists on disk.
             // On initial startup the file won't exist yet (chaperone hasn't

@@ -16,20 +16,7 @@ use crate::config::RouteFilters;
 use crate::director::{BypassHeaderCompiled, PathMatchCompiled, RouteEntry, WeightedBackendGroup};
 use crate::redirect_backend::RedirectConfig;
 use crate::stats::VhostStats;
-
-/// Wrapper for BackendRef that implements Send + Sync
-///
-/// SAFETY: BackendRef wraps a VCL_BACKEND opaque Varnish handle designed for
-/// multi-threaded use. While individual Varnish workers are single-threaded,
-/// we use Arc and atomic operations because multiple workers may access the
-/// same director concurrently (via shared VCL state). The raw pointer is
-/// managed by Varnish's backend infrastructure which provides its own
-/// synchronization guarantees.
-#[derive(Debug)]
-struct SendSyncBackendRef(BackendRef);
-
-unsafe impl Send for SendSyncBackendRef {}
-unsafe impl Sync for SendSyncBackendRef {}
+use crate::sync_wrapper::SendSyncBackendRef;
 
 /// Header name for passing matched route filters to vcl_deliver
 const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
@@ -109,13 +96,11 @@ impl VhostDirector {
     }
 
     /// Get hostname for this director
-    #[allow(dead_code)]
     pub fn hostname(&self) -> &str {
         &self.hostname
     }
 
     /// Get stats for this director
-    #[allow(dead_code)]
     pub fn stats(&self) -> &Arc<VhostStats> {
         &self.stats
     }

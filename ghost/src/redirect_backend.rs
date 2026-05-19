@@ -175,14 +175,11 @@ fn rewrite_path(
     Ok(original_path.to_string())
 }
 
-pub struct RedirectBody {
-    #[allow(dead_code)]
-    cursor: usize,
-}
+pub struct RedirectBody;
 
 impl RedirectBody {
     pub fn new() -> Self {
-        Self { cursor: 0 }
+        Self
     }
 }
 
