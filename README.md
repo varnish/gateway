@@ -76,6 +76,18 @@ Two separate reload paths, both zero-downtime:
 - **VCL changes** (user VCL updates): varnishadm hot-reload
 - **Backend/routing changes**: ghost HTTP reload
 
+## Logging
+
+Both the operator and chaperone log to stderr at `info` by default. Set `LOG_LEVEL` to `debug`, `info`, `warn`, or `error` (case-insensitive) on either binary to change it; unknown values fall back to `info` with a warning. On chaperone, `debug` adds per-event traces for VCL reloads (`vcl.load` / `vcl.use` / `vcl.discard`), varnishadm command/response payloads, ghost reload activity, and endpoint changes — useful when diagnosing reload issues.
+
+`LOG_LEVEL` set on the operator is propagated into every chaperone pod the operator reconciles, so a single switch on the operator Deployment ripples through the data plane:
+
+```bash
+kubectl set env deploy/varnish-gateway-operator -n varnish-gateway-system LOG_LEVEL=debug
+```
+
+Newly created or rolled gateway pods will then start with `LOG_LEVEL=debug` in their env. To flip an already-running gateway pod without restarting the operator, patch it directly: `kubectl set env deploy/<gateway-name> -c varnish-gateway LOG_LEVEL=debug`. See the [reference table](docs/reference/gatewayclassparameters.md) for the full list of chaperone environment variables.
+
 ## Caching
 
 By default, Varnish Gateway operates as a pure reverse proxy with **no caching**. Every request passes through to the backend.

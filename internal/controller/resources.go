@@ -428,6 +428,13 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 		})
 	}
 
+	// Inherit LOG_LEVEL from the operator so debug verbosity flips uniformly
+	// across the control plane and every data-plane pod the operator
+	// reconciles. Chaperone validates the value at startup and warns on unknown.
+	if r.Config.LogLevel != "" {
+		env = append(env, corev1.EnvVar{Name: "LOG_LEVEL", Value: r.Config.LogLevel})
+	}
+
 	// Add TLS cert dir if any HTTPS listener exists
 	if hasTLS {
 		env = append(env,

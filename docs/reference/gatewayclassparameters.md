@@ -94,6 +94,7 @@ Chaperone reads these environment variables. The operator sets most of them auto
 | `NAMESPACE`         | `default`         | Kubernetes namespace for EndpointSlice watching                                                                                            |
 | `HEALTH_ADDR`       | `:8080`           | Health/readiness endpoint address. The operator sets `:8081` and points the readiness probe at it, so operator-managed pods listen on 8081. |
 | `VARNISH_HTTP_ADDR` | `localhost:1969`  | Varnish HTTP address for ghost reload requests (dedicated loopback listener)                                                               |
+| `LOG_LEVEL`         | `info`            | Chaperone log level. Accepted values: `debug`, `info`, `warn`, `error` (case-insensitive). Unknown values fall back to `info` with a warning. When `LOG_LEVEL` is set on the operator, it is forwarded into every chaperone pod the operator reconciles, so the data plane inherits the same verbosity. |
 
 ### Semicolon-separated values
 

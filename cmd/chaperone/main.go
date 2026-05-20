@@ -23,6 +23,7 @@ import (
 	"github.com/varnish/gateway/internal/ghost"
 	"github.com/varnish/gateway/internal/invalidation"
 	"github.com/varnish/gateway/internal/k8sutil"
+	"github.com/varnish/gateway/internal/logging"
 	vtls "github.com/varnish/gateway/internal/tls"
 	"github.com/varnish/gateway/internal/varnishadm"
 	"github.com/varnish/gateway/internal/varnishstat"
@@ -132,9 +133,11 @@ func parseList(s string) []string {
 const useJSONLogging = false // set to true for production/k8s
 
 func configureLogger() {
+	raw := os.Getenv("LOG_LEVEL")
+	level, ok := logging.ParseLevel(raw)
 	var handler slog.Handler
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: level,
 	}
 	if useJSONLogging {
 		handler = slog.NewJSONHandler(os.Stderr, opts)
@@ -145,6 +148,11 @@ func configureLogger() {
 
 	// Redirect klog (used by Kubernetes client libraries) to slog
 	klog.SetLogger(logr.FromSlogHandler(handler))
+
+	if !ok {
+		slog.Warn("unrecognized LOG_LEVEL, defaulting to info", "value", raw)
+	}
+	slog.Debug("log level configured", "level", level.String())
 }
 
 func main() {

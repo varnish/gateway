@@ -25,6 +25,7 @@ import (
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/controller"
 	"github.com/varnish/gateway/internal/k8sutil"
+	"github.com/varnish/gateway/internal/logging"
 )
 
 //go:embed .version
@@ -49,8 +50,12 @@ func main() {
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election")
 	flag.Parse()
 
-	// Configure slog and controller-runtime logger
-	handler := slog.NewJSONHandler(os.Stderr, nil)
+	// Configure slog and controller-runtime logger. LOG_LEVEL is also propagated
+	// to data-plane chaperone pods (see internal/controller/resources.go), so
+	// setting it on the operator gives uniform verbosity across the stack.
+	rawLevel := os.Getenv("LOG_LEVEL")
+	level, levelOK := logging.ParseLevel(rawLevel)
+	handler := slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 	logger := slog.New(handler)
 	slog.SetDefault(logger)
 
@@ -58,6 +63,11 @@ func main() {
 	logrLogger := logr.FromSlogHandler(handler)
 	ctrl.SetLogger(logrLogger)
 	klog.SetLogger(logrLogger)
+
+	if !levelOK {
+		logger.Warn("unrecognized LOG_LEVEL, defaulting to info", "value", rawLevel)
+	}
+	logger.Debug("log level configured", "level", level.String())
 
 	// Warn if deprecated GATEWAY_CLASS_NAME is still set
 	if gcn := os.Getenv("GATEWAY_CLASS_NAME"); gcn != "" {
@@ -69,6 +79,7 @@ func main() {
 	cfg := controller.Config{
 		GatewayImage:     getEnvOrDefault("GATEWAY_IMAGE", "ghcr.io/varnish/gateway-chaperone:latest"),
 		ImagePullSecrets: getEnvOrDefault("IMAGE_PULL_SECRETS", ""),
+		LogLevel:         rawLevel,
 	}
 
 	// controller-runtime's init() only wires rest_client_requests_total;

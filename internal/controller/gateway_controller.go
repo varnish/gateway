@@ -54,6 +54,10 @@ const (
 type Config struct {
 	GatewayImage     string // Combined varnish+ghost+chaperone image
 	ImagePullSecrets string // Comma-separated list of image pull secret names
+	// LogLevel, if non-empty, is propagated as LOG_LEVEL to chaperone pods so
+	// data-plane verbosity follows the operator. Empty means "do not set" —
+	// chaperone keeps its own default (info).
+	LogLevel string
 }
 
 // isOurGatewayClass checks whether the named GatewayClass has our controllerName.
