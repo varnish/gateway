@@ -1,0 +1,106 @@
+varnishtest "ghost survives VCL load/discard cycle"
+
+# Regression test for the VCL-discard crash that motivated wiring the
+# `#[event]` handler in src/lib.rs. Loads ghost into v1, swaps the VCL
+# so the previous one transitions COLD → DISCARD with ghost directors
+# and backends still registered, and issues traffic against the new
+# VCL to confirm it is functional.
+
+server s1 {
+    loop 2 {
+        rxreq
+        txresp -body "backend-host1"
+    }
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "host1.example.com": {
+            "routes": [
+                {
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+# VCL #1 — first load.
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) { return (synth(200, "OK")); }
+            else                 { return (synth(500, "Reload failed")); }
+        }
+        set req.backend_hint = router.recv();
+    }
+} -start
+
+client c_reload1 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c1 {
+    txreq -hdr "Host: host1.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-host1"
+} -run
+
+# VCL #2 — replaces VCL #1, forcing it through COLD → DISCARD.
+# Without the #[event] hook, this is where ghost previously crashed.
+varnish v1 -vcl {
+    import ghost from "${vmod}";
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) { return (synth(200, "OK")); }
+            else                 { return (synth(500, "Reload failed")); }
+        }
+        set req.backend_hint = router.recv();
+    }
+}
+
+client c_reload2 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c2 {
+    txreq -hdr "Host: host1.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "backend-host1"
+} -run
+
+# Explicitly discard the first VCL. `varnish v1 -vcl` only does load+use;
+# the previous VCL stays in COLD state until vcl.discard runs.
+# This is the actual code path that crashes without the #[event] hook.
+varnish v1 -cliok "vcl.list"
+varnish v1 -cliok "vcl.discard vcl1"
+varnish v1 -cliok "vcl.list"
