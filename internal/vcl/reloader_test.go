@@ -343,8 +343,6 @@ func TestHandleConfigMapUpdate_ContentDeduplication(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
 
-	ctx := context.Background()
-
 	// First update - should trigger reload
 	cm1 := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -356,7 +354,7 @@ func TestHandleConfigMapUpdate_ContentDeduplication(t *testing.T) {
 			"main.vcl": "vcl 4.1; # v1",
 		},
 	}
-	r.handleConfigMapUpdate(ctx, cm1)
+	r.handleConfigMapUpdate(cm1)
 
 	// Verify reload was called
 	history1 := mock.GetCallHistory()
@@ -376,7 +374,7 @@ func TestHandleConfigMapUpdate_ContentDeduplication(t *testing.T) {
 			"main.vcl": "vcl 4.1; # v1", // Same content
 		},
 	}
-	r.handleConfigMapUpdate(ctx, cm2)
+	r.handleConfigMapUpdate(cm2)
 
 	// Verify reload was NOT called (history should be same length)
 	history2 := mock.GetCallHistory()
@@ -396,7 +394,7 @@ func TestHandleConfigMapUpdate_ContentDeduplication(t *testing.T) {
 			"main.vcl": "vcl 4.1; # v2", // Different content
 		},
 	}
-	r.handleConfigMapUpdate(ctx, cm3)
+	r.handleConfigMapUpdate(cm3)
 
 	// Verify reload was called (history should have grown)
 	history3 := mock.GetCallHistory()
@@ -425,8 +423,6 @@ func TestVCLReloadFailure_NonFatal(t *testing.T) {
 	client := fake.NewSimpleClientset()
 	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
 
-	ctx := context.Background()
-
 	// Trigger a VCL reload that will fail due to compilation error.
 	// Varnish keeps the old VCL active in this case, so chaperone must not exit.
 	cm := &corev1.ConfigMap{
@@ -442,7 +438,7 @@ func TestVCLReloadFailure_NonFatal(t *testing.T) {
 	// handleConfigMapUpdate must return without panicking or blocking.
 	done := make(chan struct{})
 	go func() {
-		r.handleConfigMapUpdate(ctx, cm)
+		r.handleConfigMapUpdate(cm)
 		close(done)
 	}()
 

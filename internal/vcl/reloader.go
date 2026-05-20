@@ -44,6 +44,12 @@ type Reloader struct {
 	lastVCLMux         sync.RWMutex
 	lastConfigMapRV    string
 
+	// firstLoadDone is closed after the first successful VCL load via the
+	// ConfigMap informer. Callers can wait on Ready() to know when the
+	// initial VCL has been pushed to varnishd's management process.
+	firstLoadDone chan struct{}
+	firstLoadOnce sync.Once
+
 	// Dashboard integration (optional)
 	dashBus *dashboard.EventBus
 }
@@ -72,7 +78,14 @@ func New(
 		configMapName:      configMapName,
 		configMapNamespace: configMapNamespace,
 		logger:             logger,
+		firstLoadDone:      make(chan struct{}),
 	}
+}
+
+// Ready returns a channel closed once the reloader has successfully loaded
+// VCL into varnishd at least once (driven by the ConfigMap informer).
+func (r *Reloader) Ready() <-chan struct{} {
+	return r.firstLoadDone
 }
 
 // SetDashboard connects the reloader to the dashboard event bus.
@@ -100,12 +113,12 @@ func (r *Reloader) Run(ctx context.Context) error {
 	_, err := configMapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
 			if cm, ok := obj.(*corev1.ConfigMap); ok {
-				r.handleConfigMapUpdate(ctx, cm)
+				r.handleConfigMapUpdate(cm)
 			}
 		},
 		UpdateFunc: func(_, newObj any) {
 			if cm, ok := newObj.(*corev1.ConfigMap); ok {
-				r.handleConfigMapUpdate(ctx, cm)
+				r.handleConfigMapUpdate(cm)
 			}
 		},
 	})
@@ -130,7 +143,7 @@ func (r *Reloader) Run(ctx context.Context) error {
 }
 
 // handleConfigMapUpdate processes ConfigMap add/update events
-func (r *Reloader) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMap) {
+func (r *Reloader) handleConfigMapUpdate(cm *corev1.ConfigMap) {
 	// Filter: only our ConfigMap
 	if cm.Name != r.configMapName {
 		return
@@ -214,6 +227,7 @@ func (r *Reloader) loadAndActivate(name string, loadFn func(string) (varnishadm.
 
 	r.logger.Info("VCL reload complete", "name", name)
 	dashboard.PublishVCLReload(r.dashBus, name)
+	r.firstLoadOnce.Do(func() { close(r.firstLoadDone) })
 
 	if err := r.garbageCollect(); err != nil {
 		r.logger.Warn("VCL garbage collection failed", "error", err)

@@ -488,12 +488,19 @@ func run() error {
 			return nil
 		}
 
-		// Step 2: Load initial VCL
-		slog.Debug("loading initial VCL", "path", cfg.VCLPath)
-		if err := vclReloader.Reload(); err != nil {
-			return fmt.Errorf("initial VCL load: %w", err)
+		// Step 2: Wait for initial VCL load.
+		// The VCL reloader's ConfigMap informer drives the first load via
+		// its AddFunc; we just wait for that to complete. Calling Reload()
+		// here would race with the informer and load the same VCL twice,
+		// which trips a ghost vcl_fini director-cleanup assertion the
+		// moment the child starts pushing VCLs.
+		slog.Debug("waiting for initial VCL load")
+		select {
+		case <-vclReloader.Ready():
+			slog.Info("initial VCL loaded")
+		case <-gctx.Done():
+			return nil
 		}
-		slog.Info("initial VCL loaded")
 
 		// Step 3: Start the child process
 		slog.Debug("starting Varnish child process")
