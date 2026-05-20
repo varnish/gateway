@@ -23,7 +23,7 @@ import (
 
 const (
 	// DefaultKeepCount is the default number of old VCLs to keep for rollback
-	DefaultKeepCount = 3
+	DefaultKeepCount = 10
 
 	// vclPrefix is the prefix for managed VCL names
 	vclPrefix = "vcl_"
