@@ -326,3 +326,41 @@ mod ghost {
         }
     }
 }
+
+#[cfg(test)]
+mod test_stubs {
+    //! Stub libvarnishd symbols for `cargo test --lib`.
+    //!
+    //! `VRT_DelDirector`, `VRT_delete_backend`, and `VRT_Assign_Backend`
+    //! live in libvarnishd (linked into the `varnishd` executable), not in
+    //! libvarnishapi (what we link against at compile time). The production
+    //! cdylib leaves them undefined and the host varnishd resolves them at
+    //! dlopen time. The unit-test binary has no varnishd around it, but
+    //! Rust's monomorphization still pulls `Arc<NativeBackend>::drop_slow`
+    //! (and its references to these symbols) into the test binary even
+    //! when no test actually exercises the Drop path. We provide no-op
+    //! stubs here so the link succeeds; they're never invoked at runtime.
+    //!
+    //! Doing this in Rust under `#[cfg(test)]` instead of via a C file
+    //! linked by `build.rs` matters: a C stub linked into every build
+    //! (the previous approach) also ended up in the cdylib, shadowed the
+    //! real libvarnishd symbols at dlopen, turned every backend release
+    //! into a no-op, and crashed `vcl_KillBackends()` on the first
+    //! VCL discard.
+    use std::ffi::c_void;
+
+    #[no_mangle]
+    pub unsafe extern "C" fn VRT_DelDirector(_bp: *mut *const c_void) {}
+
+    #[no_mangle]
+    pub unsafe extern "C" fn VRT_delete_backend(
+        _ctx: *const c_void,
+        _bp: *mut *const c_void,
+    ) {}
+
+    #[no_mangle]
+    pub unsafe extern "C" fn VRT_Assign_Backend(
+        _dst: *mut *const c_void,
+        _src: *const c_void,
+    ) {}
+}

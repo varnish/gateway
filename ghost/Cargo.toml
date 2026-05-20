@@ -26,7 +26,6 @@ tokio-stream = "0.1"
 bytes = "1"
 
 [build-dependencies]
-cc = "1"
 pkg-config = "0.3.30"
 semver = "1"
 
