@@ -122,6 +122,7 @@ nav:
       - Logging: guides/logging.md
       - Custom VCL: guides/custom-vcl.md
       - Cache Invalidation: guides/cache-invalidation.md
+      - External Backends: guides/external-backends.md
       - TLS: guides/tls.md
   - Operations:
       - Resources and Scaling: operations/resources-and-scaling.md

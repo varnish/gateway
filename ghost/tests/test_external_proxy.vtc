@@ -63,3 +63,35 @@ client c1 {
     expect resp.http.X-From == "upstream"
     expect resp.body == "binary-blob"
 } -run
+
+# Body-bearing methods must be rejected locally with 405 — the upstream
+# (server s1) is not started for a second exchange, so any hit on it would
+# fail the test. The 405 must come from the synthetic backend, not s1.
+client c2 {
+    txreq -req POST -url "/media/asset.png" \
+        -hdr "Host: preview.example.com" \
+        -hdr "Content-Type: application/json" \
+        -body "{\"x\":1}"
+    rxresp
+    expect resp.status == 405
+    expect resp.http.Allow == "GET, HEAD, OPTIONS"
+    expect resp.http.Cache-Control == "no-store"
+    expect resp.http.Content-Type == "text/plain; charset=utf-8"
+} -run
+
+client c3 {
+    txreq -req PUT -url "/media/asset.png" \
+        -hdr "Host: preview.example.com" \
+        -body "replacement"
+    rxresp
+    expect resp.status == 405
+    expect resp.http.Allow == "GET, HEAD, OPTIONS"
+} -run
+
+client c4 {
+    txreq -req DELETE -url "/media/asset.png" \
+        -hdr "Host: preview.example.com"
+    rxresp
+    expect resp.status == 405
+    expect resp.http.Allow == "GET, HEAD, OPTIONS"
+} -run

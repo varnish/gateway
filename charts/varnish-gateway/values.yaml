@@ -147,7 +147,7 @@ chaperone:
   # here. Users can template VMOD download URLs against this value and
   # verify VMOD compatibility before upgrading. When updating, also
   # rebuild the chaperone image and confirm `varnishd -V` matches.
-  varnishVersion: "9.0.1"
+  varnishVersion: "9.0.3"
 
 # RBAC configuration
 rbac:

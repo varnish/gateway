@@ -119,3 +119,4 @@ For operator-level issues, see [Troubleshooting](../operations/troubleshooting.m
 - [TLS](../guides/tls.md) — terminate HTTPS at the Gateway
 - [Canary Deployments](../guides/canary-deployments.md) — split traffic between backends
 - [Cache Invalidation](../guides/cache-invalidation.md) — purge and ban cached objects
+- [External Backends](../guides/external-backends.md) — route to services outside the cluster

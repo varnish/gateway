@@ -48,6 +48,11 @@ flowchart TD
    them into `ghost.json` — the same routing tree, but with Service names
    resolved to concrete pod addresses.
 
+   ExternalName Services skip EndpointSlice resolution entirely. Ghost
+   creates a synthetic backend backed by its own HTTP client for these
+   routes, connecting directly to the external hostname. See
+   [External Backends](../guides/external-backends.md).
+
 3. varnishd, with the ghost VMOD loaded, consults `ghost.json` on every
    request. Ghost matches the request against the routes for its vhost and
    listener, picks a weighted backend group, and dispatches to a pod.
@@ -128,3 +133,4 @@ invalidation.
 - [VCL merging](vcl-merging.md)
 - [Reload paths](reload-paths.md)
 - [Caching model](caching-model.md)
+- [External Backends](../guides/external-backends.md)

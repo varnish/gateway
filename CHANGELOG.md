@@ -5,6 +5,22 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.21.1 - 2026-05-20]
+
+### Changed
+
+- **Varnish base image bumped to 9.0.3.** The chaperone image now pulls
+  `varnish` and `varnish-dev` 9.0.3 from packages.varnish-software.com. No
+  functional change beyond what Varnish ships in 9.0.3.
+- **External proxy backend rejects body-bearing methods with 405.**
+  ExternalName routes are proxied through an in-VMOD reqwest client that does
+  not yet stream request bodies. The initial implementation logged a warning
+  and forwarded body-bearing requests with an empty body, which can succeed
+  silently against forgiving upstreams. POST, PUT, PATCH, and DELETE are now
+  rejected locally with `405 Method Not Allowed`, `Allow: GET, HEAD, OPTIONS`,
+  and `Cache-Control: no-store`. The upstream is not contacted. Body
+  forwarding will land in a follow-up.
+
 ## [v0.21.0] - 2026-05-19
 
 ### Breaking
