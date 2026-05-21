@@ -18,8 +18,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.21.2 - 2026-05-21]
 
+### Added
+
+- **`LOG_LEVEL` env var for operator and chaperone.** Both binaries read
+  `LOG_LEVEL` from the environment (`debug`/`info`/`warn`/`error`,
+  case-insensitive); unknown values fall back to `info` with a warning. The
+  operator also forwards its own `LOG_LEVEL` into every chaperone pod it
+  reconciles, so flipping verbosity on the operator Deployment ripples
+  through the data plane. Shared parser lives in `internal/logging`.
+
+### Changed
+
+- **`DefaultKeepCount` raised from 3 to 10.** Keep more loaded VCLs around
+  before garbage-collecting, giving more headroom for rollback and
+  post-incident inspection.
+
 ### Fixed
 
+- **Chaperone: double VCL load race at startup.** The ConfigMap informer's
+  `AddFunc` already loaded VCL on initial cache sync, but the startup
+  goroutine also called `vclReloader.Reload()` directly. Both ran serially
+  through varnishadm and pushed two distinct VCLs into the management
+  process before the child was started; when varnishd then pushed both
+  into the child, ghost's `vcl_fini` left entries in `vdire->directors`
+  and `vcl_KillBackends` asserted, killing the child. Chaperone now waits
+  on `vclReloader.Ready()`, which fires after the informer's first
+  successful load. (The underlying symbol-shadowing root cause is fixed
+  separately below; this removes the unnecessary double load regardless.)
 - **Ghost VMOD: VCL discard crash.** `build.rs` was unconditionally linking
   the stubs from `c_code/test_stubs.c` into every build, including the
   production cdylib. Those local strong definitions shadowed the real
