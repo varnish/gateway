@@ -5,6 +5,31 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.21.2 - 2026-05-21]
+
+### Fixed
+
+- **Ghost VMOD: VCL discard crash.** `build.rs` was unconditionally linking
+  the stubs from `c_code/test_stubs.c` into every build, including the
+  production cdylib. Those local strong definitions shadowed the real
+  libvarnishd `VRT_DelDirector`, `VRT_delete_backend`, and `VRT_Assign_Backend`
+  at `dlopen` time (on macOS via two-level namespace, on Linux because the
+  cdylib's internal references were bound at link time and `dlopen` does not
+  re-resolve them). Every backend release silently became a no-op, every
+  director's refcount only ever grew, and the first `vcl.discard` of any VCL
+  tripped `vcl_KillBackends()`:
+
+      Assert error in vcl_KillBackends(), cache/cache_vcl.c line 704:
+        Condition(VTAILQ_EMPTY(&vdire->directors)) not true.
+
+  This surfaced in production very early in a pod's life — chaperone's reload
+  and probe traffic was enough to cycle through one discard. The cdylib link
+  now keeps those three symbols undefined and varnishd resolves them at
+  dlopen. The stubs that `cargo test --lib` needs were moved into a
+  `#[cfg(test)] mod test_stubs` in `src/lib.rs`. A new
+  `ghost/tests/test_vcl_discard.vtc` reproduces the original crash and
+  guards against regressions.
+
 ## [v0.21.1 - 2026-05-20]
 
 ### Changed
