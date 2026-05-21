@@ -5,6 +5,17 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.21.3 - 2026-05-21]
+
+### Fixed
+
+- **chaperone image build** for `v0.21.2` failed because
+  `docker/chaperone.Dockerfile` still tried to `COPY ghost/c_code ./c_code`
+  after `ghost/c_code/` was removed in the v0.21.2 ghost refactor (stubs moved
+  to `#[cfg(test)] mod test_stubs`). The v0.21.2 Helm chart got published but
+  pointed at a chaperone image that was never produced. v0.21.3 drops the
+  stale `COPY` and re-publishes a coherent chart + image pair. Skip v0.21.2.
+
 ## [v0.21.2 - 2026-05-21]
 
 ### Fixed
