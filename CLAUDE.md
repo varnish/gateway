@@ -72,6 +72,8 @@ The `.version` file and git tags are managed by [bump](https://github.com/perbu/
 
 **Release order matters.** Edit and commit `CHANGELOG.md` **before** running `bump`. `bump` tags the commit it creates, and the Docker publish workflow (`.github/workflows/docker.yml`) only publishes when the latest commit on `main` carries the version tag. A changelog commit landing *after* the bump leaves the tag stranded on a non-head commit, and CI's tag check fails silently — image and Helm chart never get pushed.
 
+**Verify the changelog is in sync with `git log` before bumping.** Run `git log --oneline <last-tag>..HEAD` and walk every commit — not just the headline fix. It's easy to land a release that captures the obvious bug fix but quietly omits unrelated `feat`/`fix`/`chore` commits that piggybacked on the same cycle (e.g. v0.21.2 shipped a `LOG_LEVEL` feature, a `DefaultKeepCount` bump, and a chaperone startup-race fix that none of the changelog entries mentioned). Each functional commit in the range should map to a bullet, or you should be able to justify why it doesn't belong (pure refactor, internal-only, etc.).
+
 ```bash
 # 1. Edit CHANGELOG.md, commit it.
 git add CHANGELOG.md && git commit -m "docs(changelog): ..."
