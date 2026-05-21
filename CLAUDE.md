@@ -70,17 +70,19 @@ the cluster.
 
 The `.version` file and git tags are managed by [bump](https://github.com/perbu/bump). It's installed as a Go tool dependency.
 
-Update `CHANGELOG.md` on every release.
+**Release order matters.** Edit and commit `CHANGELOG.md` **before** running `bump`. `bump` tags the commit it creates, and the Docker publish workflow (`.github/workflows/docker.yml`) only publishes when the latest commit on `main` carries the version tag. A changelog commit landing *after* the bump leaves the tag stranded on a non-head commit, and CI's tag check fails silently — image and Helm chart never get pushed.
 
 ```bash
-# Bump patch version (v0.1.2 -> v0.1.3)
-go tool bump -patch
+# 1. Edit CHANGELOG.md, commit it.
+git add CHANGELOG.md && git commit -m "docs(changelog): ..."
 
-# Bump minor version (v0.1.2 -> v0.2.0)
-go tool bump -minor
+# 2. Bump (creates a "bump version" commit and tags it).
+go tool bump -patch    # v0.1.2 -> v0.1.3
+go tool bump -minor    # v0.1.2 -> v0.2.0
+go tool bump -major    # v0.1.2 -> v1.0.0
 
-# Bump major version (v0.1.2 -> v1.0.0)
-go tool bump -major
+# 3. Push branch and tag together.
+git push origin main --follow-tags
 ```
 
 ## Architecture
