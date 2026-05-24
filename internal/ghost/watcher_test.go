@@ -707,7 +707,6 @@ func TestWatcherReloadTransientFailure(t *testing.T) {
 		},
 	}
 
-	_, err = fake.NewSimpleClientset(configMap).DiscoveryV1().EndpointSlices("default").Create(ctx2, endpointSlice, metav1.CreateOptions{})
 	// Directly trigger endpoint update on the watcher
 	watcher2.handleEndpointSliceUpdate(ctx2, endpointSlice)
 

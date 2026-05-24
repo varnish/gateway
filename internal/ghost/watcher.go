@@ -699,6 +699,9 @@ func (w *Watcher) updateDashboardState(routingConfig *RoutingConfig, endpoints S
 	services := make(map[string]dashboard.ServiceState)
 	for key, eps := range endpoints {
 		parts := strings.SplitN(key, "/", 2)
+		if len(parts) != 2 {
+			continue
+		}
 		ns, name := parts[0], parts[1]
 		backends := make([]dashboard.BackendState, len(eps))
 		for i, ep := range eps {

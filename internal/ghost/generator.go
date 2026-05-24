@@ -94,10 +94,8 @@ func GroupRoutesByHostname(routes []Route, hostnames []string) map[string][]Rout
 	grouped := make(map[string][]Route)
 
 	for _, hostname := range hostnames {
-		for _, route := range routes {
-			// Routes are already sorted by priority, just group them
-			grouped[hostname] = append(grouped[hostname], route)
-		}
+		// Routes are already sorted by priority, just group them
+		grouped[hostname] = append(grouped[hostname], routes...)
 	}
 
 	return grouped

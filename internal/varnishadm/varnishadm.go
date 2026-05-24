@@ -358,7 +358,7 @@ func (v *Server) run(c *net.TCPConn, cmd string) (out VarnishResponse, err error
 
 	if writtenBytes == 0 {
 		out.statusCode = ClisComms
-		return out, errors.New("Nothing was written on the varnish connection")
+		return out, errors.New("nothing was written on the varnish connection")
 	}
 
 	// Read response with timeout
