@@ -14,6 +14,7 @@ CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 .PHONY: kind-create kind-delete kind-load kind-deploy test-conformance-kind
 .PHONY: manifests generate verify-manifests
 .PHONY: docs-venv docs-serve docs-build docs-clean
+.PHONY: vet staticcheck nilaway vuln lint
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -72,6 +73,13 @@ help:
 	@echo "  make docs-build       Build static site into _site/ (strict mode)"
 	@echo "  make docs-clean       Remove _site/ and the docs virtualenv"
 	@echo ""
+	@echo "Static analysis:"
+	@echo "  make vet              Run go vet"
+	@echo "  make staticcheck      Run staticcheck"
+	@echo "  make nilaway          Run nilaway (nil-deref analyzer)"
+	@echo "  make vuln             Run govulncheck (CVE scanner)"
+	@echo "  make lint             Run vet + staticcheck + nilaway + vuln"
+	@echo ""
 	@echo "Other:"
 	@echo "  make vendor           Update Go vendor directory"
 	@echo "  make clean            Remove build artifacts"
@@ -118,6 +126,54 @@ test-go: envtest
 	go vet ./...
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(ENVTEST_ASSETS_DIR) -p path)" \
 		go test -tags=integration ./...
+
+# ============================================================================
+# Static analysis
+# ============================================================================
+# Tools are installed on demand into ./bin (same pattern as setup-envtest).
+# Pin versions here so CI and local runs agree.
+STATICCHECK_VERSION := 2025.1.1
+NILAWAY_VERSION     := latest
+GOVULNCHECK_VERSION := latest
+
+STATICCHECK := $(shell pwd)/bin/staticcheck
+NILAWAY     := $(shell pwd)/bin/nilaway
+GOVULNCHECK := $(shell pwd)/bin/govulncheck
+
+$(STATICCHECK):
+	@mkdir -p bin
+	GOBIN=$(shell pwd)/bin go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
+
+$(NILAWAY):
+	@mkdir -p bin
+	GOBIN=$(shell pwd)/bin go install go.uber.org/nilaway/cmd/nilaway@$(NILAWAY_VERSION)
+
+$(GOVULNCHECK):
+	@mkdir -p bin
+	GOBIN=$(shell pwd)/bin go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+
+# `go vet` — fast, low-noise correctness checks shipped with the toolchain.
+vet:
+	go vet ./...
+
+# staticcheck — broader correctness/style checks (SA, S, ST series).
+staticcheck: $(STATICCHECK)
+	$(STATICCHECK) ./...
+
+# nilaway — Uber's nil-deref analyzer. We don't use `-include-pkgs` because
+# it would also drop findings whose nil *source* is in k8s code (e.g.
+# DeepCopy() returning nil) even when the dereference is in our code. Instead
+# we keep full analysis and grep-filter findings located in vendor/.
+nilaway: $(NILAWAY)
+	@$(NILAWAY) ./... 2>&1 | grep -v "^/.*/vendor/" || true
+
+# govulncheck — scans for known CVEs in module dependencies that are
+# reachable from our code. Run on releases at minimum.
+vuln: $(GOVULNCHECK)
+	$(GOVULNCHECK) ./...
+
+# Aggregate target. `vet` first because it's the cheapest.
+lint: vet staticcheck nilaway vuln
 
 dist/operator:
 	@mkdir -p dist

@@ -14,6 +14,11 @@ coverage.out
 testbin/
 bin/setup-envtest
 
+# Static analysis tool binaries (installed on demand by `make lint`)
+bin/staticcheck
+bin/nilaway
+bin/govulncheck
+
 # Internal working notes (not published)
 docs/internal/
 
