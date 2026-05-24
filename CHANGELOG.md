@@ -5,6 +5,45 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.21.4 - 2026-05-24]
+
+### Security
+
+- **`golang.org/x/net` bumped to v0.55.0.** Clears two reachable
+  vulnerabilities reported by govulncheck (path:
+  `internal/k8sutil/slowrequest.go`):
+  - `GO-2026-5026` — `idna` fails to reject ASCII-only Punycode labels
+    (fixed in x/net v0.55.0).
+  - `GO-2026-4918` — HTTP/2 transport infinite loop on bad
+    `SETTINGS_MAX_FRAME_SIZE` (fixed in x/net v0.53.0).
+  `go mod tidy` carried along the usual x/* indirect bumps; no
+  behavioural changes beyond what those modules ship.
+
+### Fixed
+
+- **Chaperone: ghost EndpointSlice watcher guards malformed cache keys.**
+  `internal/ghost/watcher.go` now checks the result of
+  `strings.SplitN(key, "/", 2)` before indexing `parts[1]`. A
+  non-namespaced key would previously have panicked on the slice access;
+  nilaway flagged it, and the guard makes the watcher resilient to
+  unexpected informer key shapes.
+
+### Internal
+
+- **`make lint` umbrella target.** Adds `vet`, `staticcheck`, `nilaway`,
+  and `govulncheck` targets to the Makefile, installing the tools on
+  demand into `./bin` (same pattern as setup-envtest). nilaway runs
+  without `-include-pkgs` and we grep-filter `vendor/` from the output —
+  package filtering was dropping findings whose nil source lives in
+  vendored k8s code (e.g. DeepCopy) even when the dereference is ours.
+- **CLAUDE.md: release procedure now requires walking
+  `git log <last-tag>..HEAD` and mapping each functional commit to a
+  changelog bullet** (or justifying its omission). Added after v0.21.2
+  shipped with three undocumented commits.
+- **CHANGELOG.md: v0.21.2 entries backfilled** for the `LOG_LEVEL`
+  feature, `DefaultKeepCount` bump, and chaperone startup-race fix that
+  were missing from the original v0.21.2 release notes.
+
 ## [v0.21.3 - 2026-05-21]
 
 ### Fixed
