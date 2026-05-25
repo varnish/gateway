@@ -1707,6 +1707,68 @@ func TestNeedsServiceUpdate(t *testing.T) {
 	}
 }
 
+func TestMergeServicePorts_PreservesNodePort(t *testing.T) {
+	// buildService produces ports with NodePort: 0 because the API server
+	// allocates them. The update path must carry the existing allocation
+	// across or every reconcile triggers a NodePort churn and disconnects
+	// clients.
+	existing := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP, NodePort: 31234},
+		{Name: "https-443", Port: 443, TargetPort: intstr.FromInt(443), Protocol: corev1.ProtocolTCP, NodePort: 31235},
+	}
+	desired := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP},
+		{Name: "https-443", Port: 443, TargetPort: intstr.FromInt(443), Protocol: corev1.ProtocolTCP},
+	}
+
+	out := mergeServicePorts(existing, desired)
+
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+	if out[0].NodePort != 31234 {
+		t.Errorf("http-80 NodePort = %d, want 31234 (carried from existing)", out[0].NodePort)
+	}
+	if out[1].NodePort != 31235 {
+		t.Errorf("https-443 NodePort = %d, want 31235 (carried from existing)", out[1].NodePort)
+	}
+}
+
+func TestMergeServicePorts_DesiredNodePortWins(t *testing.T) {
+	// If a future caller explicitly sets a NodePort in the desired port
+	// (e.g. user pins one), it must win over the existing allocation.
+	existing := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, NodePort: 31234},
+	}
+	desired := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, NodePort: 32000},
+	}
+
+	out := mergeServicePorts(existing, desired)
+
+	if out[0].NodePort != 32000 {
+		t.Errorf("NodePort = %d, want 32000 (desired wins)", out[0].NodePort)
+	}
+}
+
+func TestMergeServicePorts_RenamedPortGetsNewAllocation(t *testing.T) {
+	// If the port name changes (e.g. listener renamed), there's no
+	// existing entry to carry NodePort from — desired's zero stays,
+	// and the API server allocates a fresh one.
+	existing := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, NodePort: 31234},
+	}
+	desired := []corev1.ServicePort{
+		{Name: "http-8080", Port: 8080},
+	}
+
+	out := mergeServicePorts(existing, desired)
+
+	if out[0].NodePort != 0 {
+		t.Errorf("renamed port should not inherit NodePort, got %d", out[0].NodePort)
+	}
+}
+
 func TestNeedsSecretUpdate(t *testing.T) {
 	tests := []struct {
 		name         string

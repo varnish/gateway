@@ -596,12 +596,23 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway, resolved Re
 
 	// Merge user labels onto controller labels via the sentinel. Existing
 	// state is the controller-label baseline; protected keys can't be
-	// overridden by user input.
+	// overridden by user input. Log any collisions so users get feedback
+	// when their config tried to overwrite a controller-managed label.
+	for k := range resolved.Labels {
+		if _, isProtected := controllerManagedLabelKeys()[k]; isProtected {
+			r.Logger.Warn("ignoring service label that collides with a controller-managed key",
+				"gateway", gateway.Namespace+"/"+gateway.Name,
+				"label", k)
+		}
+	}
 	mergedLabels, labelSentinel := mergeWithManaged(resolved.Labels, controllerLabels, "", controllerManagedLabelKeys())
-	mergedLabels[AnnotationManagedLabels] = labelSentinel
 
 	mergedAnnotations, annoSentinel := mergeWithManaged(resolved.Annotations, nil, "", nil)
+	// Both sentinels live in .metadata.annotations. The label sentinel's
+	// value is a comma-separated key list, which is not a valid label value
+	// (no commas, no slashes) — annotations have no such restriction.
 	mergedAnnotations[AnnotationManagedAnnotations] = annoSentinel
+	mergedAnnotations[AnnotationManagedLabels] = labelSentinel
 
 	svc := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},

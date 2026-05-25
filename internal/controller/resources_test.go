@@ -393,8 +393,12 @@ func TestBuildService_AppliesLabelsWithSentinel_ProtectsControllerLabels(t *test
 	if svc.Labels["team"] != "edge" {
 		t.Errorf("user label = %q, want edge", svc.Labels["team"])
 	}
-	if svc.Labels[AnnotationManagedLabels] != "team" {
-		t.Errorf("sentinel = %q, want team", svc.Labels[AnnotationManagedLabels])
+	// Sentinel lives on annotations (label values can't carry commas/slashes).
+	if svc.Annotations[AnnotationManagedLabels] != "team" {
+		t.Errorf("sentinel = %q, want team", svc.Annotations[AnnotationManagedLabels])
+	}
+	if _, present := svc.Labels[AnnotationManagedLabels]; present {
+		t.Errorf("sentinel must not live in .Labels (invalid label value when multi-key): %v", svc.Labels)
 	}
 	// CRITICAL invariant: user labels MUST NOT leak into the selector.
 	// If they did, the Service would fail to find any pods.
@@ -403,6 +407,43 @@ func TestBuildService_AppliesLabelsWithSentinel_ProtectsControllerLabels(t *test
 	}
 	if svc.Spec.Selector[LabelManagedBy] != ManagedByValue {
 		t.Errorf("controller label missing from selector: %v", svc.Spec.Selector)
+	}
+}
+
+func TestBuildService_MultipleLabels_SentinelIsValidLabelValue(t *testing.T) {
+	// Regression: prior to moving the sentinel into .Annotations, a config
+	// with ≥2 service labels (or any DNS-prefixed key) produced a sentinel
+	// value containing ',' or '/', both forbidden in label values — the API
+	// server rejected the Service. The sentinel must now live in annotations
+	// and .Labels must not contain it at all.
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+
+	svc := r.buildService(gw, ResolvedServiceConfig{
+		Type:        corev1.ServiceTypeLoadBalancer,
+		Annotations: map[string]string{},
+		Labels: map[string]string{
+			"team":                          "edge",
+			"tier":                          "cache",
+			"app.kubernetes.io/component":   "gateway",
+		},
+	})
+
+	for k, v := range svc.Labels {
+		for _, bad := range []rune{',', '/'} {
+			for _, r := range v {
+				if r == bad {
+					t.Errorf("label %q has value %q containing %q (invalid in label values)", k, v, string(bad))
+				}
+			}
+		}
+	}
+	if _, present := svc.Labels[AnnotationManagedLabels]; present {
+		t.Errorf("sentinel leaked into .Labels (will be rejected by API server): %v", svc.Labels)
+	}
+	sentinel := svc.Annotations[AnnotationManagedLabels]
+	if sentinel != "app.kubernetes.io/component,team,tier" {
+		t.Errorf("annotation sentinel = %q, want %q", sentinel, "app.kubernetes.io/component,team,tier")
 	}
 }
 
@@ -416,9 +457,10 @@ func TestBuildService_EmptyUserMaps_WritesEmptySentinel(t *testing.T) {
 		Labels:      map[string]string{},
 	})
 
-	// When no user-supplied annotations/labels exist, the sentinel keys
-	// are still written with empty values, signalling "this Service was
-	// touched by this version of the operator, currently managing nothing."
+	// When no user-supplied annotations/labels exist, both sentinels are
+	// still written (in .Annotations) with empty values, signalling "this
+	// Service was touched by this version of the operator, currently
+	// managing nothing."
 	v, ok := svc.Annotations[AnnotationManagedAnnotations]
 	if !ok {
 		t.Error("AnnotationManagedAnnotations sentinel missing")
@@ -426,12 +468,15 @@ func TestBuildService_EmptyUserMaps_WritesEmptySentinel(t *testing.T) {
 	if v != "" {
 		t.Errorf("annotation sentinel = %q, want empty string", v)
 	}
-	lv, lok := svc.Labels[AnnotationManagedLabels]
+	lv, lok := svc.Annotations[AnnotationManagedLabels]
 	if !lok {
-		t.Error("AnnotationManagedLabels sentinel missing")
+		t.Error("AnnotationManagedLabels sentinel missing from .Annotations")
 	}
 	if lv != "" {
 		t.Errorf("label sentinel = %q, want empty string", lv)
+	}
+	if _, present := svc.Labels[AnnotationManagedLabels]; present {
+		t.Errorf("label sentinel must not live in .Labels: %v", svc.Labels)
 	}
 }
 

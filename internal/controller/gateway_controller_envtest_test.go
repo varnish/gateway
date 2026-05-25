@@ -564,3 +564,86 @@ func TestServiceShape_CloudControllerAnnotationPreserved_Envtest(t *testing.T) {
 	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("default"))
 	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ServiceAccount{}, client.InNamespace("default"))
 }
+
+// TestServiceShape_MultipleLabels_Accepted_Envtest verifies that supplying
+// multiple service labels — and labels with DNS-prefixed keys — produces a
+// Service the API server accepts. Storing the sentinel in .Labels with a
+// comma-separated key list breaks K8s label-value validation; this test
+// guards against regressing to that layout.
+func TestServiceShape_MultipleLabels_Accepted_Envtest(t *testing.T) {
+	ctx := context.Background()
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "varnish-svc-multilabel"},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+			ParametersRef: &gatewayv1.ParametersReference{
+				Group: gatewayv1.Group(gatewayparamsv1alpha1.GroupName),
+				Kind:  "GatewayClassParameters",
+				Name:  "svc-multilabel-params",
+			},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gatewayClass); err != nil {
+		t.Fatalf("create gatewayclass: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gatewayClass) }()
+
+	params := &gatewayparamsv1alpha1.GatewayClassParameters{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-multilabel-params"},
+		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
+			Service: &gatewayparamsv1alpha1.ServiceConfig{
+				Type: ptr(corev1.ServiceTypeClusterIP),
+				Labels: map[string]string{
+					"team":                        "edge",
+					"tier":                        "cache",
+					"app.kubernetes.io/component": "gateway",
+				},
+			},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, params); err != nil {
+		t.Fatalf("create params: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, params) }()
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-multilabel-gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish-svc-multilabel",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gw); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gw) }()
+
+	r := NewEnvtestGatewayReconciler(testEnv)
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}}); err != nil {
+		t.Fatalf("reconcile (API server rejected Service?): %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	var svc corev1.Service
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}, &svc); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	for _, want := range []string{"team", "tier", "app.kubernetes.io/component"} {
+		if _, ok := svc.Labels[want]; !ok {
+			t.Errorf("label %q missing from Service: %v", want, svc.Labels)
+		}
+	}
+	if _, leaked := svc.Labels[AnnotationManagedLabels]; leaked {
+		t.Errorf("sentinel leaked into .Labels: %v", svc.Labels)
+	}
+	if svc.Annotations[AnnotationManagedLabels] == "" {
+		t.Errorf("sentinel missing from .Annotations: %v", svc.Annotations)
+	}
+
+	_ = testEnv.Client.DeleteAllOf(ctx, &appsv1.Deployment{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Service{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ConfigMap{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ServiceAccount{}, client.InNamespace("default"))
+}

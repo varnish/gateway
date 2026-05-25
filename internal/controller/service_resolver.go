@@ -10,10 +10,15 @@ import (
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
 
-// Sentinel annotation keys recording which annotation and label keys the
-// operator manages on the Service. Pruning on update consults these to avoid
+// Sentinel keys recording which annotation and label keys the operator
+// manages on the Service. Pruning on update consults these to avoid
 // stomping on annotations added by cloud controllers, service-mesh sidecar
 // injectors, observability tooling, etc.
+//
+// Both sentinels live in .metadata.annotations. The label sentinel's value
+// is a comma-separated list of label keys; commas and slashes are not
+// valid in a Kubernetes label value, so it cannot be stored in
+// .metadata.labels. (The label keys it names are looked up in .Labels.)
 const (
 	AnnotationManagedAnnotations = "varnish.io/managed-annotations"
 	AnnotationManagedLabels      = "varnish.io/managed-labels"

@@ -381,13 +381,14 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 	}
 
 	// For Services, re-apply the fields we own when drift is detected.
-	// Cloud-controller-managed fields (clusterIP, NodePort assignments,
-	// loadBalancer.ingress) and non-managed annotations/labels are deliberately
-	// left alone. K8s API server handles Type transitions natively.
+	// Cloud-controller-managed fields (clusterIP, loadBalancer.ingress) and
+	// non-managed annotations/labels are deliberately left alone.
+	// NodePort allocations are carried over per-port by mergeServicePorts.
+	// K8s API server handles Type transitions natively.
 	if desiredSvc, ok := desired.(*corev1.Service); ok {
 		existingSvc := existing.(*corev1.Service)
 		if needsServiceUpdate(existingSvc, desiredSvc) {
-			existingSvc.Spec.Ports = desiredSvc.Spec.Ports
+			existingSvc.Spec.Ports = mergeServicePorts(existingSvc.Spec.Ports, desiredSvc.Spec.Ports)
 			existingSvc.Spec.Type = desiredSvc.Spec.Type
 			existingSvc.Spec.Selector = desiredSvc.Spec.Selector
 			existingSvc.Spec.LoadBalancerClass = desiredSvc.Spec.LoadBalancerClass
@@ -397,22 +398,20 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 			// Re-merge annotations/labels using the operator's sentinels.
 			// Existing state may contain cloud-controller annotations we
 			// must preserve; mergeWithManaged handles the bookkeeping.
+			// Both sentinels live in .metadata.annotations — the label
+			// sentinel's value (comma-separated key list) is not a valid
+			// label value.
 			existingAnnoSentinel := ""
+			existingLabelSentinel := ""
 			if existingSvc.Annotations != nil {
 				existingAnnoSentinel = existingSvc.Annotations[AnnotationManagedAnnotations]
+				existingLabelSentinel = existingSvc.Annotations[AnnotationManagedLabels]
 			}
 			desiredAnnos := desiredAnnotationsFromSentinel(desiredSvc)
 			mergedAnnos, newAnnoSentinel := mergeWithManaged(desiredAnnos, existingSvc.Annotations, existingAnnoSentinel, nil)
-			mergedAnnos[AnnotationManagedAnnotations] = newAnnoSentinel
-			existingSvc.Annotations = mergedAnnos
 
-			existingLabelSentinel := ""
-			if existingSvc.Labels != nil {
-				existingLabelSentinel = existingSvc.Labels[AnnotationManagedLabels]
-			}
 			desiredLabels := desiredLabelsFromSentinel(desiredSvc)
 			mergedLabels, newLabelSentinel := mergeWithManaged(desiredLabels, existingSvc.Labels, existingLabelSentinel, controllerManagedLabelKeys())
-			mergedLabels[AnnotationManagedLabels] = newLabelSentinel
 			// Re-apply controller-managed labels unconditionally (mergeWithManaged
 			// drops them from desired; we put them back here to defend against
 			// existing being missing them on a hand-edited Service).
@@ -420,6 +419,11 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 				mergedLabels[k] = v
 			}
 			existingSvc.Labels = mergedLabels
+
+			// Both sentinels go on annotations, not labels.
+			mergedAnnos[AnnotationManagedAnnotations] = newAnnoSentinel
+			mergedAnnos[AnnotationManagedLabels] = newLabelSentinel
+			existingSvc.Annotations = mergedAnnos
 
 			if err := r.Update(ctx, existingSvc); err != nil {
 				return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
@@ -549,11 +553,71 @@ func needsServiceUpdate(existing, desired *corev1.Service) bool {
 	if !managedMapEqual(existing.Annotations, desired.Annotations, AnnotationManagedAnnotations) {
 		return true
 	}
-	if !managedMapEqual(existing.Labels, desired.Labels, AnnotationManagedLabels) {
+	// Labels sentinel lives in .Annotations (label values can't carry the
+	// comma-separated key list), but the user-supplied values it points at
+	// live in .Labels. Verify the sentinel agrees, then compare those keys
+	// in the label map.
+	if !managedLabelsEqual(existing, desired) {
 		return true
 	}
 
 	return false
+}
+
+// managedLabelsEqual mirrors managedMapEqual but reads the sentinel from
+// .metadata.annotations while comparing values in .metadata.labels.
+func managedLabelsEqual(existing, desired *corev1.Service) bool {
+	desiredSentinel := ""
+	if desired.Annotations != nil {
+		desiredSentinel = desired.Annotations[AnnotationManagedLabels]
+	}
+	existingSentinel := ""
+	if existing.Annotations != nil {
+		existingSentinel = existing.Annotations[AnnotationManagedLabels]
+	}
+	if existingSentinel != desiredSentinel {
+		return false
+	}
+	if desiredSentinel == "" {
+		return true
+	}
+	for _, k := range strings.Split(desiredSentinel, ",") {
+		if k == "" {
+			continue
+		}
+		if existing.Labels[k] != desired.Labels[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeServicePorts returns the desired ServicePort list with each entry's
+// NodePort carried over from the existing slice (matched by port name) when
+// the desired value is unset. buildService never sets NodePort — it's
+// allocated by the API server — and a plain `existing.Ports = desired.Ports`
+// assignment would zero it out on every reconcile, causing the API server
+// to reallocate the node port and break clients connecting to it.
+//
+// Name is the join key because buildService names every port (listener
+// socket name), and NodePort allocation is per-port.
+func mergeServicePorts(existing, desired []corev1.ServicePort) []corev1.ServicePort {
+	existingNodePort := make(map[string]int32, len(existing))
+	for _, p := range existing {
+		if p.NodePort != 0 {
+			existingNodePort[p.Name] = p.NodePort
+		}
+	}
+	out := make([]corev1.ServicePort, len(desired))
+	copy(out, desired)
+	for i := range out {
+		if out[i].NodePort == 0 {
+			if np, ok := existingNodePort[out[i].Name]; ok {
+				out[i].NodePort = np
+			}
+		}
+	}
+	return out
 }
 
 // stringPtrEqual returns true if a and b point to equal strings, treating
@@ -1903,13 +1967,17 @@ func desiredAnnotationsFromSentinel(svc *corev1.Service) map[string]string {
 	return out
 }
 
-// desiredLabelsFromSentinel is the label counterpart to desiredAnnotationsFromSentinel.
+// desiredLabelsFromSentinel reconstructs the user-supplied label map.
+// The sentinel itself lives in .metadata.annotations (label values can't
+// contain commas or slashes), but the user-supplied label values live in
+// .metadata.labels — so we read the sentinel from annotations and look up
+// each named key in labels.
 func desiredLabelsFromSentinel(svc *corev1.Service) map[string]string {
 	out := map[string]string{}
-	if svc.Labels == nil {
+	if svc.Annotations == nil {
 		return out
 	}
-	sentinel := svc.Labels[AnnotationManagedLabels]
+	sentinel := svc.Annotations[AnnotationManagedLabels]
 	if sentinel == "" {
 		return out
 	}
