@@ -252,31 +252,30 @@ func TestInfrastructureConfig_SecretOrderDoesNotAffectHash(t *testing.T) {
 
 // TestInfraHash_ServiceConfigDoesNotAffectHash is a regression check: changing
 // Service shape (Type, annotations, labels, LB knobs) must NOT cause a pod
-// restart, so the infra hash must be invariant under those changes. This
+// restart, so InfrastructureConfig must not gain Service-related fields. This
 // matches the design decision documented in
 // docs/superpowers/specs/2026-05-25-configurable-service-shape-design.md.
+//
+// The check is structural (via reflection) because behavioral verification
+// would require enumerating every possible Service-shape field; structural
+// absence of the fields is a stronger, simpler guard.
 func TestInfraHash_ServiceConfigDoesNotAffectHash(t *testing.T) {
-	cfg := InfrastructureConfig{
-		GatewayImage:      "ghcr.io/varnish/gateway-chaperone:v0.21.4",
-		VarnishdExtraArgs: []string{"-p", "thread_pools=4"},
-		ListenerSpecs:     "http-80",
-	}
-
-	hash1 := cfg.ComputeHash()
-	hash2 := cfg.ComputeHash()
-	if hash1 != hash2 {
-		t.Fatalf("hash not deterministic: %q vs %q", hash1, hash2)
-	}
-
-	// Verify the InfrastructureConfig struct does not have any Service-shape
-	// field. This test will fail to compile if someone adds one, prompting
-	// them to revisit the design.
-	//
-	// The check is intentionally minimal — we don't want to assert the full
-	// field list, which would couple this test tightly to unrelated fields.
-	// The presence/absence assertion below covers the design invariant.
+	cfg := InfrastructureConfig{}
 	configType := reflect.TypeOf(cfg)
-	forbidden := []string{"Service", "ServiceType", "ServiceAnnotations", "ServiceLabels"}
+
+	// Forbid both generic Service-shape names and the concrete field names
+	// from ResolvedServiceConfig — these are the obvious places someone might
+	// accidentally copy a field across.
+	forbidden := []string{
+		"Service",
+		"ServiceType",
+		"ServiceConfig",
+		"ServiceAnnotations",
+		"ServiceLabels",
+		"LoadBalancerClass",
+		"LoadBalancerSourceRanges",
+		"ExternalTrafficPolicy",
+	}
 	for _, f := range forbidden {
 		if _, ok := configType.FieldByName(f); ok {
 			t.Errorf("InfrastructureConfig must not contain field %q — Service shape changes must not trigger pod restarts", f)
