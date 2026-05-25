@@ -203,8 +203,9 @@ type ServiceConfig struct {
 	LoadBalancerClass *string `json:"loadBalancerClass,omitempty"`
 
 	// LoadBalancerSourceRanges restricts traffic to the LoadBalancer to the
-	// listed CIDRs. Only valid when Type is LoadBalancer. CIDR syntax is
-	// validated by the Kubernetes API server.
+	// listed CIDRs. Only valid when Type is LoadBalancer. CIDR syntax is not
+	// validated at admission time for this CRD; Kubernetes validates it when
+	// the Service is reconciled.
 	// +optional
 	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
 
