@@ -359,6 +359,15 @@ func TestServiceShape_DefaultsToLoadBalancer_Envtest(t *testing.T) {
 	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
 		t.Errorf("Type = %v, want LoadBalancer", svc.Spec.Type)
 	}
+
+	// Clean up reconciler-created resources in default namespace so they
+	// don't bleed into subsequent tests in the suite. Matches the pattern
+	// in TestHTTPSListener_MissingSecret_ProgrammedFalse.
+	_ = testEnv.Client.DeleteAllOf(ctx, &appsv1.Deployment{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Service{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ConfigMap{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ServiceAccount{}, client.InNamespace("default"))
 }
 
 // TestServiceShape_TypeTransition_Envtest verifies LoadBalancer -> ClusterIP
@@ -446,6 +455,12 @@ func TestServiceShape_TypeTransition_Envtest(t *testing.T) {
 	if len(svc.Spec.Ports) != len(originalPorts) {
 		t.Errorf("ports lost during transition: was %d, now %d", len(originalPorts), len(svc.Spec.Ports))
 	}
+
+	_ = testEnv.Client.DeleteAllOf(ctx, &appsv1.Deployment{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Service{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ConfigMap{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ServiceAccount{}, client.InNamespace("default"))
 }
 
 // TestServiceShape_CloudControllerAnnotationPreserved_Envtest verifies that
@@ -542,4 +557,10 @@ func TestServiceShape_CloudControllerAnnotationPreserved_Envtest(t *testing.T) {
 	if svc.Annotations["operator-managed"] != "v2" {
 		t.Errorf("operator annotation not updated: %v", svc.Annotations)
 	}
+
+	_ = testEnv.Client.DeleteAllOf(ctx, &appsv1.Deployment{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Service{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ConfigMap{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("default"))
+	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ServiceAccount{}, client.InNamespace("default"))
 }
