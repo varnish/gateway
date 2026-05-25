@@ -227,3 +227,149 @@ func TestResolveServiceConfig_GatewayInfraDoesNotOverrideType(t *testing.T) {
 		t.Errorf("Type = %v, want NodePort", got.Type)
 	}
 }
+
+func TestMergeWithManaged_FirstApply_NoSentinel(t *testing.T) {
+	existing := map[string]string{}
+	sentinel := ""
+	desired := map[string]string{"a": "1", "b": "2"}
+
+	merged, newSentinel := mergeWithManaged(desired, existing, sentinel, nil)
+
+	if merged["a"] != "1" || merged["b"] != "2" {
+		t.Errorf("merged = %v", merged)
+	}
+	if newSentinel != "a,b" {
+		t.Errorf("sentinel = %q, want %q", newSentinel, "a,b")
+	}
+}
+
+func TestMergeWithManaged_DriftAdd(t *testing.T) {
+	existing := map[string]string{"a": "1"}
+	sentinel := "a"
+	desired := map[string]string{"a": "1", "b": "2"}
+
+	merged, newSentinel := mergeWithManaged(desired, existing, sentinel, nil)
+
+	if merged["a"] != "1" || merged["b"] != "2" {
+		t.Errorf("merged = %v", merged)
+	}
+	if newSentinel != "a,b" {
+		t.Errorf("sentinel = %q, want %q", newSentinel, "a,b")
+	}
+}
+
+func TestMergeWithManaged_DriftRemove(t *testing.T) {
+	// Key "b" was previously managed (listed in sentinel) and is no longer
+	// in desired — must be pruned from the output map.
+	existing := map[string]string{"a": "1", "b": "2"}
+	sentinel := "a,b"
+	desired := map[string]string{"a": "1"}
+
+	merged, newSentinel := mergeWithManaged(desired, existing, sentinel, nil)
+
+	if merged["a"] != "1" {
+		t.Errorf("merged[a] = %q, want 1", merged["a"])
+	}
+	if _, ok := merged["b"]; ok {
+		t.Errorf("merged[b] should be pruned, got %v", merged)
+	}
+	if newSentinel != "a" {
+		t.Errorf("sentinel = %q, want %q", newSentinel, "a")
+	}
+}
+
+func TestMergeWithManaged_ExternalKeyUntouched(t *testing.T) {
+	// "cloud.k8s.io/foo" was never managed by us — must survive across reconciles.
+	existing := map[string]string{
+		"a":                "1",
+		"cloud.k8s.io/foo": "bar",
+	}
+	sentinel := "a"
+	desired := map[string]string{"a": "1"}
+
+	merged, newSentinel := mergeWithManaged(desired, existing, sentinel, nil)
+
+	if merged["cloud.k8s.io/foo"] != "bar" {
+		t.Errorf("external key was modified: %v", merged)
+	}
+	if newSentinel != "a" {
+		t.Errorf("sentinel = %q", newSentinel)
+	}
+}
+
+func TestMergeWithManaged_EmptyDesired_PrunesAllManaged(t *testing.T) {
+	existing := map[string]string{
+		"a":                "1",
+		"b":                "2",
+		"cloud.k8s.io/foo": "bar",
+	}
+	sentinel := "a,b"
+	desired := map[string]string{}
+
+	merged, newSentinel := mergeWithManaged(desired, existing, sentinel, nil)
+
+	if _, ok := merged["a"]; ok {
+		t.Errorf("a not pruned: %v", merged)
+	}
+	if _, ok := merged["b"]; ok {
+		t.Errorf("b not pruned: %v", merged)
+	}
+	if merged["cloud.k8s.io/foo"] != "bar" {
+		t.Errorf("external key was modified: %v", merged)
+	}
+	if newSentinel != "" {
+		t.Errorf("sentinel = %q, want empty", newSentinel)
+	}
+}
+
+func TestMergeWithManaged_SentinelIsSorted(t *testing.T) {
+	// Sorted sentinel keys are required for deterministic reconciliation.
+	existing := map[string]string{}
+	desired := map[string]string{"z": "1", "a": "2", "m": "3"}
+
+	_, newSentinel := mergeWithManaged(desired, existing, "", nil)
+
+	if newSentinel != "a,m,z" {
+		t.Errorf("sentinel = %q, want %q", newSentinel, "a,m,z")
+	}
+}
+
+func TestMergeWithManaged_ProtectedKey_DroppedFromDesired(t *testing.T) {
+	// User tried to override a controller-managed label.
+	existing := map[string]string{
+		LabelManagedBy: ManagedByValue, // already set by buildLabels
+	}
+	sentinel := ""
+	desired := map[string]string{
+		LabelManagedBy: "evil-actor", // user trying to hijack
+		"team":         "edge",       // legitimate user label
+	}
+	protected := map[string]struct{}{LabelManagedBy: {}}
+
+	merged, newSentinel := mergeWithManaged(desired, existing, sentinel, protected)
+
+	if merged[LabelManagedBy] != ManagedByValue {
+		t.Errorf("protected key was overridden: %v", merged)
+	}
+	if merged["team"] != "edge" {
+		t.Errorf("legitimate key not applied: %v", merged)
+	}
+	// Sentinel must NOT contain the protected key — it was never managed via spec.
+	if newSentinel != "team" {
+		t.Errorf("sentinel = %q, want %q", newSentinel, "team")
+	}
+}
+
+func TestMergeWithManaged_NilExistingMap(t *testing.T) {
+	// A freshly-built Service may have nil annotations/labels — must not panic.
+	desired := map[string]string{"a": "1"}
+
+	merged, newSentinel := mergeWithManaged(desired, nil, "", nil)
+
+	if merged["a"] != "1" {
+		t.Errorf("merged = %v", merged)
+	}
+	if newSentinel != "a" {
+		t.Errorf("sentinel = %q", newSentinel)
+	}
+}

@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"sort"
+	"strings"
+
 	corev1 "k8s.io/api/core/v1"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -77,4 +80,65 @@ func resolveServiceConfig(gateway *gatewayv1.Gateway, params *gatewayparamsv1alp
 	}
 
 	return out
+}
+
+// mergeWithManaged writes desired keys onto a copy of existing, prunes any
+// previously-managed keys (per sentinel) that are no longer desired, and
+// returns the merged map plus a fresh sentinel string listing the keys the
+// operator now owns. Keys present in `protected` are silently dropped from
+// desired before merging — they belong to the operator and cannot be
+// overridden via spec.
+//
+// The sentinel is a comma-separated, lexically-sorted list of the keys the
+// operator manages. Empty sentinel = nothing managed yet. The sentinel key
+// itself (e.g. AnnotationManagedAnnotations) is NEVER recorded as managed —
+// it's operator metadata and is always present when the feature is in use.
+//
+// existing may be nil; the function never mutates inputs.
+func mergeWithManaged(desired, existing map[string]string, sentinel string, protected map[string]struct{}) (map[string]string, string) {
+	merged := make(map[string]string, len(existing)+len(desired))
+	for k, v := range existing {
+		merged[k] = v
+	}
+
+	// Parse previously-managed keys from the sentinel.
+	previouslyManaged := map[string]struct{}{}
+	if sentinel != "" {
+		for _, k := range strings.Split(sentinel, ",") {
+			if k != "" {
+				previouslyManaged[k] = struct{}{}
+			}
+		}
+	}
+
+	// Filter protected keys out of desired (silently — the resolver logs the
+	// collision before calling us, so we just enforce the policy here).
+	filtered := make(map[string]string, len(desired))
+	for k, v := range desired {
+		if _, isProtected := protected[k]; isProtected {
+			continue
+		}
+		filtered[k] = v
+	}
+
+	// Prune managed-but-no-longer-desired keys.
+	for k := range previouslyManaged {
+		if _, stillDesired := filtered[k]; !stillDesired {
+			delete(merged, k)
+		}
+	}
+
+	// Apply desired keys.
+	for k, v := range filtered {
+		merged[k] = v
+	}
+
+	// Build new sentinel from the keys we just applied.
+	keys := make([]string, 0, len(filtered))
+	for k := range filtered {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	return merged, strings.Join(keys, ",")
 }
