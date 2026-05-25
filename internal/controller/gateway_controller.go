@@ -513,7 +513,12 @@ func needsServiceUpdate(existing, desired *corev1.Service) bool {
 	if !stringSliceEqual(existing.Spec.LoadBalancerSourceRanges, desired.Spec.LoadBalancerSourceRanges) {
 		return true
 	}
-	if existing.Spec.ExternalTrafficPolicy != desired.Spec.ExternalTrafficPolicy {
+	// K8s API server defaults ExternalTrafficPolicy to "Cluster" server-side
+	// when type is LoadBalancer/NodePort. Treat "" and "Cluster" as equivalent
+	// so an unset desired value doesn't reconcile-loop against the API-defaulted
+	// existing value.
+	if effectiveExternalTrafficPolicy(existing.Spec.ExternalTrafficPolicy) !=
+		effectiveExternalTrafficPolicy(desired.Spec.ExternalTrafficPolicy) {
 		return true
 	}
 
@@ -572,6 +577,17 @@ func stringMapEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// effectiveExternalTrafficPolicy resolves the zero string to "Cluster",
+// mirroring the K8s API server's server-side default. Used by
+// needsServiceUpdate to avoid spurious reconciles when our desired Service
+// leaves the field unset but the API server has filled it in.
+func effectiveExternalTrafficPolicy(p corev1.ServiceExternalTrafficPolicy) corev1.ServiceExternalTrafficPolicy {
+	if p == "" {
+		return corev1.ServiceExternalTrafficPolicyCluster
+	}
+	return p
 }
 
 // stringSliceEqual reports whether two string slices have equal length and

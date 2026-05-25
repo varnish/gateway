@@ -143,6 +143,26 @@ func TestBuildLabels(t *testing.T) {
 	}
 }
 
+// TestControllerManagedLabelKeys_MatchesBuildLabels pins the invariant that
+// every key emitted by buildLabels is listed in controllerManagedLabelKeys.
+// If buildLabels gains a key without the set being updated, users could
+// override controller-managed labels via ServiceConfig.Labels.
+func TestControllerManagedLabelKeys_MatchesBuildLabels(t *testing.T) {
+	r := &GatewayReconciler{Config: Config{}}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+	}
+
+	emitted := r.buildLabels(gw)
+	managed := controllerManagedLabelKeys()
+
+	for k := range emitted {
+		if _, protected := managed[k]; !protected {
+			t.Errorf("buildLabels emits %q but controllerManagedLabelKeys does not list it — users could override it via ServiceConfig.Labels", k)
+		}
+	}
+}
+
 func TestBuildDeployment(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
@@ -1638,6 +1658,24 @@ func TestNeedsServiceUpdate(t *testing.T) {
 				},
 			},
 			expectUpdate: true,
+		},
+		{
+			name: "API-defaulted ExternalTrafficPolicy=Cluster vs desired unset does NOT trigger update",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                  corev1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyCluster, // API-defaulted
+					Ports:                 []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type: corev1.ServiceTypeLoadBalancer,
+					// ExternalTrafficPolicy not set — zero value ""
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: false,
 		},
 		{
 			name: "selector changed",
