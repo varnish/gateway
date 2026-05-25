@@ -158,6 +158,7 @@ The Gateway and HTTPRoute controllers have clearly defined responsibilities:
   - Fetch and merge user VCL from GatewayClassParameters
   - Create and update ConfigMap with `main.vcl`
   - Manage Deployment, Service, RBAC resources
+  - Resolve Service shape (Type, annotations, labels, LB class, source ranges, traffic policy) from `GatewayClassParameters.spec.service`, overlaid with `Gateway.spec.infrastructure.{labels,annotations}`
   - Compute infrastructure hash for pod restart detection
 - Watches:
   - Gateway resources (primary)

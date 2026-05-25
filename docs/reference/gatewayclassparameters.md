@@ -64,6 +64,63 @@ Additional command-line arguments passed to varnishd. Each array element is a se
 
 **Note:** The ghost VMOD uses Rust regex which benefits from increased stack size (160k vs default 80k), especially in debug builds. This is safe and adds minimal memory overhead (~16MB for typical thread pool configurations).
 
+### spec.service
+
+Configures the data-plane Service. When omitted, the operator preserves the historical default: `Type: LoadBalancer` with no extra annotations or labels. Service-shape changes do **not** trigger pod restarts.
+
+| Field                      | Type                  | Description                                                                                                                                                                                          |
+| -------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                     | `string`              | One of `ClusterIP`, `NodePort`, `LoadBalancer`. Defaults to `LoadBalancer`. Headless services (`clusterIP: None`) and `ExternalName` are intentionally unsupported.                                  |
+| `annotations`              | `map[string]string`   | Annotations applied to the Service. Tracked via the `varnish.io/managed-annotations` sentinel; cloud-controller-added annotations are preserved on update.                                           |
+| `labels`                   | `map[string]string`   | Labels applied to the Service. Controller-managed labels (`app.kubernetes.io/managed-by`, `gateway.networking.k8s.io/gateway-name`, `gateway.networking.k8s.io/gateway-namespace`) cannot be overridden. |
+| `loadBalancerClass`        | `string`              | Selects a specific LB implementation. Only valid when `type: LoadBalancer`.                                                                                                                          |
+| `loadBalancerSourceRanges` | `[]string`            | CIDR allowlist for the LoadBalancer. Only valid when `type: LoadBalancer`. CIDR syntax is validated by Kubernetes when the Service is reconciled.                                                    |
+| `externalTrafficPolicy`    | `Cluster` \| `Local`  | Source-IP preservation. Only valid when `type` is `LoadBalancer` or `NodePort`.                                                                                                                      |
+
+**Layering with `Gateway.spec.infrastructure`:** the Gateway API v1.1+ `Gateway.spec.infrastructure.{labels,annotations}` field overlays on top of the GatewayClass-level config — per-Gateway keys win on collisions. The other four fields (Type, LoadBalancerClass, LoadBalancerSourceRanges, ExternalTrafficPolicy) are GatewayClass-level only.
+
+**Admission-time validation:**
+
+- `loadBalancerClass` requires `type: LoadBalancer`
+- `loadBalancerSourceRanges` requires `type: LoadBalancer`
+- `externalTrafficPolicy` requires `type` to be `LoadBalancer` or `NodePort`
+
+**First-time opt-in behavior:** Services that existed before this feature was introduced get the operator's managed-keys sentinel established on the first reconcile that materializes a non-empty `annotations` or `labels` in `spec.service` (or in `Gateway.spec.infrastructure`). Pre-existing annotations are treated as not-managed-by-the-operator — they will not be pruned even if a key with the same name later appears in spec and is then removed. To bring an existing annotation under operator management, delete it from the Service manually and re-add it via `spec.service.annotations`.
+
+#### Example: ClusterIP behind another L7 (gateway-behind-gateway)
+
+```yaml
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: GatewayClassParameters
+metadata:
+  name: internal-cache
+spec:
+  service:
+    type: ClusterIP
+```
+
+#### Example: MetalLB annotation-driven LoadBalancer on bare metal
+
+```yaml
+spec:
+  service:
+    type: LoadBalancer
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.42"
+      metallb.universe.tf/address-pool: production
+```
+
+#### Example: Preserve source IP via Local traffic policy
+
+```yaml
+spec:
+  service:
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+    loadBalancerSourceRanges:
+      - 198.51.100.0/24
+```
+
 ## Environment Variables
 
 Chaperone reads these environment variables. The operator sets most of them automatically when it builds the gateway pod, so the "Chaperone default" column documents what chaperone falls back to when run standalone — in operator-managed pods the operator-set value is what you'll see in practice.
