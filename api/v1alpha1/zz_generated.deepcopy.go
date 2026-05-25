@@ -185,6 +185,55 @@ func (in *ConfigMapReference) DeepCopy() *ConfigMapReference {
 }
 
 // DeepCopyInto copies the receiver into out.
+func (in *ServiceConfig) DeepCopyInto(out *ServiceConfig) {
+	*out = *in
+	if in.Type != nil {
+		in, out := &in.Type, &out.Type
+		*out = new(corev1.ServiceType)
+		**out = **in
+	}
+	if in.Annotations != nil {
+		in, out := &in.Annotations, &out.Annotations
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.Labels != nil {
+		in, out := &in.Labels, &out.Labels
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
+	if in.LoadBalancerClass != nil {
+		in, out := &in.LoadBalancerClass, &out.LoadBalancerClass
+		*out = new(string)
+		**out = **in
+	}
+	if in.LoadBalancerSourceRanges != nil {
+		in, out := &in.LoadBalancerSourceRanges, &out.LoadBalancerSourceRanges
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.ExternalTrafficPolicy != nil {
+		in, out := &in.ExternalTrafficPolicy, &out.ExternalTrafficPolicy
+		*out = new(corev1.ServiceExternalTrafficPolicy)
+		**out = **in
+	}
+}
+
+// DeepCopy creates a deep copy of ServiceConfig.
+func (in *ServiceConfig) DeepCopy() *ServiceConfig {
+	if in == nil {
+		return nil
+	}
+	out := new(ServiceConfig)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
 func (in *VarnishLogging) DeepCopyInto(out *VarnishLogging) {
 	*out = *in
 	if in.ExtraArgs != nil {
@@ -254,6 +303,11 @@ func (in *GatewayClassParametersSpec) DeepCopyInto(out *GatewayClassParametersSp
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
+	}
+	if in.Service != nil {
+		in, out := &in.Service, &out.Service
+		*out = new(ServiceConfig)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

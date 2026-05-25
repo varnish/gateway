@@ -3677,6 +3677,76 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              service:
+                description: |-
+                  Service configures the data-plane Service. When omitted, the operator
+                  preserves the historical default (Type: LoadBalancer, no annotations).
+                  Service shape changes do NOT trigger pod restarts.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations are added to the Service's ObjectMeta. Keys set here are
+                      tracked via the varnish.io/managed-annotations sentinel and pruned on
+                      removal; annotations added by other actors (cloud controllers, etc.)
+                      are preserved.
+                    type: object
+                  externalTrafficPolicy:
+                    description: |-
+                      ExternalTrafficPolicy selects how nodes route external traffic to the
+                      Service. Local preserves the client source IP at the cost of imbalanced
+                      load. Only valid when Type is LoadBalancer or NodePort.
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Labels are added to the Service's ObjectMeta. The operator's
+                      controller-managed labels (app.kubernetes.io/managed-by,
+                      gateway.networking.k8s.io/gateway-name,
+                      gateway.networking.k8s.io/gateway-namespace) cannot be overridden;
+                      user-supplied keys colliding with these are dropped with a log warning.
+                      Other keys are tracked via the varnish.io/managed-labels sentinel.
+                    type: object
+                  loadBalancerClass:
+                    description: |-
+                      LoadBalancerClass selects an implementation of load balancer
+                      (cluster-specific). Only valid when Type is LoadBalancer.
+                    type: string
+                  loadBalancerSourceRanges:
+                    description: |-
+                      LoadBalancerSourceRanges restricts traffic to the LoadBalancer to the
+                      listed CIDRs. Only valid when Type is LoadBalancer. CIDR syntax is
+                      validated by the Kubernetes API server.
+                    items:
+                      type: string
+                    type: array
+                  type:
+                    description: |-
+                      Type selects the Service type. Defaults to LoadBalancer when omitted.
+                      Headless services (clusterIP: None) and ExternalName are intentionally
+                      not supported.
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: loadBalancerClass is only valid when type is LoadBalancer
+                  rule: '!has(self.loadBalancerClass) || !has(self.type) || self.type
+                    == ''LoadBalancer'''
+                - message: loadBalancerSourceRanges is only valid when type is LoadBalancer
+                  rule: '!has(self.loadBalancerSourceRanges) || !has(self.type) ||
+                    self.type == ''LoadBalancer'''
+                - message: externalTrafficPolicy is only valid when type is LoadBalancer
+                    or NodePort
+                  rule: '!has(self.externalTrafficPolicy) || !has(self.type) || self.type
+                    == ''LoadBalancer'' || self.type == ''NodePort'''
               topologySpreadConstraints:
                 description: |-
                   TopologySpreadConstraints lets you pin Gateway pods across failure

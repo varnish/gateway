@@ -89,6 +89,12 @@ type GatewayClassParametersSpec struct {
 	// hash).
 	// +optional
 	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+
+	// Service configures the data-plane Service. When omitted, the operator
+	// preserves the historical default (Type: LoadBalancer, no annotations).
+	// Service shape changes do NOT trigger pod restarts.
+	// +optional
+	Service *ServiceConfig `json:"service,omitempty"`
 }
 
 // PodDisruptionBudget configures a PodDisruptionBudget for Gateway pods.
@@ -148,6 +154,66 @@ type ConfigMapReference struct {
 	// Defaults to "user.vcl" if not specified.
 	// +optional
 	Key string `json:"key,omitempty"`
+}
+
+// ServiceConfig configures the data-plane Service object.
+//
+// Fields that only make sense for specific Service types are validated by
+// CEL rules at admission time. The Type field defaults to LoadBalancer when
+// omitted (handled by the resolver, not by a kubebuilder default, to keep
+// stored CRs minimal).
+//
+// Labels and Annotations are layered: GatewayClassParameters provides the
+// defaults, and Gateway.spec.infrastructure.{labels,annotations} can override
+// or add to them on a per-Gateway basis. The other fields (Type,
+// LoadBalancerClass, LoadBalancerSourceRanges, ExternalTrafficPolicy) are
+// class-level only — to use different values per Gateway, create separate
+// GatewayClasses.
+//
+// +kubebuilder:validation:XValidation:rule="!has(self.loadBalancerClass) || !has(self.type) || self.type == 'LoadBalancer'",message="loadBalancerClass is only valid when type is LoadBalancer"
+// +kubebuilder:validation:XValidation:rule="!has(self.loadBalancerSourceRanges) || !has(self.type) || self.type == 'LoadBalancer'",message="loadBalancerSourceRanges is only valid when type is LoadBalancer"
+// +kubebuilder:validation:XValidation:rule="!has(self.externalTrafficPolicy) || !has(self.type) || self.type == 'LoadBalancer' || self.type == 'NodePort'",message="externalTrafficPolicy is only valid when type is LoadBalancer or NodePort"
+type ServiceConfig struct {
+	// Type selects the Service type. Defaults to LoadBalancer when omitted.
+	// Headless services (clusterIP: None) and ExternalName are intentionally
+	// not supported.
+	// +optional
+	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
+	Type *corev1.ServiceType `json:"type,omitempty"`
+
+	// Annotations are added to the Service's ObjectMeta. Keys set here are
+	// tracked via the varnish.io/managed-annotations sentinel and pruned on
+	// removal; annotations added by other actors (cloud controllers, etc.)
+	// are preserved.
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Labels are added to the Service's ObjectMeta. The operator's
+	// controller-managed labels (app.kubernetes.io/managed-by,
+	// gateway.networking.k8s.io/gateway-name,
+	// gateway.networking.k8s.io/gateway-namespace) cannot be overridden;
+	// user-supplied keys colliding with these are dropped with a log warning.
+	// Other keys are tracked via the varnish.io/managed-labels sentinel.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
+
+	// LoadBalancerClass selects an implementation of load balancer
+	// (cluster-specific). Only valid when Type is LoadBalancer.
+	// +optional
+	LoadBalancerClass *string `json:"loadBalancerClass,omitempty"`
+
+	// LoadBalancerSourceRanges restricts traffic to the LoadBalancer to the
+	// listed CIDRs. Only valid when Type is LoadBalancer. CIDR syntax is
+	// validated by the Kubernetes API server.
+	// +optional
+	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
+
+	// ExternalTrafficPolicy selects how nodes route external traffic to the
+	// Service. Local preserves the client source IP at the cost of imbalanced
+	// load. Only valid when Type is LoadBalancer or NodePort.
+	// +optional
+	// +kubebuilder:validation:Enum=Cluster;Local
+	ExternalTrafficPolicy *corev1.ServiceExternalTrafficPolicy `json:"externalTrafficPolicy,omitempty"`
 }
 
 // GatewayClassParametersList contains a list of GatewayClassParameters.
