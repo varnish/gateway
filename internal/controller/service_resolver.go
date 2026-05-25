@@ -94,7 +94,7 @@ func resolveServiceConfig(gateway *gatewayv1.Gateway, params *gatewayparamsv1alp
 // itself (e.g. AnnotationManagedAnnotations) is NEVER recorded as managed —
 // it's operator metadata and is always present when the feature is in use.
 //
-// existing may be nil; the function never mutates inputs.
+// existing and protected may be nil; the function never mutates inputs.
 func mergeWithManaged(desired, existing map[string]string, sentinel string, protected map[string]struct{}) (map[string]string, string) {
 	merged := make(map[string]string, len(existing)+len(desired))
 	for k, v := range existing {
@@ -111,8 +111,8 @@ func mergeWithManaged(desired, existing map[string]string, sentinel string, prot
 		}
 	}
 
-	// Filter protected keys out of desired (silently — the resolver logs the
-	// collision before calling us, so we just enforce the policy here).
+	// Filter protected keys out of desired. Callers should log the collision
+	// before calling us; this function only enforces the policy.
 	filtered := make(map[string]string, len(desired))
 	for k, v := range desired {
 		if _, isProtected := protected[k]; isProtected {

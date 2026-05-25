@@ -373,3 +373,41 @@ func TestMergeWithManaged_NilExistingMap(t *testing.T) {
 		t.Errorf("sentinel = %q", newSentinel)
 	}
 }
+
+func TestMergeWithManaged_DesiredValueWinsOverExisting(t *testing.T) {
+	// Pin the apply-order: desired must overwrite existing values for the
+	// same key. A regression that inverted this would silently leak stale
+	// annotations across reconciles.
+	existing := map[string]string{"a": "old-value"}
+	desired := map[string]string{"a": "new-value"}
+
+	merged, _ := mergeWithManaged(desired, existing, "a", nil)
+
+	if merged["a"] != "new-value" {
+		t.Errorf("merged[a] = %q, want new-value (desired must win)", merged["a"])
+	}
+}
+
+func TestMergeWithManaged_Idempotent(t *testing.T) {
+	// The function is called on every reconcile; feeding its output back as
+	// the next call's existing must yield identical results. Catches subtle
+	// bugs like sentinel keys leaking into the managed set or non-deterministic
+	// sentinel ordering.
+	desired := map[string]string{"x": "1", "y": "2"}
+	protected := map[string]struct{}{"forbidden": {}}
+
+	merged1, sentinel1 := mergeWithManaged(desired, nil, "", protected)
+	merged2, sentinel2 := mergeWithManaged(desired, merged1, sentinel1, protected)
+
+	if sentinel1 != sentinel2 {
+		t.Errorf("sentinel changed between calls: %q vs %q", sentinel1, sentinel2)
+	}
+	if len(merged1) != len(merged2) {
+		t.Errorf("merged map size changed: %d vs %d", len(merged1), len(merged2))
+	}
+	for k, v := range merged1 {
+		if merged2[k] != v {
+			t.Errorf("merged[%q] = %q on second call, want %q", k, merged2[k], v)
+		}
+	}
+}
