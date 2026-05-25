@@ -258,6 +258,10 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
 		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources, topologySpread, hasBackendTLS),
+		// TODO(#70 Task 6): replace this hardcoded default with
+		// resolveServiceConfig(gateway, params) once params is hoisted into
+		// scope. Until then, the reconcile path produces the same LoadBalancer
+		// Service it always did — backwards compatible.
 		r.buildService(gateway, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}}),
 	)
 	// PDB is opt-in. Create one only if the user asked for it.

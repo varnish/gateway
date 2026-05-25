@@ -569,6 +569,9 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway, resolved Re
 	}
 
 	// Map Gateway listeners to Service ports, deduplicating by port number.
+	// Multiple listeners can share the same port (differentiated by hostname),
+	// but a Service only needs one entry per unique port. Container ports
+	// equal listener ports — no translation.
 	var ports []corev1.ServicePort
 	seenPorts := make(map[int32]bool)
 	for i := range gateway.Spec.Listeners {

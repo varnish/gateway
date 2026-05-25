@@ -396,9 +396,17 @@ func TestBuildService_AppliesLabelsWithSentinel_ProtectsControllerLabels(t *test
 	if svc.Labels[AnnotationManagedLabels] != "team" {
 		t.Errorf("sentinel = %q, want team", svc.Labels[AnnotationManagedLabels])
 	}
+	// CRITICAL invariant: user labels MUST NOT leak into the selector.
+	// If they did, the Service would fail to find any pods.
+	if _, present := svc.Spec.Selector["team"]; present {
+		t.Error("user label leaked into Spec.Selector — pod selection will break")
+	}
+	if svc.Spec.Selector[LabelManagedBy] != ManagedByValue {
+		t.Errorf("controller label missing from selector: %v", svc.Spec.Selector)
+	}
 }
 
-func TestBuildService_NoUserAnnotations_NoSentinel(t *testing.T) {
+func TestBuildService_EmptyUserMaps_WritesEmptySentinel(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
@@ -408,10 +416,22 @@ func TestBuildService_NoUserAnnotations_NoSentinel(t *testing.T) {
 		Labels:      map[string]string{},
 	})
 
-	// When no user-supplied annotations exist, the sentinel still gets
-	// written but is empty (consistent with explicit "manages nothing").
-	if v, ok := svc.Annotations[AnnotationManagedAnnotations]; ok && v != "" {
-		t.Errorf("sentinel = %q, want empty or absent", v)
+	// When no user-supplied annotations/labels exist, the sentinel keys
+	// are still written with empty values, signalling "this Service was
+	// touched by this version of the operator, currently managing nothing."
+	v, ok := svc.Annotations[AnnotationManagedAnnotations]
+	if !ok {
+		t.Error("AnnotationManagedAnnotations sentinel missing")
+	}
+	if v != "" {
+		t.Errorf("annotation sentinel = %q, want empty string", v)
+	}
+	lv, lok := svc.Labels[AnnotationManagedLabels]
+	if !lok {
+		t.Error("AnnotationManagedLabels sentinel missing")
+	}
+	if lv != "" {
+		t.Errorf("label sentinel = %q, want empty string", lv)
 	}
 }
 
