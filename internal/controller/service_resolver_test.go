@@ -167,6 +167,43 @@ func TestResolveServiceConfig_GatewayInfraOnly_NoClassConfig(t *testing.T) {
 	}
 }
 
+func TestResolveServiceConfig_NilGateway(t *testing.T) {
+	// The resolver guards on nil gateway. This pins the contract so a
+	// future refactor cannot remove the guard without a test failure.
+	got := resolveServiceConfig(nil, nil)
+
+	if got.Type != corev1.ServiceTypeLoadBalancer {
+		t.Errorf("Type = %v, want LoadBalancer", got.Type)
+	}
+	if got.Annotations == nil {
+		t.Errorf("Annotations should be non-nil empty map, got nil")
+	}
+	if got.Labels == nil {
+		t.Errorf("Labels should be non-nil empty map, got nil")
+	}
+}
+
+func TestResolveServiceConfig_DefensiveCopy_SourceRanges(t *testing.T) {
+	// Mutating the input slice after resolution must not affect the output.
+	// Pins the defensive-copy behavior against future regressions.
+	gw := &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"}}
+	ranges := []string{"10.0.0.0/8"}
+	params := &gatewayparamsv1alpha1.GatewayClassParameters{
+		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
+			Service: &gatewayparamsv1alpha1.ServiceConfig{
+				LoadBalancerSourceRanges: ranges,
+			},
+		},
+	}
+
+	got := resolveServiceConfig(gw, params)
+	ranges[0] = "mutated"
+
+	if got.LoadBalancerSourceRanges[0] != "10.0.0.0/8" {
+		t.Errorf("LoadBalancerSourceRanges[0] = %q, want 10.0.0.0/8 (input mutation leaked into output)", got.LoadBalancerSourceRanges[0])
+	}
+}
+
 func TestResolveServiceConfig_GatewayInfraDoesNotOverrideType(t *testing.T) {
 	// Only labels/annotations layer from Gateway.spec.infrastructure.
 	// Type, LBClass, SourceRanges, ETP stay class-level.
