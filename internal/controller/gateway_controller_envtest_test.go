@@ -16,6 +16,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
 
 var testEnv *EnvtestEnvironment
@@ -313,4 +315,231 @@ func TestHTTPSListener_MissingSecret_ProgrammedFalse(t *testing.T) {
 	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ConfigMap{}, client.InNamespace("default"))
 	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("default"))
 	_ = testEnv.Client.DeleteAllOf(ctx, &corev1.ServiceAccount{}, client.InNamespace("default"))
+}
+
+// TestServiceShape_DefaultsToLoadBalancer_Envtest verifies that a Gateway
+// with no GatewayClassParameters.spec.service config still gets a
+// Type: LoadBalancer Service (backwards compatibility).
+func TestServiceShape_DefaultsToLoadBalancer_Envtest(t *testing.T) {
+	ctx := context.Background()
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "varnish-svc-default"},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gatewayClass); err != nil {
+		t.Fatalf("create gatewayclass: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gatewayClass) }()
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-default-gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish-svc-default",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gw); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gw) }()
+
+	r := NewEnvtestGatewayReconciler(testEnv)
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	var svc corev1.Service
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}, &svc); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Errorf("Type = %v, want LoadBalancer", svc.Spec.Type)
+	}
+}
+
+// TestServiceShape_TypeTransition_Envtest verifies LoadBalancer -> ClusterIP
+// transitions persist correctly and don't lose other Service fields.
+func TestServiceShape_TypeTransition_Envtest(t *testing.T) {
+	ctx := context.Background()
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "varnish-svc-transition"},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+			ParametersRef: &gatewayv1.ParametersReference{
+				Group: gatewayv1.Group(gatewayparamsv1alpha1.GroupName),
+				Kind:  "GatewayClassParameters",
+				Name:  "svc-transition-params",
+			},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gatewayClass); err != nil {
+		t.Fatalf("create gatewayclass: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gatewayClass) }()
+
+	params := &gatewayparamsv1alpha1.GatewayClassParameters{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-transition-params"},
+		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
+			Service: &gatewayparamsv1alpha1.ServiceConfig{Type: ptr(corev1.ServiceTypeLoadBalancer)},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, params); err != nil {
+		t.Fatalf("create params: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, params) }()
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-transition-gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish-svc-transition",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gw); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gw) }()
+
+	r := NewEnvtestGatewayReconciler(testEnv)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	var svc corev1.Service
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}, &svc); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Fatalf("initial Type = %v, want LoadBalancer", svc.Spec.Type)
+	}
+	originalPorts := append([]corev1.ServicePort{}, svc.Spec.Ports...)
+
+	// Flip to ClusterIP.
+	var p gatewayparamsv1alpha1.GatewayClassParameters
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: "svc-transition-params"}, &p); err != nil {
+		t.Fatalf("get params: %v", err)
+	}
+	p.Spec.Service.Type = ptr(corev1.ServiceTypeClusterIP)
+	if err := testEnv.Client.Update(ctx, &p); err != nil {
+		t.Fatalf("update params: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}, &svc); err != nil {
+		t.Fatalf("get service after transition: %v", err)
+	}
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("transitioned Type = %v, want ClusterIP", svc.Spec.Type)
+	}
+	if len(svc.Spec.Ports) != len(originalPorts) {
+		t.Errorf("ports lost during transition: was %d, now %d", len(originalPorts), len(svc.Spec.Ports))
+	}
+}
+
+// TestServiceShape_CloudControllerAnnotationPreserved_Envtest verifies that
+// annotations added directly to the Service (simulating a cloud controller)
+// are not pruned by subsequent reconciles.
+func TestServiceShape_CloudControllerAnnotationPreserved_Envtest(t *testing.T) {
+	ctx := context.Background()
+
+	gatewayClass := &gatewayv1.GatewayClass{
+		ObjectMeta: metav1.ObjectMeta{Name: "varnish-svc-cloud"},
+		Spec: gatewayv1.GatewayClassSpec{
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+			ParametersRef: &gatewayv1.ParametersReference{
+				Group: gatewayv1.Group(gatewayparamsv1alpha1.GroupName),
+				Kind:  "GatewayClassParameters",
+				Name:  "svc-cloud-params",
+			},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gatewayClass); err != nil {
+		t.Fatalf("create gatewayclass: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gatewayClass) }()
+
+	params := &gatewayparamsv1alpha1.GatewayClassParameters{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-cloud-params"},
+		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
+			Service: &gatewayparamsv1alpha1.ServiceConfig{
+				Type:        ptr(corev1.ServiceTypeLoadBalancer),
+				Annotations: map[string]string{"operator-managed": "v1"},
+			},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, params); err != nil {
+		t.Fatalf("create params: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, params) }()
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "svc-cloud-gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			GatewayClassName: "varnish-svc-cloud",
+			Listeners:        []gatewayv1.Listener{{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType}},
+		},
+	}
+	if err := testEnv.Client.Create(ctx, gw); err != nil {
+		t.Fatalf("create gateway: %v", err)
+	}
+	defer func() { _ = testEnv.Client.Delete(ctx, gw) }()
+
+	r := NewEnvtestGatewayReconciler(testEnv)
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("first reconcile: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	// Simulate cloud controller adding an annotation directly.
+	var svc corev1.Service
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}, &svc); err != nil {
+		t.Fatalf("get service: %v", err)
+	}
+	if svc.Annotations == nil {
+		svc.Annotations = map[string]string{}
+	}
+	svc.Annotations["cloud.example.com/lb-id"] = "lb-12345"
+	if err := testEnv.Client.Update(ctx, &svc); err != nil {
+		t.Fatalf("update svc with cloud annotation: %v", err)
+	}
+
+	// Trigger another reconcile (e.g. by touching the params).
+	var p gatewayparamsv1alpha1.GatewayClassParameters
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: "svc-cloud-params"}, &p); err != nil {
+		t.Fatalf("get params: %v", err)
+	}
+	p.Spec.Service.Annotations["operator-managed"] = "v2" // force drift
+	if err := testEnv.Client.Update(ctx, &p); err != nil {
+		t.Fatalf("update params: %v", err)
+	}
+
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: gw.Name, Namespace: gw.Namespace}, &svc); err != nil {
+		t.Fatalf("get service after second reconcile: %v", err)
+	}
+
+	if svc.Annotations["cloud.example.com/lb-id"] != "lb-12345" {
+		t.Errorf("cloud-controller annotation pruned: %v", svc.Annotations)
+	}
+	if svc.Annotations["operator-managed"] != "v2" {
+		t.Errorf("operator annotation not updated: %v", svc.Annotations)
+	}
 }
