@@ -392,6 +392,7 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		if needsServiceUpdate(existingSvc, desiredSvc) {
 			existingSvc.Spec.Ports = desiredSvc.Spec.Ports
 			existingSvc.Spec.Type = desiredSvc.Spec.Type
+			existingSvc.Spec.Selector = desiredSvc.Spec.Selector
 			existingSvc.Spec.LoadBalancerClass = desiredSvc.Spec.LoadBalancerClass
 			existingSvc.Spec.LoadBalancerSourceRanges = desiredSvc.Spec.LoadBalancerSourceRanges
 			existingSvc.Spec.ExternalTrafficPolicy = desiredSvc.Spec.ExternalTrafficPolicy
@@ -519,6 +520,13 @@ func needsServiceUpdate(existing, desired *corev1.Service) bool {
 		return true
 	}
 
+	// Selector drift would silently break pod selection. The selector is
+	// derived from buildLabels, so this only matters if the controller's
+	// label constants change between operator versions — defensive check.
+	if !stringMapEqual(existing.Spec.Selector, desired.Spec.Selector) {
+		return true
+	}
+
 	if len(existing.Spec.Ports) != len(desired.Spec.Ports) {
 		return true
 	}
@@ -553,6 +561,20 @@ func stringPtrEqual(a, b *string) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// stringMapEqual reports whether two string maps have identical keys and values.
+// Treats nil and empty maps as equal.
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 // stringSliceEqual reports whether two string slices have equal length and

@@ -1481,14 +1481,14 @@ func TestNeedsServiceUpdate(t *testing.T) {
 			existing: &corev1.Service{
 				Spec: corev1.ServiceSpec{
 					Type:              corev1.ServiceTypeLoadBalancer,
-					LoadBalancerClass: ptrString("old"),
+					LoadBalancerClass: ptr("old"),
 					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
 				},
 			},
 			desired: &corev1.Service{
 				Spec: corev1.ServiceSpec{
 					Type:              corev1.ServiceTypeLoadBalancer,
-					LoadBalancerClass: ptrString("new"),
+					LoadBalancerClass: ptr("new"),
 					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
 				},
 			},
@@ -1579,6 +1579,83 @@ func TestNeedsServiceUpdate(t *testing.T) {
 				},
 			},
 			expectUpdate: false,
+		},
+		{
+			name: "loadBalancerClass added (nil -> non-nil)",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptr("new"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "loadBalancerClass removed (non-nil -> nil)",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptr("old"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "managed annotation removed",
+			existing: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"metallb.universe.tf/loadBalancerIPs": "10.0.0.1",
+						AnnotationManagedAnnotations:          "metallb.universe.tf/loadBalancerIPs",
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{AnnotationManagedAnnotations: ""},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "selector changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:     corev1.ServiceTypeLoadBalancer,
+					Selector: map[string]string{LabelGatewayName: "old-gw"},
+					Ports:    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:     corev1.ServiceTypeLoadBalancer,
+					Selector: map[string]string{LabelGatewayName: "new-gw"},
+					Ports:    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
 		},
 	}
 
@@ -3322,7 +3399,3 @@ func (q *fakeQueue) AddAfter(item reconcile.Request, duration time.Duration) {}
 func (q *fakeQueue) AddRateLimited(item reconcile.Request)                  {}
 func (q *fakeQueue) Forget(item reconcile.Request)                          {}
 func (q *fakeQueue) NumRequeues(item reconcile.Request) int                 { return 0 }
-
-func ptrString(s string) *string { return &s }
-
-
