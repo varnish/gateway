@@ -332,7 +332,7 @@ func TestBuildService(t *testing.T) {
 				},
 			}
 
-			svc := r.buildService(gateway)
+			svc := r.buildService(gateway, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}})
 
 			if len(svc.Spec.Ports) != tc.expectedPorts {
 				t.Errorf("expected %d ports, got %d", tc.expectedPorts, len(svc.Spec.Ports))

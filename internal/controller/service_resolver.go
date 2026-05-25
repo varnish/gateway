@@ -82,6 +82,16 @@ func resolveServiceConfig(gateway *gatewayv1.Gateway, params *gatewayparamsv1alp
 	return out
 }
 
+// controllerManagedLabelKeys returns the label keys that buildLabels always
+// sets on resources. Users cannot override these via ServiceConfig.Labels.
+func controllerManagedLabelKeys() map[string]struct{} {
+	return map[string]struct{}{
+		LabelManagedBy:        {},
+		LabelGatewayName:      {},
+		LabelGatewayNamespace: {},
+	}
+}
+
 // mergeWithManaged writes desired keys onto a copy of existing, prunes any
 // previously-managed keys (per sentinel) that are no longer desired, and
 // returns the merged map plus a fresh sentinel string listing the keys the
