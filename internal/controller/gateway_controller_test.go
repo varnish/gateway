@@ -1460,6 +1460,126 @@ func TestNeedsServiceUpdate(t *testing.T) {
 			},
 			expectUpdate: false,
 		},
+		{
+			name: "type changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeClusterIP,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "loadBalancerClass changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptrString("old"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptrString("new"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "loadBalancerSourceRanges changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                     corev1.ServiceTypeLoadBalancer,
+					LoadBalancerSourceRanges: []string{"10.0.0.0/8"},
+					Ports:                    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                     corev1.ServiceTypeLoadBalancer,
+					LoadBalancerSourceRanges: []string{"10.0.0.0/8", "192.168.0.0/16"},
+					Ports:                    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "externalTrafficPolicy changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                  corev1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyCluster,
+					Ports:                 []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                  corev1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+					Ports:                 []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "managed annotation added",
+			existing: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{AnnotationManagedAnnotations: ""},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"metallb.universe.tf/loadBalancerIPs": "10.0.0.1",
+						AnnotationManagedAnnotations:          "metallb.universe.tf/loadBalancerIPs",
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "non-managed annotation present on existing does NOT trigger update",
+			existing: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"cloud-controller-added":     "yes",
+						AnnotationManagedAnnotations: "",
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{AnnotationManagedAnnotations: ""},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -3202,5 +3322,7 @@ func (q *fakeQueue) AddAfter(item reconcile.Request, duration time.Duration) {}
 func (q *fakeQueue) AddRateLimited(item reconcile.Request)                  {}
 func (q *fakeQueue) Forget(item reconcile.Request)                          {}
 func (q *fakeQueue) NumRequeues(item reconcile.Request) int                 { return 0 }
+
+func ptrString(s string) *string { return &s }
 
 
