@@ -174,18 +174,23 @@ func (r *Reloader) handleConfigMapUpdate(cm *corev1.ConfigMap) {
 			"resourceVersion", cm.ResourceVersion)
 		return
 	}
-	r.lastVCL = newVCL
 	r.lastVCLMux.Unlock()
 
 	r.logger.Info("main.vcl changed, triggering VCL reload",
 		"resourceVersion", cm.ResourceVersion)
 
-	// Trigger varnishadm reload with inline VCL.
-	// On failure Varnish keeps the previously active VCL, so we log and continue.
+	// Trigger varnishadm reload with inline VCL. Only record the content as
+	// "applied" on success — otherwise the next ConfigMap event with the
+	// same content would be dedup-skipped and Varnish would stay on the old
+	// VCL while we believe the new one is active.
 	if err := r.ReloadInline(newVCL); err != nil {
 		r.logger.Error("VCL reload failed - keeping previous VCL", "error", err)
 		dashboard.PublishVCLReloadFail(r.dashBus, err)
+		return
 	}
+	r.lastVCLMux.Lock()
+	r.lastVCL = newVCL
+	r.lastVCLMux.Unlock()
 }
 
 // Reload performs a single VCL reload from the configured file path
@@ -219,9 +224,20 @@ func (r *Reloader) loadAndActivate(name string, loadFn func(string) (varnishadm.
 	r.logger.Debug("activating VCL", "name", name)
 	resp, err = r.varnishadm.VCLUse(name)
 	if err != nil {
+		// Best-effort cleanup of the loaded-but-inactive VCL. If the VCLUse
+		// actually succeeded server-side and we just lost the response (comms
+		// error), VCLDiscard will fail with "VCL is active" — we log and
+		// proceed. Without this, repeated comms-error reloads would leak
+		// inactive VCLs faster than garbageCollect can reap them.
+		if _, dErr := r.varnishadm.VCLDiscard(name); dErr != nil {
+			r.logger.Debug("VCL discard after activation error failed (may be active server-side)", "name", name, "error", dErr)
+		}
 		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
 	}
 	if err := resp.CheckOK("VCL activation failed"); err != nil {
+		if _, dErr := r.varnishadm.VCLDiscard(name); dErr != nil {
+			r.logger.Debug("VCL discard after activation rejection failed", "name", name, "error", dErr)
+		}
 		return err
 	}
 

@@ -507,21 +507,90 @@ func TestFake_CmdFreeze(t *testing.T) {
 
 	<-s.Connected()
 
-	// Exec should time out (cmdTimeout = 500ms).
-	// This documents weakness #1: handleConnection returns on run() error
-	// without responding to the pending Exec caller.
+	// With the silent-varnishd fault, readFromConnection hits its rwTimeout
+	// (200ms in tests). handleConnection now propagates that as a comms
+	// failure to the pending Exec caller — it must not be swallowed and
+	// re-surfaced as the generic outer "command timed out" after cmdTimeout.
 	start := time.Now()
 	_, err := s.Exec("ping")
 	elapsed := time.Since(start)
 	if err == nil {
-		t.Fatal("expected timeout error")
+		t.Fatal("expected error from frozen varnishd")
 	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Errorf("error = %q, want containing 'timed out'", err.Error())
+	if !strings.Contains(err.Error(), "varnishadm communication failed") {
+		t.Errorf("error = %q, want containing 'varnishadm communication failed'", err.Error())
 	}
-	// Should take approximately cmdTimeout (500ms), not the full default 30s
-	if elapsed > 2*time.Second {
-		t.Errorf("Exec took %v, expected ~500ms (cmdTimeout)", elapsed)
+	// Bracket the rwTimeout (200ms) firing. A lower bound guards against a
+	// regression that closes session synchronously without letting the rw
+	// deadline fire; the upper bound guards against the pre-fix bug where
+	// the cmdTimeout (500ms) was the only stranding-breaker.
+	if elapsed < 150*time.Millisecond || elapsed >= 400*time.Millisecond {
+		t.Errorf("Exec took %v; expected ~rwTimeout (200ms): want >=150ms and <400ms", elapsed)
+	}
+
+	cancel()
+}
+
+// TestFake_CmdDisconnect_NoOrphanExecution asserts that a request stranded
+// in reqCh by a disconnect is NOT silently executed against the next
+// varnishd connection — the caller has already been told the command failed,
+// so re-running it (especially a non-idempotent one like vcl.use or ban)
+// would be a silent state-corrupting bug.
+func TestFake_CmdDisconnect_NoOrphanExecution(t *testing.T) {
+	s, addr := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = startServer(t, ctx, s)
+
+	// First connection drops on first command — strands callers.
+	fake1 := NewFakeVarnishd(t, addr, "test-secret-42")
+	fake1.Enqueue(CommandAction{Fault: FaultCmdDisconnect})
+	fake1.Start(ctx)
+
+	<-s.Connected()
+
+	// Fire N concurrent Execs to maximize the chance of one landing in reqCh
+	// just as the connection drops. All N should return errors.
+	const N = 8
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	for i := range N {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = s.Exec("first-attempt")
+		}(i)
+	}
+	wg.Wait()
+	fake1.Stop()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("Exec[%d] returned nil error; expected disconnect failure", i)
+		}
+	}
+
+	// Now start a fresh varnishd. If any request from the previous batch
+	// leaked into reqCh and survived the disconnect, this fake will receive
+	// it as an unsolicited command — that's the orphan-execution bug.
+	fake2 := NewFakeVarnishd(t, addr, "test-secret-42")
+	fake2.Start(ctx)
+	defer fake2.Stop()
+
+	// Give the new connection time to authenticate and the for-loop to
+	// drain anything stale.
+	time.Sleep(300 * time.Millisecond)
+
+	// Now send a single live request. It should succeed and the response
+	// should reflect the LATEST command, not a stale "first-attempt".
+	// fake2 has no enqueued action, so it default-responds with "OK".
+	resp, err := s.Exec("second-attempt")
+	if err != nil {
+		t.Fatalf("Exec on reconnected varnishd failed: %v", err)
+	}
+	if resp.Payload() != "OK" {
+		t.Errorf("payload = %q; want %q — orphan command may have consumed fake2's response slot", resp.Payload(), "OK")
 	}
 
 	cancel()
@@ -544,6 +613,112 @@ func TestFake_CmdDisconnect(t *testing.T) {
 	_, err := s.Exec("ping")
 	if err == nil {
 		t.Fatal("expected error after disconnect")
+	}
+
+	cancel()
+}
+
+// TestFake_CmdDisconnect_UnblocksConcurrentExecs asserts that when the admin
+// connection drops, ALL concurrent Exec callers (the dequeued one plus those
+// queued in reqCh or blocked on the send) are unblocked promptly — not just
+// the one handleConnection had picked up.
+//
+// Today, the in-flight caller is woken by the comms-error path; the others
+// sit on respCh or on the reqCh send until cmdTimeout (500ms in tests, 30s
+// in production) fires. After the session-channel fix they should all
+// return within milliseconds with a connection-lost error.
+func TestFake_CmdDisconnect_UnblocksConcurrentExecs(t *testing.T) {
+	s, addr := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = startServer(t, ctx, s)
+
+	fake := NewFakeVarnishd(t, addr, "test-secret-42")
+	fake.Enqueue(CommandAction{Fault: FaultCmdDisconnect})
+	fake.Start(ctx)
+	defer fake.Stop()
+
+	<-s.Connected()
+
+	const N = 8
+	var wg sync.WaitGroup
+	errs := make([]error, N)
+	elapsed := make([]time.Duration, N)
+
+	start := time.Now()
+	for i := range N {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			t0 := time.Now()
+			_, err := s.Exec("ping")
+			elapsed[i] = time.Since(t0)
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+	totalElapsed := time.Since(start)
+
+	// All callers must return well under cmdTimeout (500ms in tests). If any
+	// sat on cmdTimeout, they were stranded — the disconnect signal didn't
+	// reach them.
+	if totalElapsed > 200*time.Millisecond {
+		t.Errorf("All N=%d Execs took %v in aggregate; expected each to return promptly via disconnect signal, not via cmdTimeout=500ms", N, totalElapsed)
+	}
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("Exec[%d] returned nil error; expected disconnect failure", i)
+			continue
+		}
+		if strings.Contains(err.Error(), "timed out") {
+			t.Errorf("Exec[%d] error = %q (elapsed %v); expected a connection-lost error, not a timeout — caller was stranded", i, err.Error(), elapsed[i])
+		}
+	}
+
+	cancel()
+}
+
+// TestFake_CmdDisconnect_UnblocksExecPromptly is the failing-test form of
+// issue #51: when the admin connection drops mid-Exec, the in-flight caller
+// should be unblocked promptly with a comms-style error — not stranded until
+// cmdTimeout fires.
+//
+// Today, handleConnection returns on run() error without writing to the
+// pending request's responseChan, so Exec sits on respCh until cmdTimeout
+// (500ms in tests, 30s by default) and returns "command timed out".
+// After the fix, Exec should return within milliseconds with an error
+// describing the connection loss.
+func TestFake_CmdDisconnect_UnblocksExecPromptly(t *testing.T) {
+	s, addr := newTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_ = startServer(t, ctx, s)
+
+	fake := NewFakeVarnishd(t, addr, "test-secret-42")
+	fake.Enqueue(CommandAction{Fault: FaultCmdDisconnect})
+	fake.Start(ctx)
+	defer fake.Stop()
+
+	<-s.Connected()
+
+	start := time.Now()
+	_, err := s.Exec("ping")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error after disconnect")
+	}
+	// Exec must not wait for cmdTimeout (500ms in tests). It should be
+	// unblocked as soon as handleConnection observes the read failure.
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("Exec took %v; expected prompt return well under cmdTimeout=500ms — pending caller is being stranded until timeout fires", elapsed)
+	}
+	// The error should describe a connection/comms failure, not a timeout.
+	// The timeout is the symptom of the bug, not the cause.
+	if strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q; expected a connection/comms error, not a timeout (Exec is being stranded until cmdTimeout fires)", err.Error())
 	}
 
 	cancel()

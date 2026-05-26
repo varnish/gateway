@@ -31,6 +31,21 @@ type Reloader struct {
 	dashBus *dashboard.EventBus
 }
 
+// isCommsError reports whether err originated from a varnishadm CLI
+// connection-level failure (drop, comms timeout, server shutdown) — as
+// opposed to a status-level rejection from varnishd. Such errors are
+// ambiguous about server-side state: the command may have actually landed
+// before the response was lost, so transaction-rollback is unsafe.
+func isCommsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "varnishadm communication failed") ||
+		strings.Contains(msg, "varnishadm connection lost") ||
+		strings.Contains(msg, "varnishadm server stop")
+}
+
 // New creates a new TLS Reloader.
 func New(vadm varnishadm.VarnishadmInterface, certDir string, logger *slog.Logger) *Reloader {
 	if logger == nil {
@@ -79,12 +94,22 @@ func (r *Reloader) LoadAll() error {
 
 		resp, err := r.varnishadm.TLSCertLoad(name, path, "")
 		if err != nil {
-			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
-				r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
+			// Comms-class error: we don't know if the load landed
+			// server-side. Skip the rollback (which would either no-op or
+			// undo unrelated state on a reconnected connection); the next
+			// reload cycle will reconcile.
+			if !isCommsError(err) {
+				if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+					r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
+				}
+			} else {
+				r.logger.Warn("TLS cert load comms-error; skipping rollback to avoid state divergence", "name", name)
 			}
 			return fmt.Errorf("varnishadm.TLSCertLoad(%s, %s): %w", name, path, err)
 		}
 		if err := resp.CheckOK("tls.cert.load %s failed", name); err != nil {
+			// Status-level rejection (e.g. malformed cert): the server-side
+			// transaction is in a known state, so rollback is safe.
 			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
 				r.logger.Error("TLS cert rollback failed after load error", "error", rbErr)
 			}
@@ -101,8 +126,16 @@ func (r *Reloader) LoadAll() error {
 	// Commit all loaded certificates
 	resp, err := r.varnishadm.TLSCertCommit()
 	if err != nil {
-		if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
-			r.logger.Error("TLS cert rollback failed after commit error", "error", rbErr)
+		// Comms error on commit is ambiguous: the commit may have actually
+		// landed server-side. Issuing rollback now would either no-op or,
+		// worse, undo unrelated staged state on the next-connected handler.
+		// Bail out instead and let the next reload cycle reconcile.
+		if !isCommsError(err) {
+			if _, rbErr := r.varnishadm.TLSCertRollback(); rbErr != nil {
+				r.logger.Error("TLS cert rollback failed after commit error", "error", rbErr)
+			}
+		} else {
+			r.logger.Warn("TLS cert commit comms-error; skipping rollback (commit may have landed server-side)")
 		}
 		return fmt.Errorf("varnishadm.TLSCertCommit: %w", err)
 	}
