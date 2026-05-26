@@ -3,8 +3,8 @@ name: varnish-gateway
 description: Kubernetes Gateway API implementation using Varnish
 type: application
 # Version is overridden at package time from .version file
-version: 0.21.4
-appVersion: "0.21.4"
+version: 0.21.5
+appVersion: "0.21.5"
 
 keywords:
   - varnish
