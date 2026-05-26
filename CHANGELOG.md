@@ -5,6 +5,57 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.21.5 - 2026-05-26]
+
+### Fixed
+
+- **varnishadm: Exec stranding and orphan execution on connection drop.**
+  When the admin connection dropped mid-flight, the pending `Exec`
+  caller's `responseChan` was never written to, so `Exec` hung for the
+  full `cmdTimeout` (30s default) before returning "command timed out".
+  Concurrent callers blocked on the `reqCh` send were stuck
+  indefinitely. Worse, requests left in `reqCh` after a disconnect were
+  silently executed against the next varnishd connection —
+  non-idempotent commands (`vcl.use`, `ban`, `vcl.discard`) would run
+  twice while the caller had already been told they failed. The CLI
+  client is reworked end-to-end:
+  - `handleConnection`'s defer closes the session under lock first
+    (newly arriving `Exec`s bail at queue time), then drains `reqCh`,
+    delivering a definitive comms error to anything queued. `v.session`
+    is left pointing at the closed channel so dead-window callers
+    observe the drop instead of capturing nil and stalling until
+    `cmdTimeout`.
+  - `Exec`'s two-step select shares a single `time.NewTimer` so total
+    latency is bounded by one `cmdTimeout` rather than two.
+  - On `<-session` or `<-done`, `Exec` does a non-blocking `respCh`
+    re-check so a command that actually succeeded just before the close
+    isn't racily reported as a failure.
+  - New `Server.done` channel closed when `Run()` exits gives `Exec` a
+    distinct "server stopped" signal separate from per-connection drops.
+  - `processRequest` is extracted with panic recovery so an internal
+    panic delivers a result to the in-flight caller instead of stranding
+    it.
+  - `stateMu` (was `sessionMu`) now also guards banner/version/
+    environment so concurrent getters during reconnects can't observe
+    torn writes.
+  Refs #51.
+- **VCL reloader: `lastVCL` only recorded on successful reload.**
+  Previously a failed reload would poison dedup and skip retries
+  forever. A failed `VCLUse` now best-effort-discards the loaded VCL so
+  inactive ones don't leak faster than `garbageCollect` reaps them.
+- **TLS reloader: skip `TLSCertRollback` on comms-class errors.**
+  Server-side transaction state after a `TLSCertLoad`/`TLSCertCommit`
+  comms failure is ambiguous — the commit may have landed before the
+  response was lost, so rolling back against the next-connected handler
+  would undo unrelated state.
+
+### Docs
+
+- **Logo: neutral grey wordmark for dark-background legibility.**
+  Switched the Varnish wordmark paths and "GATEWAY" text to `#808080`
+  via a new `.st2` class so the logo stays readable on both light and
+  dark surfaces. Dropped the unused PNG copy.
+
 ## [v0.21.4 - 2026-05-24]
 
 ### Security
