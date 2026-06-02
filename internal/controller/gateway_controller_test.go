@@ -143,6 +143,26 @@ func TestBuildLabels(t *testing.T) {
 	}
 }
 
+// TestControllerManagedLabelKeys_MatchesBuildLabels pins the invariant that
+// every key emitted by buildLabels is listed in controllerManagedLabelKeys.
+// If buildLabels gains a key without the set being updated, users could
+// override controller-managed labels via ServiceConfig.Labels.
+func TestControllerManagedLabelKeys_MatchesBuildLabels(t *testing.T) {
+	r := &GatewayReconciler{Config: Config{}}
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+	}
+
+	emitted := r.buildLabels(gw)
+	managed := controllerManagedLabelKeys()
+
+	for k := range emitted {
+		if _, protected := managed[k]; !protected {
+			t.Errorf("buildLabels emits %q but controllerManagedLabelKeys does not list it — users could override it via ServiceConfig.Labels", k)
+		}
+	}
+}
+
 func TestBuildDeployment(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{
@@ -332,7 +352,7 @@ func TestBuildService(t *testing.T) {
 				},
 			}
 
-			svc := r.buildService(gateway)
+			svc := r.buildService(gateway, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}})
 
 			if len(svc.Spec.Ports) != tc.expectedPorts {
 				t.Errorf("expected %d ports, got %d", tc.expectedPorts, len(svc.Spec.Ports))
@@ -1460,6 +1480,221 @@ func TestNeedsServiceUpdate(t *testing.T) {
 			},
 			expectUpdate: false,
 		},
+		{
+			name: "type changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeClusterIP,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "loadBalancerClass changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptr("old"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptr("new"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "loadBalancerSourceRanges changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                     corev1.ServiceTypeLoadBalancer,
+					LoadBalancerSourceRanges: []string{"10.0.0.0/8"},
+					Ports:                    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                     corev1.ServiceTypeLoadBalancer,
+					LoadBalancerSourceRanges: []string{"10.0.0.0/8", "192.168.0.0/16"},
+					Ports:                    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "externalTrafficPolicy changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                  corev1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyCluster,
+					Ports:                 []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                  corev1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+					Ports:                 []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "managed annotation added",
+			existing: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{AnnotationManagedAnnotations: ""},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"metallb.universe.tf/loadBalancerIPs": "10.0.0.1",
+						AnnotationManagedAnnotations:          "metallb.universe.tf/loadBalancerIPs",
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "non-managed annotation present on existing does NOT trigger update",
+			existing: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"cloud-controller-added":     "yes",
+						AnnotationManagedAnnotations: "",
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{AnnotationManagedAnnotations: ""},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: false,
+		},
+		{
+			name: "loadBalancerClass added (nil -> non-nil)",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptr("new"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "loadBalancerClass removed (non-nil -> nil)",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:              corev1.ServiceTypeLoadBalancer,
+					LoadBalancerClass: ptr("old"),
+					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "managed annotation removed",
+			existing: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"metallb.universe.tf/loadBalancerIPs": "10.0.0.1",
+						AnnotationManagedAnnotations:          "metallb.universe.tf/loadBalancerIPs",
+					},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{AnnotationManagedAnnotations: ""},
+				},
+				Spec: corev1.ServiceSpec{
+					Type:  corev1.ServiceTypeLoadBalancer,
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
+		{
+			name: "API-defaulted ExternalTrafficPolicy=Cluster vs desired unset does NOT trigger update",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:                  corev1.ServiceTypeLoadBalancer,
+					ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyCluster, // API-defaulted
+					Ports:                 []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type: corev1.ServiceTypeLoadBalancer,
+					// ExternalTrafficPolicy not set — zero value ""
+					Ports: []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: false,
+		},
+		{
+			name: "selector changed",
+			existing: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:     corev1.ServiceTypeLoadBalancer,
+					Selector: map[string]string{LabelGatewayName: "old-gw"},
+					Ports:    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			desired: &corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Type:     corev1.ServiceTypeLoadBalancer,
+					Selector: map[string]string{LabelGatewayName: "new-gw"},
+					Ports:    []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
+				},
+			},
+			expectUpdate: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1469,6 +1704,68 @@ func TestNeedsServiceUpdate(t *testing.T) {
 				t.Errorf("expected %v, got %v", tc.expectUpdate, result)
 			}
 		})
+	}
+}
+
+func TestMergeServicePorts_PreservesNodePort(t *testing.T) {
+	// buildService produces ports with NodePort: 0 because the API server
+	// allocates them. The update path must carry the existing allocation
+	// across or every reconcile triggers a NodePort churn and disconnects
+	// clients.
+	existing := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP, NodePort: 31234},
+		{Name: "https-443", Port: 443, TargetPort: intstr.FromInt(443), Protocol: corev1.ProtocolTCP, NodePort: 31235},
+	}
+	desired := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP},
+		{Name: "https-443", Port: 443, TargetPort: intstr.FromInt(443), Protocol: corev1.ProtocolTCP},
+	}
+
+	out := mergeServicePorts(existing, desired)
+
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+	if out[0].NodePort != 31234 {
+		t.Errorf("http-80 NodePort = %d, want 31234 (carried from existing)", out[0].NodePort)
+	}
+	if out[1].NodePort != 31235 {
+		t.Errorf("https-443 NodePort = %d, want 31235 (carried from existing)", out[1].NodePort)
+	}
+}
+
+func TestMergeServicePorts_DesiredNodePortWins(t *testing.T) {
+	// If a future caller explicitly sets a NodePort in the desired port
+	// (e.g. user pins one), it must win over the existing allocation.
+	existing := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, NodePort: 31234},
+	}
+	desired := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, NodePort: 32000},
+	}
+
+	out := mergeServicePorts(existing, desired)
+
+	if out[0].NodePort != 32000 {
+		t.Errorf("NodePort = %d, want 32000 (desired wins)", out[0].NodePort)
+	}
+}
+
+func TestMergeServicePorts_RenamedPortGetsNewAllocation(t *testing.T) {
+	// If the port name changes (e.g. listener renamed), there's no
+	// existing entry to carry NodePort from — desired's zero stays,
+	// and the API server allocates a fresh one.
+	existing := []corev1.ServicePort{
+		{Name: "http-80", Port: 80, NodePort: 31234},
+	}
+	desired := []corev1.ServicePort{
+		{Name: "http-8080", Port: 8080},
+	}
+
+	out := mergeServicePorts(existing, desired)
+
+	if out[0].NodePort != 0 {
+		t.Errorf("renamed port should not inherit NodePort, got %d", out[0].NodePort)
 	}
 }
 
@@ -3202,5 +3499,3 @@ func (q *fakeQueue) AddAfter(item reconcile.Request, duration time.Duration) {}
 func (q *fakeQueue) AddRateLimited(item reconcile.Request)                  {}
 func (q *fakeQueue) Forget(item reconcile.Request)                          {}
 func (q *fakeQueue) NumRequeues(item reconcile.Request) int                 { return 0 }
-
-

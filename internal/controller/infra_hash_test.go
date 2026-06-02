@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"reflect"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -246,5 +247,38 @@ func TestInfrastructureConfig_SecretOrderDoesNotAffectHash(t *testing.T) {
 
 	if hash1 != hash2 {
 		t.Errorf("ComputeHash() affected by secret order: %s != %s", hash1, hash2)
+	}
+}
+
+// TestInfraHash_ServiceConfigDoesNotAffectHash is a regression check: changing
+// Service shape (Type, annotations, labels, LB knobs) must NOT cause a pod
+// restart, so InfrastructureConfig must not gain Service-related fields. This
+// matches the design decision documented in
+// docs/superpowers/specs/2026-05-25-configurable-service-shape-design.md.
+//
+// The check is structural (via reflection) because behavioral verification
+// would require enumerating every possible Service-shape field; structural
+// absence of the fields is a stronger, simpler guard.
+func TestInfraHash_ServiceConfigDoesNotAffectHash(t *testing.T) {
+	cfg := InfrastructureConfig{}
+	configType := reflect.TypeOf(cfg)
+
+	// Forbid both generic Service-shape names and the concrete field names
+	// from ResolvedServiceConfig — these are the obvious places someone might
+	// accidentally copy a field across.
+	forbidden := []string{
+		"Service",
+		"ServiceType",
+		"ServiceConfig",
+		"ServiceAnnotations",
+		"ServiceLabels",
+		"LoadBalancerClass",
+		"LoadBalancerSourceRanges",
+		"ExternalTrafficPolicy",
+	}
+	for _, f := range forbidden {
+		if _, ok := configType.FieldByName(f); ok {
+			t.Errorf("InfrastructureConfig must not contain field %q — Service shape changes must not trigger pod restarts", f)
+		}
 	}
 }

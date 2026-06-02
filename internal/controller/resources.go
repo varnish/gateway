@@ -555,14 +555,23 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 	}
 }
 
-// buildService creates the Service for the Gateway.
-func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway) *corev1.Service {
-	labels := r.buildLabels(gateway)
+// buildService creates the Service for the Gateway. The resolved config
+// supplies Type, LB knobs, traffic policy, plus user-supplied annotations
+// and labels that are layered onto the controller-managed labels via the
+// managed-keys sentinel.
+func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway, resolved ResolvedServiceConfig) *corev1.Service {
+	controllerLabels := r.buildLabels(gateway)
+
+	// Selector mirrors the controller-managed labels — never the user-supplied set.
+	selector := make(map[string]string, len(controllerLabels))
+	for k, v := range controllerLabels {
+		selector[k] = v
+	}
 
 	// Map Gateway listeners to Service ports, deduplicating by port number.
 	// Multiple listeners can share the same port (differentiated by hostname),
-	// but a Service only needs one entry per unique port.
-	// Container ports = listener ports (no translation).
+	// but a Service only needs one entry per unique port. Container ports
+	// equal listener ports — no translation.
 	var ports []corev1.ServicePort
 	seenPorts := make(map[int32]bool)
 	for i := range gateway.Spec.Listeners {
@@ -579,35 +588,57 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway) *corev1.Ser
 			Protocol:   corev1.ProtocolTCP,
 		})
 	}
-
-	// Default to http-80 on port 80 if no listeners
 	if len(ports) == 0 {
 		ports = []corev1.ServicePort{
-			{
-				Name:       "http-80",
-				Port:       80,
-				TargetPort: intstr.FromInt(80),
-				Protocol:   corev1.ProtocolTCP,
-			},
+			{Name: "http-80", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP},
 		}
 	}
 
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
+	// Merge user labels onto controller labels via the sentinel. Existing
+	// state is the controller-label baseline; protected keys can't be
+	// overridden by user input. Log any collisions so users get feedback
+	// when their config tried to overwrite a controller-managed label.
+	for k := range resolved.Labels {
+		if _, isProtected := controllerManagedLabelKeys()[k]; isProtected {
+			r.Logger.Warn("ignoring service label that collides with a controller-managed key",
+				"gateway", gateway.Namespace+"/"+gateway.Name,
+				"label", k)
+		}
+	}
+	mergedLabels, labelSentinel := mergeWithManaged(resolved.Labels, controllerLabels, "", controllerManagedLabelKeys())
+
+	mergedAnnotations, annoSentinel := mergeWithManaged(resolved.Annotations, nil, "", nil)
+	// Both sentinels live in .metadata.annotations. The label sentinel's
+	// value is a comma-separated key list, which is not a valid label value
+	// (no commas, no slashes) — annotations have no such restriction.
+	mergedAnnotations[AnnotationManagedAnnotations] = annoSentinel
+	mergedAnnotations[AnnotationManagedLabels] = labelSentinel
+
+	svc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Service"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      gateway.Name,
-			Namespace: gateway.Namespace,
-			Labels:    labels,
+			Name:        gateway.Name,
+			Namespace:   gateway.Namespace,
+			Labels:      mergedLabels,
+			Annotations: mergedAnnotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Type:     corev1.ServiceTypeLoadBalancer,
-			Selector: labels,
-			Ports:    ports,
+			Type:                     resolved.Type,
+			Selector:                 selector,
+			Ports:                    ports,
+			LoadBalancerSourceRanges: resolved.LoadBalancerSourceRanges,
 		},
 	}
+
+	if resolved.LoadBalancerClass != nil {
+		lb := *resolved.LoadBalancerClass
+		svc.Spec.LoadBalancerClass = &lb
+	}
+	if resolved.ExternalTrafficPolicy != nil {
+		svc.Spec.ExternalTrafficPolicy = *resolved.ExternalTrafficPolicy
+	}
+
+	return svc
 }
 
 // buildPodDisruptionBudget creates a PodDisruptionBudget matching the Gateway's

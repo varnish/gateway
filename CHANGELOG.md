@@ -5,6 +5,23 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **GatewayClassParameters: configurable data-plane Service shape (#70).**
+  New `spec.service` field exposes Service `type`, `annotations`, `labels`,
+  `loadBalancerClass`, `loadBalancerSourceRanges`, and
+  `externalTrafficPolicy`. Defaults preserve the existing `Type: LoadBalancer`
+  behavior, so existing deployments need no changes. Per-Gateway overlay
+  for labels and annotations via the Gateway API v1.1+
+  `Gateway.spec.infrastructure` field. Cross-field validation via CEL at
+  admission time. Annotations added by cloud controllers (e.g., AWS LB
+  Controller, MetalLB) are preserved across reconciles via a managed-keys
+  sentinel on the Service. Unblocks gateway-behind-gateway, bare-metal
+  MetalLB, and internal-cache deployment patterns. Service shape changes
+  do not trigger pod restarts.
+
 ## [v0.21.5 - 2026-05-26]
 
 ### Fixed

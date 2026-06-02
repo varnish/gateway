@@ -254,7 +254,7 @@ func TestBuildService_SingleListener(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	svc := r.buildService(gw)
+	svc := r.buildService(gw, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}})
 
 	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
 		t.Errorf("type = %v, want LoadBalancer", svc.Spec.Type)
@@ -277,7 +277,7 @@ func TestBuildService_MultipleListeners(t *testing.T) {
 		gatewayv1.Listener{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
 	)
 
-	svc := r.buildService(gw)
+	svc := r.buildService(gw, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}})
 
 	if len(svc.Spec.Ports) != 2 {
 		t.Fatalf("expected 2 ports, got %d", len(svc.Spec.Ports))
@@ -291,7 +291,7 @@ func TestBuildService_DeduplicatesPorts(t *testing.T) {
 		gatewayv1.Listener{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("b.example.com"))},
 	)
 
-	svc := r.buildService(gw)
+	svc := r.buildService(gw, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}})
 
 	if len(svc.Spec.Ports) != 1 {
 		t.Errorf("expected 1 deduplicated port, got %d", len(svc.Spec.Ports))
@@ -305,13 +305,178 @@ func TestBuildService_NoListenersFallback(t *testing.T) {
 		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
 	}
 
-	svc := r.buildService(gw)
+	svc := r.buildService(gw, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}})
 
 	if len(svc.Spec.Ports) != 1 {
 		t.Fatalf("expected 1 fallback port, got %d", len(svc.Spec.Ports))
 	}
 	if svc.Spec.Ports[0].Port != 80 {
 		t.Errorf("fallback port = %d, want 80", svc.Spec.Ports[0].Port)
+	}
+}
+
+func TestBuildService_AppliesResolvedType(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+
+	svc := r.buildService(gw, ResolvedServiceConfig{
+		Type:        corev1.ServiceTypeClusterIP,
+		Annotations: map[string]string{},
+		Labels:      map[string]string{},
+	})
+
+	if svc.Spec.Type != corev1.ServiceTypeClusterIP {
+		t.Errorf("Type = %v, want ClusterIP", svc.Spec.Type)
+	}
+}
+
+func TestBuildService_AppliesLoadBalancerFields(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+	etp := corev1.ServiceExternalTrafficPolicyLocal
+	lbClass := "service.k8s.io/example"
+
+	svc := r.buildService(gw, ResolvedServiceConfig{
+		Type:                     corev1.ServiceTypeLoadBalancer,
+		Annotations:              map[string]string{},
+		Labels:                   map[string]string{},
+		LoadBalancerClass:        &lbClass,
+		LoadBalancerSourceRanges: []string{"10.0.0.0/8", "192.168.0.0/16"},
+		ExternalTrafficPolicy:    &etp,
+	})
+
+	if svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != lbClass {
+		t.Errorf("LoadBalancerClass = %v", svc.Spec.LoadBalancerClass)
+	}
+	if len(svc.Spec.LoadBalancerSourceRanges) != 2 {
+		t.Errorf("LoadBalancerSourceRanges = %v", svc.Spec.LoadBalancerSourceRanges)
+	}
+	if svc.Spec.ExternalTrafficPolicy != etp {
+		t.Errorf("ExternalTrafficPolicy = %v, want %v", svc.Spec.ExternalTrafficPolicy, etp)
+	}
+}
+
+func TestBuildService_AppliesAnnotationsWithSentinel(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+
+	svc := r.buildService(gw, ResolvedServiceConfig{
+		Type:        corev1.ServiceTypeLoadBalancer,
+		Annotations: map[string]string{"metallb.universe.tf/loadBalancerIPs": "10.0.0.1"},
+		Labels:      map[string]string{},
+	})
+
+	if svc.Annotations["metallb.universe.tf/loadBalancerIPs"] != "10.0.0.1" {
+		t.Errorf("annotation not applied: %v", svc.Annotations)
+	}
+	if svc.Annotations[AnnotationManagedAnnotations] != "metallb.universe.tf/loadBalancerIPs" {
+		t.Errorf("sentinel = %q", svc.Annotations[AnnotationManagedAnnotations])
+	}
+}
+
+func TestBuildService_AppliesLabelsWithSentinel_ProtectsControllerLabels(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+
+	svc := r.buildService(gw, ResolvedServiceConfig{
+		Type:        corev1.ServiceTypeLoadBalancer,
+		Annotations: map[string]string{},
+		Labels: map[string]string{
+			LabelManagedBy: "evil", // protected — must be ignored
+			"team":         "edge", // applied
+		},
+	})
+
+	if svc.Labels[LabelManagedBy] != ManagedByValue {
+		t.Errorf("protected label was overridden: %q", svc.Labels[LabelManagedBy])
+	}
+	if svc.Labels["team"] != "edge" {
+		t.Errorf("user label = %q, want edge", svc.Labels["team"])
+	}
+	// Sentinel lives on annotations (label values can't carry commas/slashes).
+	if svc.Annotations[AnnotationManagedLabels] != "team" {
+		t.Errorf("sentinel = %q, want team", svc.Annotations[AnnotationManagedLabels])
+	}
+	if _, present := svc.Labels[AnnotationManagedLabels]; present {
+		t.Errorf("sentinel must not live in .Labels (invalid label value when multi-key): %v", svc.Labels)
+	}
+	// CRITICAL invariant: user labels MUST NOT leak into the selector.
+	// If they did, the Service would fail to find any pods.
+	if _, present := svc.Spec.Selector["team"]; present {
+		t.Error("user label leaked into Spec.Selector — pod selection will break")
+	}
+	if svc.Spec.Selector[LabelManagedBy] != ManagedByValue {
+		t.Errorf("controller label missing from selector: %v", svc.Spec.Selector)
+	}
+}
+
+func TestBuildService_MultipleLabels_SentinelIsValidLabelValue(t *testing.T) {
+	// Regression: prior to moving the sentinel into .Annotations, a config
+	// with ≥2 service labels (or any DNS-prefixed key) produced a sentinel
+	// value containing ',' or '/', both forbidden in label values — the API
+	// server rejected the Service. The sentinel must now live in annotations
+	// and .Labels must not contain it at all.
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+
+	svc := r.buildService(gw, ResolvedServiceConfig{
+		Type:        corev1.ServiceTypeLoadBalancer,
+		Annotations: map[string]string{},
+		Labels: map[string]string{
+			"team":                          "edge",
+			"tier":                          "cache",
+			"app.kubernetes.io/component":   "gateway",
+		},
+	})
+
+	for k, v := range svc.Labels {
+		for _, bad := range []rune{',', '/'} {
+			for _, r := range v {
+				if r == bad {
+					t.Errorf("label %q has value %q containing %q (invalid in label values)", k, v, string(bad))
+				}
+			}
+		}
+	}
+	if _, present := svc.Labels[AnnotationManagedLabels]; present {
+		t.Errorf("sentinel leaked into .Labels (will be rejected by API server): %v", svc.Labels)
+	}
+	sentinel := svc.Annotations[AnnotationManagedLabels]
+	if sentinel != "app.kubernetes.io/component,team,tier" {
+		t.Errorf("annotation sentinel = %q, want %q", sentinel, "app.kubernetes.io/component,team,tier")
+	}
+}
+
+func TestBuildService_EmptyUserMaps_WritesEmptySentinel(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+
+	svc := r.buildService(gw, ResolvedServiceConfig{
+		Type:        corev1.ServiceTypeLoadBalancer,
+		Annotations: map[string]string{},
+		Labels:      map[string]string{},
+	})
+
+	// When no user-supplied annotations/labels exist, both sentinels are
+	// still written (in .Annotations) with empty values, signalling "this
+	// Service was touched by this version of the operator, currently
+	// managing nothing."
+	v, ok := svc.Annotations[AnnotationManagedAnnotations]
+	if !ok {
+		t.Error("AnnotationManagedAnnotations sentinel missing")
+	}
+	if v != "" {
+		t.Errorf("annotation sentinel = %q, want empty string", v)
+	}
+	lv, lok := svc.Annotations[AnnotationManagedLabels]
+	if !lok {
+		t.Error("AnnotationManagedLabels sentinel missing from .Annotations")
+	}
+	if lv != "" {
+		t.Errorf("label sentinel = %q, want empty string", lv)
+	}
+	if _, present := svc.Labels[AnnotationManagedLabels]; present {
+		t.Errorf("label sentinel must not live in .Labels: %v", svc.Labels)
 	}
 }
 
