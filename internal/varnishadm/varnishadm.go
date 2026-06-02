@@ -21,19 +21,29 @@ import (
 // Server is the data structure used to communicate with varnishadm.
 // It listens for incoming connections from varnishd started with the -M option.
 type Server struct {
-	Port           uint16
-	Secret         string
-	logger         *slog.Logger
-	reqCh          chan varnishRequest
-	banner         string // Stores the Varnish CLI banner received on connection
-	bannerReceived bool   // Tracks if banner has been read for this connection
-	environment    string // Stores the environment line (e.g., "Darwin,24.6.0,arm64,-jnone,-smse4,-sdefault,-hcritbit")
-	version        string // Stores the Varnish version (e.g., "varnish-7.7.3")
-	connected      chan struct{}
-	connectedOnce  sync.Once
-	cmdTimeout     time.Duration // Overall command timeout (default: 30s)
-	rwTimeout      time.Duration // Individual socket I/O operations (default: 10s)
-	authTimeout    time.Duration // Authentication operations (default: 5s)
+	Port          uint16
+	Secret        string
+	logger        *slog.Logger
+	reqCh         chan varnishRequest
+	connected     chan struct{}
+	connectedOnce sync.Once
+	done          chan struct{} // closed when Run returns; signals server shutdown
+	doneOnce      sync.Once
+	cmdTimeout    time.Duration // Overall command timeout (default: 30s)
+	rwTimeout     time.Duration // Individual socket I/O operations (default: 10s)
+	authTimeout   time.Duration // Authentication operations (default: 5s)
+
+	// stateMu guards all per-connection state below. session is created fresh
+	// each time a new varnishd connects and authenticates, and closed when
+	// that connection ends so anything blocked on it wakes up promptly. banner
+	// and friends are rewritten on each reconnect and must be read under the
+	// same lock to avoid torn observations.
+	stateMu        sync.Mutex
+	session        chan struct{}
+	banner         string // Varnish CLI banner from the latest authenticated connection
+	bannerReceived bool
+	environment    string // e.g. "Darwin,24.6.0,arm64,-jnone,-smse4,-sdefault,-hcritbit"
+	version        string // e.g. "varnish-7.7.3"
 }
 
 // ServerOption is a functional option for configuring a Server.
@@ -91,8 +101,16 @@ func (vr VarnishResponse) CheckOK(format string, args ...any) error {
 }
 
 type varnishRequest struct {
-	command      string
-	responseChan chan VarnishResponse
+	command    string
+	responseCh chan varnishResult
+}
+
+// varnishResult is delivered to a pending Exec caller. Exactly one of resp/err
+// is meaningful: a non-nil err means the underlying CLI connection failed or
+// was lost while the command was in flight.
+type varnishResult struct {
+	resp VarnishResponse
+	err  error
 }
 
 // Timeout constants for different operations
@@ -110,6 +128,7 @@ func New(port uint16, secret string, logger *slog.Logger, opts ...ServerOption) 
 		logger:      logger,
 		reqCh:       make(chan varnishRequest, 1),
 		connected:   make(chan struct{}),
+		done:        make(chan struct{}),
 		cmdTimeout:  defaultCmdTimeout,
 		rwTimeout:   readWriteTimeout,
 		authTimeout: authTimeoutDuration,
@@ -128,6 +147,9 @@ func (v *Server) Connected() <-chan struct{} {
 
 // Run runs the server and waits for connections from varnishd - blocks
 func (v *Server) Run(ctx context.Context) error {
+	// Signal shutdown to any pending Exec callers on return.
+	defer v.doneOnce.Do(func() { close(v.done) })
+
 	v.logger.Debug("Starting varnishadm server on localhost", "port", v.Port)
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", v.Port))
 	if err != nil {
@@ -172,8 +194,14 @@ func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
 	}
 	defer tcpConn.Close()
 
-	v.bannerReceived = false // Reset banner state for new connection
+	// Reset banner state under lock so concurrent GetBanner/GetVersion calls
+	// can't observe a torn mid-reconnect string.
+	v.stateMu.Lock()
+	v.bannerReceived = false
 	v.banner = ""
+	v.environment = ""
+	v.version = ""
+	v.stateMu.Unlock()
 
 	// Read the initial banner that Varnish sends on connection (includes authentication)
 	if err := v.readBanner(tcpConn); err != nil {
@@ -181,11 +209,41 @@ func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("banner/authentication failed: %w", err)
 	}
 
-	v.logger.Info("Varnish connected and authenticated", "version", v.version, "remote_addr", tcpConn.RemoteAddr())
+	v.logger.Info("Varnish connected and authenticated", "version", v.GetVersion(), "remote_addr", tcpConn.RemoteAddr())
 
-	// Signal that connection is established.
-	// TODO: sync.Once means Connected() only signals the first successful connection.
-	// After a reconnect, callers waiting on Connected() won't be notified again.
+	// Install a fresh session channel for this connection.
+	sessionCh := make(chan struct{})
+	v.stateMu.Lock()
+	v.session = sessionCh
+	v.stateMu.Unlock()
+
+	// On exit: close the session BEFORE draining reqCh so newly-arriving
+	// Execs bail at queue time and don't race their requests in. Then drain
+	// anything already queued and deliver a definitive error rather than
+	// leaving an orphaned request in reqCh for the next varnishd to execute.
+	//
+	// v.session is intentionally NOT reset to nil. Leaving it pointing at the
+	// now-closed channel means an Exec call entering during the dead-window
+	// (between this handleConnection and the next) captures the closed
+	// channel and observes the drop immediately, instead of capturing nil
+	// and stalling until cmdTimeout. The next handleConnection will overwrite
+	// v.session with its own fresh channel.
+	defer func() {
+		v.stateMu.Lock()
+		close(sessionCh)
+		v.stateMu.Unlock()
+
+		reason := errors.New("varnishadm connection lost")
+		if ctx.Err() != nil {
+			reason = errors.New("varnishadm server stopping")
+		}
+		v.drainPending(reason)
+	}()
+
+	// Signal that the admin connection has been established at least once.
+	// Connected() is "ever-connected" semantics by design — callers like
+	// chaperone use it as a one-shot startup barrier. Per-drop notification
+	// flows through the session channel above instead.
 	v.connectedOnce.Do(func() {
 		close(v.connected)
 	})
@@ -195,17 +253,59 @@ func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
 		case <-ctx.Done():
 			return nil
 		case req := <-v.reqCh:
-			resp, err := v.run(tcpConn, req.command)
-			if err != nil {
-				// TODO: No automatic reconnection after connection drop. The pending
-				// Exec caller's responseChan is never written to; Exec will hang
-				// until cmdTimeout fires.
-				return fmt.Errorf("readFromConnection: %w", err)
+			if err := v.processRequest(tcpConn, req); err != nil {
+				return err
 			}
-			if resp.statusCode != ClisOk {
-				v.logger.Warn("command failed", "command", req.command, "status", resp.statusCode, "payload", resp.payload)
-			}
-			req.responseChan <- resp
+		}
+	}
+}
+
+// processRequest runs one CLI command and delivers exactly one result to the
+// caller's responseCh. On run() error, it returns the error so the caller
+// (handleConnection) can tear down the connection. A panic anywhere in here
+// is recovered and surfaced to the caller as a result, then re-raised so the
+// connection is also torn down.
+func (v *Server) processRequest(tcpConn *net.TCPConn, req varnishRequest) (returnErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			v.sendResult(req.responseCh, varnishResult{err: fmt.Errorf("varnishadm internal panic: %v", r)})
+			returnErr = fmt.Errorf("panic in processRequest: %v", r)
+		}
+	}()
+
+	resp, err := v.run(tcpConn, req.command)
+	if err != nil {
+		v.sendResult(req.responseCh, varnishResult{err: fmt.Errorf("varnishadm communication failed: %w", err)})
+		return fmt.Errorf("run(%q): %w", req.command, err)
+	}
+	v.sendResult(req.responseCh, varnishResult{resp: resp})
+	return nil
+}
+
+// sendResult delivers a result to a caller's responseCh non-blockingly. The
+// channel is documented to be buffered (size 1) by Exec, so the send is
+// expected to succeed; the default arm is a safety net for any future caller
+// that forgets to buffer.
+func (v *Server) sendResult(ch chan varnishResult, r varnishResult) {
+	select {
+	case ch <- r:
+	default:
+		v.logger.Warn("varnishadm response channel full or unbuffered; dropping result", "err", r.err)
+	}
+}
+
+// drainPending non-blockingly drains everything currently queued in reqCh and
+// fails each request with the given reason. Called from handleConnection's
+// defer after the session is closed, so newly-arriving Execs see the closed
+// session and bail before queuing — anything we drain here was queued before
+// the session closed.
+func (v *Server) drainPending(reason error) {
+	for {
+		select {
+		case req := <-v.reqCh:
+			v.sendResult(req.responseCh, varnishResult{err: reason})
+		default:
+			return
 		}
 	}
 }
@@ -257,30 +357,38 @@ func (v *Server) readBanner(c *net.TCPConn) error {
 		return fmt.Errorf("authentication rejected by Varnish (status %d): %s", authResponse.statusCode, authResponse.payload)
 	}
 
-	// Store the full banner and parse environment/version from auth response payload
+	// Store the full banner and parse environment/version from the auth
+	// response payload. All four fields move under stateMu so concurrent
+	// GetBanner/GetEnvironment/GetVersion calls observe a consistent snapshot.
+	env, version := parseBanner(authResponse.payload)
+	v.stateMu.Lock()
 	v.banner = authResponse.payload
 	v.bannerReceived = true
-
-	// Parse environment and version from banner
-	env, version := parseBanner(authResponse.payload)
 	v.environment = env
 	v.version = version
+	v.stateMu.Unlock()
 
 	return nil
 }
 
 // GetBanner returns the stored Varnish CLI banner
 func (v *Server) GetBanner() string {
+	v.stateMu.Lock()
+	defer v.stateMu.Unlock()
 	return v.banner
 }
 
 // GetEnvironment returns the parsed environment information
 func (v *Server) GetEnvironment() string {
+	v.stateMu.Lock()
+	defer v.stateMu.Unlock()
 	return v.environment
 }
 
 // GetVersion returns the parsed Varnish version
 func (v *Server) GetVersion() string {
+	v.stateMu.Lock()
+	defer v.stateMu.Unlock()
 	return v.version
 }
 
@@ -304,29 +412,92 @@ func parseBanner(banner string) (environment, version string) {
 	return
 }
 
-// Exec executes a given command and returns the output as a varnishresponse
+// Exec executes a given command and returns the output as a varnishresponse.
+//
+// The total deadline (cmdTimeout) covers both queueing and execution; on
+// connection drop or server shutdown, the call returns promptly with an
+// appropriate error rather than waiting for the timeout.
 func (v *Server) Exec(cmd string) (VarnishResponse, error) {
+	// Capture the live session (if any) so we can detect a connection drop
+	// for the duration of this call. A nil session here means no varnishd is
+	// currently connected; the request still goes onto reqCh and will be
+	// served by the next handleConnection, or rejected at shutdown via done.
+	v.stateMu.Lock()
+	session := v.session
+	v.stateMu.Unlock()
 
-	respCh := make(chan VarnishResponse)
-	v.reqCh <- varnishRequest{
-		command:      cmd,
-		responseChan: respCh,
-	}
-	// TODO: If handleConnection returns on run() error, this Exec caller hangs until
-	// cmdTimeout because nobody sends on responseChan. Consider closing reqCh or
-	// broadcasting an error to pending callers.
+	// Buffered so handleConnection can always send without blocking even if
+	// this caller has already given up via timeout, session-drop, or shutdown.
+	respCh := make(chan varnishResult, 1)
+	req := varnishRequest{command: cmd, responseCh: respCh}
+
+	// Single timer shared across the queue and execute phases — total Exec
+	// latency is bounded by one cmdTimeout, not two.
+	timer := time.NewTimer(v.cmdTimeout)
+	defer timer.Stop()
+
+	// Step 1: get the request onto the queue.
 	select {
-	case resp := <-respCh:
-		if resp.statusCode != ClisOk {
-			v.logger.Error("Varnishadm command failed", "command", cmd, "status", resp.statusCode, "response", resp.payload)
-			return VarnishResponse{}, fmt.Errorf("command failed: %s", resp.payload)
+	case v.reqCh <- req:
+	case <-session:
+		return VarnishResponse{}, errors.New("varnishadm connection lost before command was queued")
+	case <-v.done:
+		return VarnishResponse{}, errors.New("varnishadm server stopped before command was queued")
+	case <-timer.C:
+		v.logger.Error("Varnishadm command timed out while queuing", "command", cmd, "timeout", v.cmdTimeout)
+		return VarnishResponse{}, errors.New("command timed out")
+	}
+
+	// Step 2: wait for the response.
+	//
+	// When the session or done signal fires, do one final non-blocking
+	// respCh check before reporting "connection lost" / "server stopped".
+	// Rationale: handleConnection sends the result on respCh BEFORE its
+	// defer closes the session, so by the Go memory model the value is
+	// visible by the time we observe the close. Without this, a successful
+	// command racing a disconnect can be reported as a failure to the caller.
+	select {
+	case result := <-respCh:
+		return v.handleResult(cmd, result)
+	case <-session:
+		if result, ok := tryRead(respCh); ok {
+			return v.handleResult(cmd, result)
 		}
-		v.logger.Debug("Varnishadm command succeeded", "command", cmd, "status", resp.statusCode, "payload", resp.payload, "response", resp.payload)
-		return resp, nil
-	case <-time.After(v.cmdTimeout):
+		return VarnishResponse{}, errors.New("varnishadm connection lost while command was in flight")
+	case <-v.done:
+		if result, ok := tryRead(respCh); ok {
+			return v.handleResult(cmd, result)
+		}
+		return VarnishResponse{}, errors.New("varnishadm server stopped while command was in flight")
+	case <-timer.C:
 		v.logger.Error("Varnishadm command timed out", "command", cmd, "timeout", v.cmdTimeout)
 		return VarnishResponse{}, errors.New("command timed out")
 	}
+}
+
+// tryRead does a non-blocking receive on ch. Returns (value, true) if a value
+// was available, (zero, false) otherwise.
+func tryRead(ch <-chan varnishResult) (varnishResult, bool) {
+	select {
+	case r := <-ch:
+		return r, true
+	default:
+		return varnishResult{}, false
+	}
+}
+
+// handleResult interprets a varnishResult delivered to an Exec caller.
+func (v *Server) handleResult(cmd string, result varnishResult) (VarnishResponse, error) {
+	if result.err != nil {
+		v.logger.Error("Varnishadm command failed", "command", cmd, "error", result.err)
+		return VarnishResponse{}, result.err
+	}
+	if result.resp.statusCode != ClisOk {
+		v.logger.Warn("Varnishadm command non-OK", "command", cmd, "status", result.resp.statusCode, "response", result.resp.payload)
+		return VarnishResponse{}, fmt.Errorf("command failed: %s", result.resp.payload)
+	}
+	v.logger.Debug("Varnishadm command succeeded", "command", cmd, "status", result.resp.statusCode, "payload", result.resp.payload)
+	return result.resp, nil
 }
 
 // run is the internal function to execute and read a command towards varnishadm

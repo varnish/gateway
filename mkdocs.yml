@@ -133,6 +133,7 @@ nav:
       - Observability: operations/observability.md
       - Troubleshooting: operations/troubleshooting.md
   - Reference:
+      - HTTPRoute Filters: reference/httproute-filters.md
       - GatewayClassParameters: reference/gatewayclassparameters.md
       - VarnishCachePolicy: reference/varnishcachepolicy.md
       - VarnishCacheInvalidation: reference/varnishcacheinvalidation.md
