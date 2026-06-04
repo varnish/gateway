@@ -5,7 +5,7 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.22.0 - 2026-06-04]
 
 ### Added
 
@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sentinel on the Service. Unblocks gateway-behind-gateway, bare-metal
   MetalLB, and internal-cache deployment patterns. Service shape changes
   do not trigger pod restarts.
+- **HTTPRoute `parentRef` port matching.** The implementation now declares
+  conformance support for `HTTPRouteParentRefPort`: an HTTPRoute can attach to
+  a specific Gateway listener by port via `parentRefs[].port`.
+
+### Docs
+
+- Document supported and unsupported HTTPRoute filters
+  (new `docs/reference/httproute-filters.md`).
 
 ## [v0.21.5 - 2026-05-26]
 
