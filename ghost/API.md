@@ -41,12 +41,14 @@ Deliver hook for response header modification.
 Call this in `vcl_deliver` to apply ResponseHeaderModifier filters.
 Reads filter context from response headers (copied from bereq in vcl_backend_response).
 
-### Constructor `ghost.ghost_backend()`
+## Object `ghost_backend`
 
 Ghost backend object for request routing.
 
 Routes requests to upstream servers based on the Host header and loaded
 configuration. Performs weighted random backend selection per-vhost.
+
+### Constructor `ghost.ghost_backend()`
 
 Create a new ghost backend instance.
 
@@ -55,11 +57,11 @@ file (ghost.json) already exists on disk, routing state is loaded
 immediately. Otherwise the director starts empty and backends will
 be populated on the first `reload()` call from chaperone.
 
-##### Errors
+#### Errors
 
 Returns an error if `ghost.init()` has not been called first.
 
-#### Method `BACKEND <object>.recv()`
+### Method `BACKEND <object>.recv()`
 
 Route the request in `vcl_recv` context.
 
@@ -68,25 +70,25 @@ Performs full routing (hostname -> vhost -> route -> backend) using
 Returns a concrete backend, not a director.
 Sets `X-Gateway-Listener` and `X-Gateway-Route` headers on the request.
 
-##### Safety
+#### Safety
 
 Must be called from VCL context with a valid `Ctx` that has an active
 client request (`http_req`). The returned `VCL_BACKEND` pointer is only
 valid for the lifetime of the current VCL transaction.
 
-#### Method `BACKEND <object>.backend()`
+### Method `BACKEND <object>.backend()`
 
 Get the VCL backend (director) for use in `vcl_backend_fetch`.
 
 Returns the ghost director which resolves backends in backend
 context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
 
-##### Safety
+#### Safety
 
 Must be called from VCL context. The returned `VCL_BACKEND` pointer is
 only valid for the lifetime of the current VCL transaction.
 
-#### Method `BOOL <object>.reload()`
+### Method `BOOL <object>.reload()`
 
 Reload the configuration from disk.
 
@@ -94,6 +96,6 @@ Reads `ghost.json`, builds new routing state, and atomically swaps it in.
 Existing backends are preserved for connection reuse.
 Returns `true` on success, `false` on failure (see `last_error()`).
 
-#### Method `STRING <object>.last_error()`
+### Method `STRING <object>.last_error()`
 
 Get the last reload error message, or empty string if no error.

@@ -190,7 +190,7 @@ mod ghost {
         /// # Errors
         ///
         /// Returns an error if `ghost.init()` has not been called first.
-        pub fn new(ctx: &mut Ctx, #[vcl_name] name: &str) -> Result<Self, VclError> {
+        pub fn ghost_backend(ctx: &mut Ctx, #[vcl_name] name: &str) -> Result<Self, VclError> {
             // Get config path from global state
             let config_path = {
                 let state_guard = STATE.read();
