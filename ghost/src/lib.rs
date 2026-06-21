@@ -190,6 +190,11 @@ mod ghost {
         /// # Errors
         ///
         /// Returns an error if `ghost.init()` has not been called first.
+        // varnish-macros 0.7.0 derives the VCL object type name from the
+        // constructor's function name, so it must be `ghost_backend` to keep the
+        // `new router = ghost.ghost_backend()` VCL API. That intentionally matches
+        // the type name, which the self_named_constructors lint flags.
+        #[allow(clippy::self_named_constructors)]
         pub fn ghost_backend(ctx: &mut Ctx, #[vcl_name] name: &str) -> Result<Self, VclError> {
             // Get config path from global state
             let config_path = {
