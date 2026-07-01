@@ -187,6 +187,101 @@
         "legendFormat": "{{verb}}"
       }],
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "Gateways",
+      "description": "Number of Gateways on a GatewayClass managed by this operator.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 41 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "sum(varnish_gateway_gateways{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "Gateways not Programmed",
+      "description": "Managed Gateways whose Programmed condition is not true. Should be 0 in steady state.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 41 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "count(varnish_gateway_gateway_programmed{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"} == 0) or vector(0)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "HTTPRoutes",
+      "description": "HTTPRoutes attached to a Gateway managed by this operator.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 41 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "sum(varnish_gateway_httproutes{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "HTTPRoutes not Accepted",
+      "description": "Managed HTTPRoutes not Accepted on any parent. Should be 0 in steady state.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 41 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{ "expr": "sum(varnish_gateway_httproutes{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"}) - sum(varnish_gateway_httproutes_accepted{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"})", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "Gateways by GatewayClass",
+      "description": "varnish_gateway_gateways split by gatewayclass.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "sum by (gatewayclass) (varnish_gateway_gateways{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"})",
+        "refId": "A",
+        "legendFormat": "{{gatewayclass}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Gateway Programmed status (1 = programmed)",
+      "description": "Per-Gateway Programmed condition. A line dropping to 0 means that Gateway is not programmed.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "varnish_gateway_gateway_programmed{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"}",
+        "refId": "A",
+        "legendFormat": "{{namespace}}/{{name}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Attached routes per Gateway",
+      "description": "varnish_gateway_gateway_attached_routes — sum of listener AttachedRoutes per Gateway.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [{
+        "expr": "varnish_gateway_gateway_attached_routes{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"}",
+        "refId": "A",
+        "legendFormat": "{{namespace}}/{{name}}"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "HTTPRoutes: total vs accepted",
+      "description": "Managed HTTPRoute inventory against how many are Accepted. A persistent gap indicates routes the operator rejected.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 53 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        { "expr": "sum(varnish_gateway_httproutes{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"})",          "refId": "A", "legendFormat": "total" },
+        { "expr": "sum(varnish_gateway_httproutes_accepted{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"})", "refId": "B", "legendFormat": "accepted" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ]
 }

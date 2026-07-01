@@ -60,10 +60,36 @@ are exposed as Prometheus counters; all others as gauges.
 
 ### Operator metrics
 
-The operator exposes controller-runtime metrics on its own metrics
-address, port 8080 by default. These include reconciliation latency,
-work queue depth, and error counts — standard controller-runtime metrics
-documented upstream.
+The operator exposes metrics on its own metrics address, port 8080 by
+default. These fall into three groups.
+
+**Controller-runtime and client-go metrics** — reconciliation latency,
+work queue depth, error counts, and Kubernetes API request latency
+(`controller_runtime_*`, `workqueue_*`, `rest_client_*`). These are the
+standard control-plane metrics documented upstream.
+
+**Gateway API inventory and status metrics** — domain metrics describing
+the Gateway API objects the operator manages. Only objects belonging to a
+GatewayClass with our controller name are counted.
+
+#### Gauges
+
+| Metric                                    | Labels                | Description                                                        |
+| ----------------------------------------- | --------------------- | ------------------------------------------------------------------ |
+| `varnish_gateway_gateways`                | `gatewayclass`        | Number of managed Gateways, by GatewayClass                        |
+| `varnish_gateway_gateway_accepted`        | `namespace`, `name`   | 1 when the Gateway's Accepted condition is true, 0 otherwise       |
+| `varnish_gateway_gateway_programmed`      | `namespace`, `name`   | 1 when the Gateway's Programmed condition is true, 0 otherwise     |
+| `varnish_gateway_gateway_listeners`       | `namespace`, `name`   | Number of listeners configured on the Gateway                      |
+| `varnish_gateway_gateway_attached_routes` | `namespace`, `name`   | Total AttachedRoutes across all listeners of the Gateway           |
+| `varnish_gateway_httproutes`              | —                     | Number of HTTPRoutes attached to a managed Gateway                 |
+| `varnish_gateway_httproutes_accepted`     | —                     | Number of managed HTTPRoutes Accepted on at least one parent       |
+| `varnish_gateway_info`                    | `version`             | Constant 1; carries the operator build version as a label          |
+
+These are snapshotted from the controller cache at scrape time, so a
+deleted Gateway or HTTPRoute drops out of the metrics on the next scrape
+rather than lingering as a stale series. HTTPRoutes are reported as
+aggregate counts (not per-route series) to keep cardinality bounded on
+clusters with many routes.
 
 ### Prometheus scraping
 
