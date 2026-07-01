@@ -5,6 +5,23 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Operator: Gateway API inventory and status metrics.** The operator now
+  exposes domain metrics on its existing `/metrics` endpoint (port 8080)
+  alongside the controller-runtime and client-go metrics: managed Gateway
+  count by GatewayClass (`varnish_gateway_gateways`), per-Gateway Accepted /
+  Programmed status and listener / attached-route counts
+  (`varnish_gateway_gateway_accepted`, `..._programmed`, `..._listeners`,
+  `..._attached_routes`), managed HTTPRoute totals
+  (`varnish_gateway_httproutes`, `..._httproutes_accepted`), and a build-info
+  gauge (`varnish_gateway_info`). Metrics are snapshotted from the controller
+  cache at scrape time, so deleted objects drop out with no stale series. No
+  new endpoint or ServiceMonitor is required. The Operator Grafana dashboard
+  gains an inventory/status row.
+
 ## [v0.22.0 - 2026-06-04]
 
 ### Added
