@@ -112,6 +112,17 @@ func TestGatewayCollector(t *testing.T) {
 				Conditions:     []metav1.Condition{acceptedCond(string(gatewayv1.RouteConditionAccepted), metav1.ConditionTrue)},
 			}}}},
 		},
+		// r4: our controller name, but parentRef points at a Gateway that does
+		// not exist. The controller writes this status (NoMatchingParent), yet
+		// the route is not attached to any managed Gateway — must be excluded.
+		&gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "r4", Namespace: "default"},
+			Status: gatewayv1.HTTPRouteStatus{RouteStatus: gatewayv1.RouteStatus{Parents: []gatewayv1.RouteParentStatus{{
+				ParentRef:      gatewayv1.ParentReference{Name: "ghost-gw"},
+				ControllerName: testController,
+				Conditions:     []metav1.Condition{acceptedCond(string(gatewayv1.RouteConditionAccepted), metav1.ConditionFalse)},
+			}}}},
+		},
 	}
 
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
@@ -131,12 +142,12 @@ func TestGatewayCollector(t *testing.T) {
 	}{
 		{"varnish_gateway_info", map[string]string{"version": "v1.2.3"}, 1},
 		{"varnish_gateway_gateways", map[string]string{"gatewayclass": "varnish"}, 2},
-		{"varnish_gateway_gateway_accepted", map[string]string{"namespace": "default", "name": "gw1"}, 1},
-		{"varnish_gateway_gateway_programmed", map[string]string{"namespace": "default", "name": "gw1"}, 1},
-		{"varnish_gateway_gateway_programmed", map[string]string{"namespace": "prod", "name": "gw2"}, 0},
-		{"varnish_gateway_gateway_listeners", map[string]string{"namespace": "default", "name": "gw1"}, 2},
-		{"varnish_gateway_gateway_attached_routes", map[string]string{"namespace": "default", "name": "gw1"}, 3},
-		{"varnish_gateway_gateway_attached_routes", map[string]string{"namespace": "prod", "name": "gw2"}, 1},
+		{"varnish_gateway_gateway_accepted", map[string]string{"gateway_namespace": "default", "gateway_name": "gw1"}, 1},
+		{"varnish_gateway_gateway_programmed", map[string]string{"gateway_namespace": "default", "gateway_name": "gw1"}, 1},
+		{"varnish_gateway_gateway_programmed", map[string]string{"gateway_namespace": "prod", "gateway_name": "gw2"}, 0},
+		{"varnish_gateway_gateway_listeners", map[string]string{"gateway_namespace": "default", "gateway_name": "gw1"}, 2},
+		{"varnish_gateway_gateway_attached_routes", map[string]string{"gateway_namespace": "default", "gateway_name": "gw1"}, 3},
+		{"varnish_gateway_gateway_attached_routes", map[string]string{"gateway_namespace": "prod", "gateway_name": "gw2"}, 1},
 		{"varnish_gateway_httproutes", map[string]string{}, 2},
 		{"varnish_gateway_httproutes_accepted", map[string]string{}, 1},
 	}
@@ -157,7 +168,7 @@ func TestGatewayCollector(t *testing.T) {
 		t.Error("varnish_gateway_gateways emitted a series for a foreign GatewayClass")
 	}
 	// gw3 (foreign class) must not produce per-Gateway series.
-	if _, ok := findGauge(fams, "varnish_gateway_gateway_accepted", map[string]string{"namespace": "default", "name": "gw3"}); ok {
+	if _, ok := findGauge(fams, "varnish_gateway_gateway_accepted", map[string]string{"gateway_namespace": "default", "gateway_name": "gw3"}); ok {
 		t.Error("gw3 (foreign GatewayClass) produced a per-Gateway series")
 	}
 }

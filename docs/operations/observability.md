@@ -77,19 +77,27 @@ GatewayClass with our controller name are counted.
 | Metric                                    | Labels                | Description                                                        |
 | ----------------------------------------- | --------------------- | ------------------------------------------------------------------ |
 | `varnish_gateway_gateways`                | `gatewayclass`        | Number of managed Gateways, by GatewayClass                        |
-| `varnish_gateway_gateway_accepted`        | `namespace`, `name`   | 1 when the Gateway's Accepted condition is true, 0 otherwise       |
-| `varnish_gateway_gateway_programmed`      | `namespace`, `name`   | 1 when the Gateway's Programmed condition is true, 0 otherwise     |
-| `varnish_gateway_gateway_listeners`       | `namespace`, `name`   | Number of listeners configured on the Gateway                      |
-| `varnish_gateway_gateway_attached_routes` | `namespace`, `name`   | Total AttachedRoutes across all listeners of the Gateway           |
+| `varnish_gateway_gateway_accepted`        | `gateway_namespace`, `gateway_name` | 1 when the Gateway's Accepted condition is true, 0 otherwise       |
+| `varnish_gateway_gateway_programmed`      | `gateway_namespace`, `gateway_name` | 1 when the Gateway's Programmed condition is true, 0 otherwise     |
+| `varnish_gateway_gateway_listeners`       | `gateway_namespace`, `gateway_name` | Number of listeners configured on the Gateway                      |
+| `varnish_gateway_gateway_attached_routes` | `gateway_namespace`, `gateway_name` | Total AttachedRoutes across all listeners of the Gateway           |
 | `varnish_gateway_httproutes`              | —                     | Number of HTTPRoutes attached to a managed Gateway                 |
 | `varnish_gateway_httproutes_accepted`     | —                     | Number of managed HTTPRoutes Accepted on at least one parent       |
 | `varnish_gateway_info`                    | `version`             | Constant 1; carries the operator build version as a label          |
 
+The per-Gateway labels are `gateway_namespace` / `gateway_name` rather
+than `namespace` / `name` on purpose: Prometheus (and the
+prometheus-operator ServiceMonitor) attach a `namespace` label for the
+operator's own pod at scrape time, which would otherwise collide with and
+mask the Gateway object's namespace.
+
 These are snapshotted from the controller cache at scrape time, so a
 deleted Gateway or HTTPRoute drops out of the metrics on the next scrape
-rather than lingering as a stale series. HTTPRoutes are reported as
-aggregate counts (not per-route series) to keep cardinality bounded on
-clusters with many routes.
+rather than lingering as a stale series. An HTTPRoute is counted only when
+one of its `parentRefs` resolves to a Gateway this operator actually
+manages — routes pointing at a non-existent or foreign Gateway are not
+counted. HTTPRoutes are reported as aggregate counts (not per-route
+series) to keep cardinality bounded on clusters with many routes.
 
 ### Prometheus scraping
 

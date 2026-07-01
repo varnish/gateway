@@ -252,7 +252,7 @@
       "targets": [{
         "expr": "varnish_gateway_gateway_programmed{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"}",
         "refId": "A",
-        "legendFormat": "{{namespace}}/{{name}}"
+        "legendFormat": "{{gateway_namespace}}/{{gateway_name}}"
       }],
       "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 1 }, "overrides": [] }
     },
@@ -266,7 +266,7 @@
       "targets": [{
         "expr": "varnish_gateway_gateway_attached_routes{job=~\".*varnish-gateway-operator.*\", namespace=~\"$namespace\"}",
         "refId": "A",
-        "legendFormat": "{{namespace}}/{{name}}"
+        "legendFormat": "{{gateway_namespace}}/{{gateway_name}}"
       }],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },

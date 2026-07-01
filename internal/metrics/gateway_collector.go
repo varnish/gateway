@@ -57,22 +57,22 @@ func RegisterGatewayMetrics(reg prometheus.Registerer, reader client.Reader, con
 		gwAcceptedDesc: prometheus.NewDesc(
 			"varnish_gateway_gateway_accepted",
 			"Whether a managed Gateway's Accepted condition is true (1) or not (0).",
-			[]string{"namespace", "name"}, nil,
+			[]string{"gateway_namespace", "gateway_name"}, nil,
 		),
 		gwProgrammedDesc: prometheus.NewDesc(
 			"varnish_gateway_gateway_programmed",
 			"Whether a managed Gateway's Programmed condition is true (1) or not (0).",
-			[]string{"namespace", "name"}, nil,
+			[]string{"gateway_namespace", "gateway_name"}, nil,
 		),
 		gwListenersDesc: prometheus.NewDesc(
 			"varnish_gateway_gateway_listeners",
 			"Number of listeners configured on a managed Gateway.",
-			[]string{"namespace", "name"}, nil,
+			[]string{"gateway_namespace", "gateway_name"}, nil,
 		),
 		gwAttachedRoutesDesc: prometheus.NewDesc(
 			"varnish_gateway_gateway_attached_routes",
 			"Total AttachedRoutes across all listeners of a managed Gateway.",
-			[]string{"namespace", "name"}, nil,
+			[]string{"gateway_namespace", "gateway_name"}, nil,
 		),
 		httproutesDesc: prometheus.NewDesc(
 			"varnish_gateway_httproutes",
@@ -111,15 +111,23 @@ func (c *gatewayCollector) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- prometheus.MustNewConstMetric(c.infoDesc, prometheus.GaugeValue, 1, c.version)
 
-	c.collectGateways(ctx, ch)
-	c.collectHTTPRoutes(ctx, ch)
+	// collectGateways returns the set of Gateways we manage so HTTPRoute
+	// counting can require an actually-attached, managed parent (a route may
+	// carry a parent status under our controller name even when the referenced
+	// Gateway does not exist — see httproute_controller processParentRef).
+	managed := c.collectGateways(ctx, ch)
+	c.collectHTTPRoutes(ctx, ch, managed)
 }
 
-func (c *gatewayCollector) collectGateways(ctx context.Context, ch chan<- prometheus.Metric) {
+// collectGateways emits per-Gateway metrics and returns the set of Gateways
+// managed by this operator, keyed by namespace/name.
+func (c *gatewayCollector) collectGateways(ctx context.Context, ch chan<- prometheus.Metric) map[client.ObjectKey]struct{} {
+	managed := make(map[client.ObjectKey]struct{})
+
 	var gwList gatewayv1.GatewayList
 	if err := c.reader.List(ctx, &gwList); err != nil {
 		c.warn("list Gateways", err)
-		return
+		return managed
 	}
 
 	// Memoize the GatewayClass -> ours? lookup so a cluster with many
@@ -139,6 +147,7 @@ func (c *gatewayCollector) collectGateways(ctx context.Context, ch chan<- promet
 			continue
 		}
 		classCounts[className]++
+		managed[client.ObjectKey{Namespace: gw.Namespace, Name: gw.Name}] = struct{}{}
 
 		ns, name := gw.Namespace, gw.Name
 		ch <- prometheus.MustNewConstMetric(c.gwAcceptedDesc, prometheus.GaugeValue,
@@ -158,25 +167,35 @@ func (c *gatewayCollector) collectGateways(ctx context.Context, ch chan<- promet
 	for className, count := range classCounts {
 		ch <- prometheus.MustNewConstMetric(c.gatewaysDesc, prometheus.GaugeValue, float64(count), className)
 	}
+
+	return managed
 }
 
-func (c *gatewayCollector) collectHTTPRoutes(ctx context.Context, ch chan<- prometheus.Metric) {
+func (c *gatewayCollector) collectHTTPRoutes(ctx context.Context, ch chan<- prometheus.Metric, managed map[client.ObjectKey]struct{}) {
 	var rtList gatewayv1.HTTPRouteList
 	if err := c.reader.List(ctx, &rtList); err != nil {
 		c.warn("list HTTPRoutes", err)
 		return
 	}
 
-	// A route is "ours" when it carries a parent status written under our
-	// controller name; that's the authoritative signal that this operator
-	// reconciled it, independent of the attachment-derivation logic in the
-	// controller package.
+	// A route counts as ours only when it carries a parent status written
+	// under our controller name AND that parent resolves to a Gateway we
+	// actually manage. The controller writes our status even for parentRefs
+	// pointing at a non-existent Gateway (NoMatchingParent), so the controller
+	// name alone would over-count routes that aren't attached to anything.
 	var total, accepted int
 	for i := range rtList.Items {
 		rt := &rtList.Items[i]
 		var mine, acc bool
 		for _, p := range rt.Status.Parents {
 			if string(p.ControllerName) != c.controllerName {
+				continue
+			}
+			ns := rt.Namespace
+			if p.ParentRef.Namespace != nil {
+				ns = string(*p.ParentRef.Namespace)
+			}
+			if _, ok := managed[client.ObjectKey{Namespace: ns, Name: string(p.ParentRef.Name)}]; !ok {
 				continue
 			}
 			mine = true
