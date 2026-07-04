@@ -26,6 +26,7 @@ import (
 	"github.com/varnish/gateway/internal/controller"
 	"github.com/varnish/gateway/internal/k8sutil"
 	"github.com/varnish/gateway/internal/logging"
+	"github.com/varnish/gateway/internal/metrics"
 )
 
 //go:embed .version
@@ -122,6 +123,12 @@ func main() {
 		logger.Error("unable to create manager", "error", err)
 		os.Exit(1)
 	}
+
+	// Register Gateway API inventory/status metrics on controller-runtime's
+	// registry so they surface on the same /metrics endpoint. The collector
+	// reads from the manager's cache at scrape time (no live API calls).
+	metrics.RegisterGatewayMetrics(ctrlmetrics.Registry, mgr.GetClient(),
+		controller.ControllerName, strings.TrimSpace(version), logger)
 
 	// Setup GatewayClass controller
 	if err := (&controller.GatewayClassReconciler{
