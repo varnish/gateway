@@ -32,6 +32,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check gofmt
+        run: make fmt-check
+
       - name: Run Go vet
         run: go vet ./...
 

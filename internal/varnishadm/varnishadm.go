@@ -115,10 +115,10 @@ type varnishResult struct {
 
 // Timeout constants for different operations
 const (
-	defaultCmdTimeout    = 30 * time.Second // Overall command timeout
-	readWriteTimeout     = 10 * time.Second // Individual socket I/O operations
-	authTimeoutDuration  = 5 * time.Second  // Authentication operations
-	maxResponseBodyLen   = 10 * 1024 * 1024 // 10 MiB sanity limit for response body
+	defaultCmdTimeout   = 30 * time.Second // Overall command timeout
+	readWriteTimeout    = 10 * time.Second // Individual socket I/O operations
+	authTimeoutDuration = 5 * time.Second  // Authentication operations
+	maxResponseBodyLen  = 10 * 1024 * 1024 // 10 MiB sanity limit for response body
 )
 
 func New(port uint16, secret string, logger *slog.Logger, opts ...ServerOption) *Server {

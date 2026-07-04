@@ -5,6 +5,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
@@ -70,7 +71,7 @@ func TestResolveServiceConfig_ClassOnly(t *testing.T) {
 	params := &gatewayparamsv1alpha1.GatewayClassParameters{
 		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
 			Service: &gatewayparamsv1alpha1.ServiceConfig{
-				Type:                     ptr(corev1.ServiceTypeClusterIP),
+				Type:                     ptr.To(corev1.ServiceTypeClusterIP),
 				Annotations:              map[string]string{"a": "1", "b": "2"},
 				Labels:                   map[string]string{"team": "edge"},
 				LoadBalancerClass:        &lbClass,
@@ -216,7 +217,7 @@ func TestResolveServiceConfig_GatewayInfraDoesNotOverrideType(t *testing.T) {
 	params := &gatewayparamsv1alpha1.GatewayClassParameters{
 		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
 			Service: &gatewayparamsv1alpha1.ServiceConfig{
-				Type: ptr(corev1.ServiceTypeNodePort),
+				Type: ptr.To(corev1.ServiceTypeNodePort),
 			},
 		},
 	}

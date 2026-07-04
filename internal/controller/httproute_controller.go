@@ -481,32 +481,42 @@ func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, 
 
 // computeEffectiveHostname returns the most specific hostname from the intersection
 // of a route hostname and listener hostname. Returns "" if they don't intersect.
+// wildcardCovers reports whether a hostname pattern covers a candidate hostname.
+// A pattern of the form "*.example.com" covers any single- or multi-level
+// subdomain (foo.example.com, foo.bar.example.com) but NOT the apex
+// (example.com). A non-wildcard pattern covers only an exact match.
+//
+// This is the shared primitive behind computeEffectiveHostname, hostnameMatches,
+// and listenerCoversHostname. Note it deliberately does not treat "*.example.com"
+// as covering "example.com" — callers that need that apex behavior (the symmetric
+// route/listener intersection checks) handle it explicitly.
+func wildcardCovers(pattern, hostname string) bool {
+	if pattern == hostname {
+		return true
+	}
+	if strings.HasPrefix(pattern, "*.") {
+		return strings.HasSuffix(hostname, pattern[1:]) // pattern[1:] == ".example.com"
+	}
+	return false
+}
+
 func computeEffectiveHostname(routeHostname, listenerHostname string) string {
-	// Exact match
-	if routeHostname == listenerHostname {
+	// Exact match, or listener wildcard covering the route: the route hostname
+	// is the more specific of the two (*.example.com + foo.example.com → foo.example.com).
+	if wildcardCovers(listenerHostname, routeHostname) {
 		return routeHostname
 	}
 
-	// Listener is wildcard: *.example.com + foo.example.com → foo.example.com (more specific)
-	// Also matches multi-level subdomains: *.example.com + foo.bar.example.com → foo.bar.example.com
-	if strings.HasPrefix(listenerHostname, "*.") {
-		suffix := listenerHostname[1:] // ".example.com"
-		if strings.HasSuffix(routeHostname, suffix) {
-			return routeHostname // route hostname is more specific
-		}
+	// Route wildcard covering the listener: the listener hostname is more specific
+	// (*.example.com + foo.example.com → foo.example.com).
+	if wildcardCovers(routeHostname, listenerHostname) {
+		return listenerHostname
 	}
 
-	// Route is wildcard: *.example.com + foo.example.com → foo.example.com (listener is more specific)
-	// Also matches multi-level subdomains
-	if strings.HasPrefix(routeHostname, "*.") {
-		suffix := routeHostname[1:] // ".example.com"
-		if strings.HasSuffix(listenerHostname, suffix) {
-			return listenerHostname // listener hostname is more specific
-		}
-		// *.example.com + example.com → example.com
-		if listenerHostname == routeHostname[2:] {
-			return listenerHostname
-		}
+	// A route wildcard also intersects the apex it derives from, and the apex
+	// (the listener) is the more specific hostname: *.example.com + example.com → example.com.
+	if strings.HasPrefix(routeHostname, "*.") && listenerHostname == routeHostname[2:] {
+		return listenerHostname
 	}
 
 	return ""
@@ -1123,35 +1133,15 @@ func hostnamesIntersect(routeHostnames []gatewayv1.Hostname, listenerHostname *g
 	return false
 }
 
-// hostnameMatches checks if a route hostname matches a listener hostname.
-// Supports wildcard matching: *.example.com matches foo.example.com
+// hostnameMatches checks if a route hostname intersects a listener hostname.
+// Either side may be a wildcard; they intersect if one covers the other, plus
+// the apex special case where *.example.com intersects example.com.
 func hostnameMatches(routeHostname, listenerHostname string) bool {
-	// Exact match
-	if routeHostname == listenerHostname {
+	if wildcardCovers(listenerHostname, routeHostname) || wildcardCovers(routeHostname, listenerHostname) {
 		return true
 	}
-
-	// Listener wildcard: *.example.com matches foo.example.com and foo.bar.example.com
-	if strings.HasPrefix(listenerHostname, "*.") {
-		suffix := listenerHostname[1:] // ".example.com"
-		if strings.HasSuffix(routeHostname, suffix) {
-			return true
-		}
-	}
-
-	// Route wildcard: *.example.com matches listener example.com or *.example.com
-	if strings.HasPrefix(routeHostname, "*.") {
-		suffix := routeHostname[1:] // ".example.com"
-		if strings.HasSuffix(listenerHostname, suffix) {
-			return true
-		}
-		// Route *.example.com also intersects with listener example.com
-		if listenerHostname == routeHostname[2:] {
-			return true
-		}
-	}
-
-	return false
+	// Route *.example.com also intersects listener example.com.
+	return strings.HasPrefix(routeHostname, "*.") && listenerHostname == routeHostname[2:]
 }
 
 // filterForListenerIsolation removes effective hostnames that are "claimed" by a
@@ -1209,22 +1199,15 @@ func listenerHostnameSpecificity(l *gatewayv1.Listener) int {
 	return len(h) + 10000
 }
 
-// listenerCoversHostname checks if a listener's hostname space fully covers the given hostname.
+// listenerCoversHostname checks if a listener's hostname space fully covers the
+// given (already-resolved effective) hostname. This is directional — only the
+// listener may be a wildcard — and deliberately omits the *.example.com/example.com
+// apex case, since the argument is a concrete effective hostname, not a route pattern.
 func listenerCoversHostname(l *gatewayv1.Listener, hostname string) bool {
 	if l.Hostname == nil {
 		return true
 	}
-	lh := string(*l.Hostname)
-	if lh == hostname {
-		return true
-	}
-	if strings.HasPrefix(lh, "*.") {
-		suffix := lh[1:]
-		if strings.HasSuffix(hostname, suffix) {
-			return true
-		}
-	}
-	return false
+	return wildcardCovers(string(*l.Hostname), hostname)
 }
 
 // findHTTPRoutesForGateway returns reconcile requests for all HTTPRoutes

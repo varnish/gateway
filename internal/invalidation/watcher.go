@@ -444,7 +444,7 @@ func (w *Watcher) computePhase(ctx context.Context, podResults []any) string {
 func (w *Watcher) getExpectedPodCount(ctx context.Context) int {
 	// Use the same labels the operator sets on gateway pods
 	selector := labels.Set{
-		"app.kubernetes.io/managed-by":          "varnish-gateway-operator",
+		"app.kubernetes.io/managed-by":                "varnish-gateway-operator",
 		"gateway.networking.k8s.io/gateway-name":      w.gatewayName,
 		"gateway.networking.k8s.io/gateway-namespace": w.namespace,
 	}.AsSelector()

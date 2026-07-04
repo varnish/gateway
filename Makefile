@@ -14,7 +14,7 @@ CHAPERONE_IMAGE := $(REGISTRY)/gateway-chaperone
 .PHONY: kind-create kind-delete kind-load kind-deploy test-conformance-kind
 .PHONY: manifests generate verify-manifests
 .PHONY: docs-venv docs-serve docs-build docs-clean
-.PHONY: vet staticcheck nilaway vuln lint
+.PHONY: fmt fmt-check vet staticcheck nilaway vuln lint
 
 help:
 	@echo "Varnish Gateway Operator - Makefile targets"
@@ -74,11 +74,13 @@ help:
 	@echo "  make docs-clean       Remove _site/ and the docs virtualenv"
 	@echo ""
 	@echo "Static analysis:"
+	@echo "  make fmt              Reformat all non-vendor Go files with gofmt"
+	@echo "  make fmt-check        Fail if any non-vendor Go file is not gofmt-clean"
 	@echo "  make vet              Run go vet"
 	@echo "  make staticcheck      Run staticcheck"
 	@echo "  make nilaway          Run nilaway (nil-deref analyzer)"
 	@echo "  make vuln             Run govulncheck (CVE scanner)"
-	@echo "  make lint             Run vet + staticcheck + nilaway + vuln"
+	@echo "  make lint             Run fmt-check + vet + staticcheck + nilaway + vuln"
 	@echo ""
 	@echo "Other:"
 	@echo "  make vendor           Update Go vendor directory"
@@ -152,6 +154,20 @@ $(GOVULNCHECK):
 	@mkdir -p bin
 	GOBIN=$(shell pwd)/bin go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 
+# gofmt — reformat all first-party Go files. `go list` excludes vendor/.
+fmt:
+	gofmt -w $(shell go list -f '{{.Dir}}' ./...)
+
+# gofmt gate — fail (non-zero exit) if any first-party Go file is not
+# gofmt-clean. `go list` excludes vendor/ automatically. Run `make fmt` to fix.
+fmt-check:
+	@unformatted=$$(gofmt -l $(shell go list -f '{{.Dir}}' ./...)); \
+	if [ -n "$$unformatted" ]; then \
+		echo "Not gofmt-clean (run 'make fmt'):"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
 # `go vet` — fast, low-noise correctness checks shipped with the toolchain.
 vet:
 	go vet ./...
@@ -172,8 +188,8 @@ nilaway: $(NILAWAY)
 vuln: $(GOVULNCHECK)
 	$(GOVULNCHECK) ./...
 
-# Aggregate target. `vet` first because it's the cheapest.
-lint: vet staticcheck nilaway vuln
+# Aggregate target. `fmt-check` and `vet` first because they're the cheapest.
+lint: fmt-check vet staticcheck nilaway vuln
 
 dist/operator:
 	@mkdir -p dist

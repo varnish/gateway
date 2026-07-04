@@ -16,11 +16,11 @@ var dashboardFS embed.FS
 
 // Server serves the real-time dashboard UI and SSE stream.
 type Server struct {
-	state      *StateTracker
-	bus        *EventBus
-	addr       string
-	logger     *slog.Logger
-	varnishDir string
+	state          *StateTracker
+	bus            *EventBus
+	addr           string
+	logger         *slog.Logger
+	varnishDir     string
 	activeSessions atomic.Int32
 }
 

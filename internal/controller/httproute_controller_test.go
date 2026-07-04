@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -94,7 +95,7 @@ func TestReconcile_ValidRoute(t *testing.T) {
 							BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "backend-svc",
-									Port: ptr(gatewayv1.PortNumber(8080)),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -380,7 +381,7 @@ func TestReconcile_MultipleRoutesToGateway(t *testing.T) {
 							BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "api-svc",
-									Port: ptr(gatewayv1.PortNumber(8080)),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -409,7 +410,7 @@ func TestReconcile_MultipleRoutesToGateway(t *testing.T) {
 							BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "web-svc",
-									Port: ptr(gatewayv1.PortNumber(8080)),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -542,7 +543,7 @@ func TestReconcile_DeletedRouteUpdatesRoutingJSON(t *testing.T) {
 							BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "api-svc",
-									Port: ptr(gatewayv1.PortNumber(8080)),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -571,7 +572,7 @@ func TestReconcile_DeletedRouteUpdatesRoutingJSON(t *testing.T) {
 							BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "web-svc",
-									Port: ptr(gatewayv1.PortNumber(8080)),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -1200,37 +1201,37 @@ func TestBuildServicePortMap(t *testing.T) {
 							{BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "web-svc",
-									Port: ptr(gatewayv1.PortNumber(80)),
+									Port: ptr.To(gatewayv1.PortNumber(80)),
 								},
 							}},
 							{BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "api-svc",
-									Port: ptr(gatewayv1.PortNumber(8080)),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							}},
 							{BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "named-svc",
-									Port: ptr(gatewayv1.PortNumber(443)),
+									Port: ptr.To(gatewayv1.PortNumber(443)),
 								},
 							}},
 							{BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "missing-svc", // does not exist
-									Port: ptr(gatewayv1.PortNumber(80)),
+									Port: ptr.To(gatewayv1.PortNumber(80)),
 								},
 							}},
 							{BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "multi-svc",
-									Port: ptr(gatewayv1.PortNumber(80)),
+									Port: ptr.To(gatewayv1.PortNumber(80)),
 								},
 							}},
 							{BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "multi-svc",
-									Port: ptr(gatewayv1.PortNumber(443)),
+									Port: ptr.To(gatewayv1.PortNumber(443)),
 								},
 							}},
 						},
@@ -1329,7 +1330,7 @@ func TestBuildServicePortMap_UnmatchedPort(t *testing.T) {
 							{BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "web-svc",
-									Port: ptr(gatewayv1.PortNumber(9090)), // no such port on service
+									Port: ptr.To(gatewayv1.PortNumber(9090)), // no such port on service
 								},
 							}},
 						},
@@ -1422,7 +1423,7 @@ func TestReconcile_HTTPSListenerMulti(t *testing.T) {
 						{BackendRef: gatewayv1.BackendRef{
 							BackendObjectReference: gatewayv1.BackendObjectReference{
 								Name: "infra-backend-v1",
-								Port: ptr(gatewayv1.PortNumber(8080)),
+								Port: ptr.To(gatewayv1.PortNumber(8080)),
 							},
 						}},
 					},
@@ -1452,7 +1453,7 @@ func TestReconcile_HTTPSListenerMulti(t *testing.T) {
 						{BackendRef: gatewayv1.BackendRef{
 							BackendObjectReference: gatewayv1.BackendObjectReference{
 								Name: "infra-backend-v2",
-								Port: ptr(gatewayv1.PortNumber(8080)),
+								Port: ptr.To(gatewayv1.PortNumber(8080)),
 							},
 						}},
 					},
@@ -1526,7 +1527,7 @@ func TestValidateBackendRefs_CrossNamespace_NoGrant(t *testing.T) {
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name:      "backend-svc",
 									Namespace: &otherNS,
-									Port:      ptr(gatewayv1.PortNumber(8080)),
+									Port:      ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -1591,7 +1592,7 @@ func TestValidateBackendRefs_CrossNamespace_WithGrant(t *testing.T) {
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name:      "backend-svc",
 									Namespace: &otherNS,
-									Port:      ptr(gatewayv1.PortNumber(8080)),
+									Port:      ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -1638,7 +1639,7 @@ func TestValidateBackendRefs_SameNamespace_NoGrantNeeded(t *testing.T) {
 							BackendRef: gatewayv1.BackendRef{
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name: "backend-svc",
-									Port: ptr(gatewayv1.PortNumber(8080)),
+									Port: ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -1718,7 +1719,7 @@ func TestReconcile_CrossNamespace_BlockedBackendExcludedFromRouting(t *testing.T
 								BackendObjectReference: gatewayv1.BackendObjectReference{
 									Name:      "backend-svc",
 									Namespace: &otherNS,
-									Port:      ptr(gatewayv1.PortNumber(8080)),
+									Port:      ptr.To(gatewayv1.PortNumber(8080)),
 								},
 							},
 						},
@@ -1851,7 +1852,7 @@ func TestReconcile_ExternalNameBackend(t *testing.T) {
 		Spec: corev1.ServiceSpec{
 			Type:         corev1.ServiceTypeExternalName,
 			ExternalName: "web2026-assets.s3.nl-ams.scw.cloud",
-			Ports: []corev1.ServicePort{{Port: 443, AppProtocol: &httpsAP}},
+			Ports:        []corev1.ServicePort{{Port: 443, AppProtocol: &httpsAP}},
 		},
 	}
 
@@ -1879,7 +1880,7 @@ func TestReconcile_ExternalNameBackend(t *testing.T) {
 						BackendRef: gatewayv1.BackendRef{
 							BackendObjectReference: gatewayv1.BackendObjectReference{
 								Name: "s3-media",
-								Port: ptr(gatewayv1.PortNumber(443)),
+								Port: ptr.To(gatewayv1.PortNumber(443)),
 							},
 						},
 					}},

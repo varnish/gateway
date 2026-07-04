@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -258,7 +259,18 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	resources = append(resources,
 		r.buildServiceAccount(gateway),
 		r.buildClusterRoleBinding(gateway),
-		r.buildDeployment(gateway, effectiveImage, varnishdExtraArgs, logging, infraHash, extraVolumes, extraVolumeMounts, extraInitContainers, containerResources, topologySpread, hasBackendTLS),
+		r.buildDeployment(gateway, deploymentConfig{
+			effectiveImage:      effectiveImage,
+			varnishdExtraArgs:   varnishdExtraArgs,
+			logging:             logging,
+			infraHash:           infraHash,
+			extraVolumes:        extraVolumes,
+			extraVolumeMounts:   extraVolumeMounts,
+			extraInitContainers: extraInitContainers,
+			resources:           containerResources,
+			topologySpread:      topologySpread,
+			hasBackendTLS:       hasBackendTLS,
+		}),
 		r.buildService(gateway, resolveServiceConfig(gateway, params)),
 	)
 	// PDB is opt-in. Create one only if the user asked for it.
@@ -784,13 +796,13 @@ func (r *GatewayReconciler) updateGatewayStatus(ctx context.Context, gateway *ga
 		for _, ingress := range svc.Status.LoadBalancer.Ingress {
 			if ingress.IP != "" {
 				updated.Status.Addresses = append(updated.Status.Addresses, gatewayv1.GatewayStatusAddress{
-					Type:  ptr(gatewayv1.IPAddressType),
+					Type:  ptr.To(gatewayv1.IPAddressType),
 					Value: ingress.IP,
 				})
 			}
 			if ingress.Hostname != "" {
 				updated.Status.Addresses = append(updated.Status.Addresses, gatewayv1.GatewayStatusAddress{
-					Type:  ptr(gatewayv1.HostnameAddressType),
+					Type:  ptr.To(gatewayv1.HostnameAddressType),
 					Value: ingress.Hostname,
 				})
 			}
@@ -939,7 +951,7 @@ func (r *GatewayReconciler) setListenerStatusesForUpdate(ctx context.Context, up
 func validateListenerRouteKinds(listener *gatewayv1.Listener) ([]gatewayv1.RouteGroupKind, bool) {
 	defaultKinds := []gatewayv1.RouteGroupKind{
 		{
-			Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")),
+			Group: ptr.To(gatewayv1.Group("gateway.networking.k8s.io")),
 			Kind:  "HTTPRoute",
 		},
 	}
@@ -960,7 +972,7 @@ func validateListenerRouteKinds(listener *gatewayv1.Listener) ([]gatewayv1.Route
 		}
 		if group == "gateway.networking.k8s.io" && kind.Kind == "HTTPRoute" {
 			supported = append(supported, gatewayv1.RouteGroupKind{
-				Group: ptr(group),
+				Group: ptr.To(group),
 				Kind:  kind.Kind,
 			})
 		} else {
@@ -979,28 +991,32 @@ func validateListenerRouteKinds(listener *gatewayv1.Listener) ([]gatewayv1.Route
 func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway *gatewayv1.Gateway, listener *gatewayv1.Listener) metav1.Condition {
 	now := metav1.Now()
 
-	// Gateway API spec: default TLS mode for HTTPS listeners is Terminate.
-	// Skip validation only if mode is explicitly set to something other than Terminate.
-	if listener.TLS == nil || (listener.TLS.Mode != nil && *listener.TLS.Mode != gatewayv1.TLSModeTerminate) {
+	// resolvedRefsCondition builds a ListenerConditionResolvedRefs condition for
+	// this listener's TLS validation result. Every condition below shares the same
+	// Type, ObservedGeneration, and LastTransitionTime; only ok/reason/message vary.
+	resolvedRefsCondition := func(ok bool, reason gatewayv1.ListenerConditionReason, message string) metav1.Condition {
+		status := metav1.ConditionTrue
+		if !ok {
+			status = metav1.ConditionFalse
+		}
 		return metav1.Condition{
 			Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-			Status:             metav1.ConditionTrue,
+			Status:             status,
 			ObservedGeneration: gateway.Generation,
 			LastTransitionTime: now,
-			Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
-			Message:            "Refs resolved",
+			Reason:             string(reason),
+			Message:            message,
 		}
 	}
 
+	// Gateway API spec: default TLS mode for HTTPS listeners is Terminate.
+	// Skip validation only if mode is explicitly set to something other than Terminate.
+	if listener.TLS == nil || (listener.TLS.Mode != nil && *listener.TLS.Mode != gatewayv1.TLSModeTerminate) {
+		return resolvedRefsCondition(true, gatewayv1.ListenerReasonResolvedRefs, "Refs resolved")
+	}
+
 	if len(listener.TLS.CertificateRefs) == 0 {
-		return metav1.Condition{
-			Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: gateway.Generation,
-			LastTransitionTime: now,
-			Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-			Message:            "HTTPS listener has no certificateRefs",
-		}
+		return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef, "HTTPS listener has no certificateRefs")
 	}
 
 	for _, certRef := range listener.TLS.CertificateRefs {
@@ -1020,47 +1036,23 @@ func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway
 					"secretNamespace", string(*certRef.Namespace),
 					"secretName", string(certRef.Name),
 					"error", err)
-				return metav1.Condition{
-					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: gateway.Generation,
-					LastTransitionTime: now,
-					Reason:             string(gatewayv1.ListenerReasonRefNotPermitted),
-					Message:            fmt.Sprintf("Failed to validate cross-namespace certificateRef %s/%s: %v", string(*certRef.Namespace), string(certRef.Name), err),
-				}
+				return resolvedRefsCondition(false, gatewayv1.ListenerReasonRefNotPermitted,
+					fmt.Sprintf("Failed to validate cross-namespace certificateRef %s/%s: %v", string(*certRef.Namespace), string(certRef.Name), err))
 			}
 			if !allowed {
-				return metav1.Condition{
-					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: gateway.Generation,
-					LastTransitionTime: now,
-					Reason:             string(gatewayv1.ListenerReasonRefNotPermitted),
-					Message:            fmt.Sprintf("Cross-namespace certificateRef %s/%s not allowed by any ReferenceGrant", string(*certRef.Namespace), string(certRef.Name)),
-				}
+				return resolvedRefsCondition(false, gatewayv1.ListenerReasonRefNotPermitted,
+					fmt.Sprintf("Cross-namespace certificateRef %s/%s not allowed by any ReferenceGrant", string(*certRef.Namespace), string(certRef.Name)))
 			}
 		}
 
 		// Validate group/kind
 		if certRef.Group != nil && *certRef.Group != "" {
-			return metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: now,
-				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-				Message:            fmt.Sprintf("Unsupported certificateRef group: %s", string(*certRef.Group)),
-			}
+			return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef,
+				fmt.Sprintf("Unsupported certificateRef group: %s", string(*certRef.Group)))
 		}
 		if certRef.Kind != nil && *certRef.Kind != "Secret" {
-			return metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: now,
-				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-				Message:            fmt.Sprintf("Unsupported certificateRef kind: %s", string(*certRef.Kind)),
-			}
+			return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef,
+				fmt.Sprintf("Unsupported certificateRef kind: %s", string(*certRef.Kind)))
 		}
 
 		// Resolve Secret namespace (default to gateway namespace)
@@ -1076,70 +1068,33 @@ func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway
 			Namespace: secretNamespace,
 		}, &secret); err != nil {
 			if apierrors.IsNotFound(err) {
-				return metav1.Condition{
-					Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: gateway.Generation,
-					LastTransitionTime: now,
-					Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-					Message:            fmt.Sprintf("Secret %s/%s not found", secretNamespace, string(certRef.Name)),
-				}
+				return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef,
+					fmt.Sprintf("Secret %s/%s not found", secretNamespace, string(certRef.Name)))
 			}
-			return metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: now,
-				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-				Message:            fmt.Sprintf("Failed to get Secret %s/%s: %v", secretNamespace, string(certRef.Name), err),
-			}
+			return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef,
+				fmt.Sprintf("Failed to get Secret %s/%s: %v", secretNamespace, string(certRef.Name), err))
 		}
 
 		// Validate Secret type
 		if secret.Type != corev1.SecretTypeTLS {
-			return metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: now,
-				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-				Message:            fmt.Sprintf("Secret %s/%s has type %s, expected kubernetes.io/tls", secretNamespace, string(certRef.Name), secret.Type),
-			}
+			return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef,
+				fmt.Sprintf("Secret %s/%s has type %s, expected kubernetes.io/tls", secretNamespace, string(certRef.Name), secret.Type))
 		}
 
 		// Validate tls.crt and tls.key fields exist and are non-empty
 		if len(secret.Data["tls.crt"]) == 0 || len(secret.Data["tls.key"]) == 0 {
-			return metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: now,
-				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-				Message:            fmt.Sprintf("Secret %s/%s missing tls.crt or tls.key data", secretNamespace, string(certRef.Name)),
-			}
+			return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef,
+				fmt.Sprintf("Secret %s/%s missing tls.crt or tls.key data", secretNamespace, string(certRef.Name)))
 		}
 
 		// Validate tls.crt contains valid PEM data
 		if block, _ := pem.Decode(secret.Data["tls.crt"]); block == nil {
-			return metav1.Condition{
-				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				LastTransitionTime: now,
-				Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
-				Message:            fmt.Sprintf("Secret %s/%s tls.crt does not contain valid PEM data", secretNamespace, string(certRef.Name)),
-			}
+			return resolvedRefsCondition(false, gatewayv1.ListenerReasonInvalidCertificateRef,
+				fmt.Sprintf("Secret %s/%s tls.crt does not contain valid PEM data", secretNamespace, string(certRef.Name)))
 		}
 	}
 
-	return metav1.Condition{
-		Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: gateway.Generation,
-		LastTransitionTime: now,
-		Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
-		Message:            "All TLS certificate references resolved",
-	}
+	return resolvedRefsCondition(true, gatewayv1.ListenerReasonResolvedRefs, "All TLS certificate references resolved")
 }
 
 // getGatewayClassParameters fetches GatewayClassParameters for the given Gateway.
@@ -1935,11 +1890,6 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			r.enqueueGatewaysForBackendTLSPolicy(),
 		).
 		Complete(r)
-}
-
-// ptr returns a pointer to the given value.
-func ptr[T any](v T) *T {
-	return &v
 }
 
 // desiredAnnotationsFromSentinel reconstructs the user-supplied annotation

@@ -209,11 +209,28 @@ func (r *GatewayReconciler) buildClusterRoleBinding(gateway *gatewayv1.Gateway) 
 	}
 }
 
+// deploymentConfig bundles the per-Gateway values that flow from
+// GatewayClassParameters into the Deployment's pod template. Bundling them keeps
+// buildDeployment/buildContainers/buildGatewayContainer from threading a long,
+// error-prone positional parameter list (several fields share the same type).
+type deploymentConfig struct {
+	effectiveImage      string
+	varnishdExtraArgs   []string
+	logging             *gatewayparamsv1alpha1.VarnishLogging
+	infraHash           string
+	extraVolumes        []corev1.Volume
+	extraVolumeMounts   []corev1.VolumeMount
+	extraInitContainers []corev1.Container
+	resources           *corev1.ResourceRequirements
+	topologySpread      []corev1.TopologySpreadConstraint
+	hasBackendTLS       bool
+}
+
 // buildDeployment creates the Deployment containing the combined varnish-gateway container.
 // The container runs chaperone which manages the varnishd process internally.
 // If logging is configured, a sidecar container is added to stream varnish logs.
-// The infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
-func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, infraHash string, extraVolumes []corev1.Volume, extraVolumeMounts []corev1.VolumeMount, extraInitContainers []corev1.Container, resources *corev1.ResourceRequirements, topologySpread []corev1.TopologySpreadConstraint, hasBackendTLS bool) *appsv1.Deployment {
+// cfg.infraHash is added as an annotation to trigger pod restarts when infrastructure config changes.
+func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, cfg deploymentConfig) *appsv1.Deployment {
 	labels := r.buildLabels(gateway)
 
 	// Replicas is intentionally left unset on the desired object so the operator
@@ -262,17 +279,17 @@ func (r *GatewayReconciler) buildDeployment(gateway *gatewayv1.Gateway, effectiv
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
 					Annotations: map[string]string{
-						AnnotationInfraHash: infraHash,
+						AnnotationInfraHash: cfg.infraHash,
 					},
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName:            fmt.Sprintf("%s-chaperone", gateway.Name),
 					ImagePullSecrets:              imagePullSecrets,
 					TerminationGracePeriodSeconds: &terminationGracePeriod,
-					InitContainers:                extraInitContainers,
-					Containers:                    r.buildContainers(gateway, effectiveImage, varnishdExtraArgs, logging, extraVolumeMounts, resources, hasBackendTLS),
-					Volumes:                       r.buildVolumes(gateway, extraVolumes, hasBackendTLS),
-					TopologySpreadConstraints:     topologySpread,
+					InitContainers:                cfg.extraInitContainers,
+					Containers:                    r.buildContainers(gateway, cfg),
+					Volumes:                       r.buildVolumes(gateway, cfg.extraVolumes, cfg.hasBackendTLS),
+					TopologySpreadConstraints:     cfg.topologySpread,
 				},
 			},
 		},
@@ -329,14 +346,14 @@ func (r *GatewayReconciler) buildVolumes(gateway *gatewayv1.Gateway, extra []cor
 }
 
 // buildContainers creates the pod containers: main gateway container and optional logging sidecar.
-func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, logging *gatewayparamsv1alpha1.VarnishLogging, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements, hasBackendTLS bool) []corev1.Container {
+func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, cfg deploymentConfig) []corev1.Container {
 	containers := []corev1.Container{
-		r.buildGatewayContainer(gateway, effectiveImage, varnishdExtraArgs, extraVolumeMounts, resources, hasBackendTLS),
+		r.buildGatewayContainer(gateway, cfg),
 	}
 
 	// Add logging sidecar if configured
-	if logging != nil && logging.Mode != "" {
-		containers = append(containers, r.buildLoggingSidecar(gateway, effectiveImage, logging))
+	if cfg.logging != nil && cfg.logging.Mode != "" {
+		containers = append(containers, r.buildLoggingSidecar(gateway, cfg.effectiveImage, cfg.logging))
 	}
 
 	return containers
@@ -344,7 +361,7 @@ func (r *GatewayReconciler) buildContainers(gateway *gatewayv1.Gateway, effectiv
 
 // buildGatewayContainer creates the combined varnish-gateway container specification.
 // This container runs chaperone which manages varnishd internally.
-func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, effectiveImage string, varnishdExtraArgs []string, extraVolumeMounts []corev1.VolumeMount, resources *corev1.ResourceRequirements, hasBackendTLS bool) corev1.Container {
+func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, cfg deploymentConfig) corev1.Container {
 	hasTLS := hasHTTPSListener(gateway)
 
 	// Build VARNISH_LISTEN from all listeners, deduplicating by port.
@@ -421,10 +438,10 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 	}
 
 	// Add varnishd extra args if specified (semicolon-separated)
-	if len(varnishdExtraArgs) > 0 {
+	if len(cfg.varnishdExtraArgs) > 0 {
 		env = append(env, corev1.EnvVar{
 			Name:  "VARNISHD_EXTRA_ARGS",
-			Value: strings.Join(varnishdExtraArgs, ";"),
+			Value: strings.Join(cfg.varnishdExtraArgs, ";"),
 		})
 	}
 
@@ -443,7 +460,7 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 	}
 
 	// Set SSL_CERT_FILE for backend TLS verification (used by Varnish/OpenSSL)
-	if hasBackendTLS {
+	if cfg.hasBackendTLS {
 		env = append(env,
 			corev1.EnvVar{Name: "SSL_CERT_FILE", Value: "/etc/varnish/backend-ca/ca-bundle.crt"},
 		)
@@ -488,14 +505,14 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 			ReadOnly:  true,
 		})
 	}
-	if hasBackendTLS {
+	if cfg.hasBackendTLS {
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{
 			Name:      volumeBackendCA,
 			MountPath: "/etc/varnish/backend-ca",
 			ReadOnly:  true,
 		})
 	}
-	volumeMounts = append(volumeMounts, extraVolumeMounts...)
+	volumeMounts = append(volumeMounts, cfg.extraVolumeMounts...)
 
 	// Apply resource requirements: use user-specified or sensible defaults.
 	// Defaults are requests only (no limits) because Varnish memory usage
@@ -506,13 +523,13 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, ef
 			corev1.ResourceMemory: mustParseQuantity("256Mi"),
 		},
 	}
-	if resources != nil {
-		resourceReqs = *resources
+	if cfg.resources != nil {
+		resourceReqs = *cfg.resources
 	}
 
 	return corev1.Container{
 		Name:  "varnish-gateway",
-		Image: effectiveImage,
+		Image: cfg.effectiveImage,
 		Env:   env,
 		SecurityContext: &corev1.SecurityContext{
 			Capabilities: &corev1.Capabilities{

@@ -8,9 +8,9 @@ import (
 
 // ServiceState represents the current state of a backend service.
 type ServiceState struct {
-	Name      string          `json:"name"`
-	Namespace string          `json:"namespace"`
-	Backends  []BackendState  `json:"backends"`
+	Name      string         `json:"name"`
+	Namespace string         `json:"namespace"`
+	Backends  []BackendState `json:"backends"`
 }
 
 // BackendState represents a single backend endpoint.

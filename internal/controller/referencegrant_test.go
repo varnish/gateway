@@ -7,6 +7,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
@@ -91,7 +92,7 @@ func TestIsReferenceAllowed(t *testing.T) {
 							{Group: "gateway.networking.k8s.io", Kind: "Gateway", Namespace: "ns-a"},
 						},
 						To: []gatewayv1beta1.ReferenceGrantTo{
-							{Group: "", Kind: "Secret", Name: ptr(gatewayv1beta1.ObjectName("other-cert"))},
+							{Group: "", Kind: "Secret", Name: ptr.To(gatewayv1beta1.ObjectName("other-cert"))},
 						},
 					},
 				},

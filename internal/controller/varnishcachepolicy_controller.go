@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"sort"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -464,17 +463,4 @@ func specToCachePolicy(spec *gatewayparamsv1alpha1.VarnishCachePolicySpec) *ghos
 	}
 
 	return cp
-}
-
-// SortVCPsByPrecedence sorts VCPs by creation timestamp (oldest first) for deterministic ordering.
-func SortVCPsByPrecedence(vcps []gatewayparamsv1alpha1.VarnishCachePolicy) {
-	sort.Slice(vcps, func(i, j int) bool {
-		if vcps[i].CreationTimestamp.Before(&vcps[j].CreationTimestamp) {
-			return true
-		}
-		if vcps[i].CreationTimestamp.Equal(&vcps[j].CreationTimestamp) {
-			return vcps[i].Name < vcps[j].Name
-		}
-		return false
-	})
 }

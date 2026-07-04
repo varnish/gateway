@@ -22,25 +22,25 @@ import (
 type AuthFault int
 
 const (
-	AuthNoFault         AuthFault = iota
-	FaultAuthNoChallenge          // close immediately, no challenge sent
-	FaultAuthBadStatus            // send status 200 instead of 107
-	FaultAuthReject               // complete challenge, reject auth response
-	FaultAuthFreeze               // send challenge, then go silent
-	FaultAuthPartialHeader        // send partial header bytes, then close
+	AuthNoFault            AuthFault = iota
+	FaultAuthNoChallenge             // close immediately, no challenge sent
+	FaultAuthBadStatus               // send status 200 instead of 107
+	FaultAuthReject                  // complete challenge, reject auth response
+	FaultAuthFreeze                  // send challenge, then go silent
+	FaultAuthPartialHeader           // send partial header bytes, then close
 )
 
 // CmdFault describes a fault injected when responding to a command.
 type CmdFault int
 
 const (
-	CmdNoFault           CmdFault = iota
-	FaultCmdFreeze                // read command, never respond
-	FaultCmdDisconnect            // read command, close connection
-	FaultCmdPartialHeader         // send partial header bytes, close
-	FaultCmdPartialBody           // send header with inflated length, send partial body, close
-	FaultCmdSlowResponse          // respond after configurable delay
-	FaultCmdBadHeader             // send malformed header bytes
+	CmdNoFault            CmdFault = iota
+	FaultCmdFreeze                 // read command, never respond
+	FaultCmdDisconnect             // read command, close connection
+	FaultCmdPartialHeader          // send partial header bytes, close
+	FaultCmdPartialBody            // send header with inflated length, send partial body, close
+	FaultCmdSlowResponse           // respond after configurable delay
+	FaultCmdBadHeader              // send malformed header bytes
 )
 
 // CommandAction describes how to respond to a single command.

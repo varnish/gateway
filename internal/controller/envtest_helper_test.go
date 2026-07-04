@@ -59,7 +59,7 @@ func SetupEnvtest() (*EnvtestEnvironment, error) {
 
 	testEnv := &envtest.Environment{
 		CRDDirectoryPaths: []string{
-			filepath.Join("testdata"),                                       // Gateway API CRDs
+			filepath.Join("testdata"),                                      // Gateway API CRDs
 			filepath.Join("..", "..", "charts", "varnish-gateway", "crds"), // Custom CRDs
 		},
 		ErrorIfCRDPathMissing: true,

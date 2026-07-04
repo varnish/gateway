@@ -178,9 +178,9 @@ func TestPolicyHasPrecedence(t *testing.T) {
 	later := metav1.NewTime(now.Add(time.Second))
 
 	tests := []struct {
-		name       string
-		a, b       *gatewayv1.BackendTLSPolicy
-		aPrecedes  bool
+		name      string
+		a, b      *gatewayv1.BackendTLSPolicy
+		aPrecedes bool
 	}{
 		{
 			name: "older policy wins",

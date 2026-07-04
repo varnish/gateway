@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -394,7 +395,7 @@ func TestServiceShape_TypeTransition_Envtest(t *testing.T) {
 	params := &gatewayparamsv1alpha1.GatewayClassParameters{
 		ObjectMeta: metav1.ObjectMeta{Name: "svc-transition-params"},
 		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
-			Service: &gatewayparamsv1alpha1.ServiceConfig{Type: ptr(corev1.ServiceTypeLoadBalancer)},
+			Service: &gatewayparamsv1alpha1.ServiceConfig{Type: ptr.To(corev1.ServiceTypeLoadBalancer)},
 		},
 	}
 	if err := testEnv.Client.Create(ctx, params); err != nil {
@@ -436,7 +437,7 @@ func TestServiceShape_TypeTransition_Envtest(t *testing.T) {
 	if err := testEnv.Client.Get(ctx, types.NamespacedName{Name: "svc-transition-params"}, &p); err != nil {
 		t.Fatalf("get params: %v", err)
 	}
-	p.Spec.Service.Type = ptr(corev1.ServiceTypeClusterIP)
+	p.Spec.Service.Type = ptr.To(corev1.ServiceTypeClusterIP)
 	if err := testEnv.Client.Update(ctx, &p); err != nil {
 		t.Fatalf("update params: %v", err)
 	}
@@ -489,7 +490,7 @@ func TestServiceShape_CloudControllerAnnotationPreserved_Envtest(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "svc-cloud-params"},
 		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
 			Service: &gatewayparamsv1alpha1.ServiceConfig{
-				Type:        ptr(corev1.ServiceTypeLoadBalancer),
+				Type:        ptr.To(corev1.ServiceTypeLoadBalancer),
 				Annotations: map[string]string{"operator-managed": "v1"},
 			},
 		},
@@ -593,7 +594,7 @@ func TestServiceShape_MultipleLabels_Accepted_Envtest(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "svc-multilabel-params"},
 		Spec: gatewayparamsv1alpha1.GatewayClassParametersSpec{
 			Service: &gatewayparamsv1alpha1.ServiceConfig{
-				Type: ptr(corev1.ServiceTypeClusterIP),
+				Type: ptr.To(corev1.ServiceTypeClusterIP),
 				Labels: map[string]string{
 					"team":                        "edge",
 					"tier":                        "cache",

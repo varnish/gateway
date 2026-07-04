@@ -117,9 +117,9 @@ func TestStateTracker_Snapshot_SortsServices(t *testing.T) {
 	st := NewStateTracker(bus, "v1.0.0")
 
 	st.UpdateServices(map[string]ServiceState{
-		"prod/zebra": {Name: "zebra", Namespace: "prod"},
+		"prod/zebra":  {Name: "zebra", Namespace: "prod"},
 		"default/api": {Name: "api", Namespace: "default"},
-		"prod/alpha": {Name: "alpha", Namespace: "prod"},
+		"prod/alpha":  {Name: "alpha", Namespace: "prod"},
 	})
 
 	snap := st.Snapshot()

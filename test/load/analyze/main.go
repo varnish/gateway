@@ -3,9 +3,10 @@
 // chaos events.
 //
 // Usage:
-//   go run ./test/load/analyze < ledger.ndjson
-//   go run ./test/load/analyze -f ledger.ndjson
-//   curl http://collector:8080/download | go run ./test/load/analyze
+//
+//	go run ./test/load/analyze < ledger.ndjson
+//	go run ./test/load/analyze -f ledger.ndjson
+//	curl http://collector:8080/download | go run ./test/load/analyze
 package main
 
 import (

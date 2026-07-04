@@ -107,4 +107,3 @@ func (gc *VarnishCacheInvalidationGC) isEligible(ci *v1alpha1.VarnishCacheInvali
 func (gc *VarnishCacheInvalidationGC) NeedLeaderElection() bool {
 	return true
 }
-

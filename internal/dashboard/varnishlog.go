@@ -17,8 +17,8 @@ const (
 )
 
 var (
-	vslTagRe    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]*$`)
-	rateLimitRe = regexp.MustCompile(`^\d+/[smh]$`)
+	vslTagRe       = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]*$`)
+	rateLimitRe    = regexp.MustCompile(`^\d+/[smh]$`)
 	validGroupings = map[string]bool{
 		"request": true,
 		"vxid":    true,

@@ -632,4 +632,3 @@ func makeBackendsHandler(vadm *varnishadm.Server) http.HandlerFunc {
 		_, _ = w.Write([]byte(resp.Payload()))
 	}
 }
-

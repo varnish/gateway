@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -183,7 +184,7 @@ func TestBuildDeployment(t *testing.T) {
 		},
 	}
 
-	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", nil, nil, nil, nil, nil, false)
+	deployment := r.buildDeployment(gateway, deploymentConfig{effectiveImage: "test-image:latest", infraHash: "test-hash"})
 
 	if deployment.Name != "test-gateway" {
 		t.Errorf("expected deployment name %q, got %q", "test-gateway", deployment.Name)
@@ -253,7 +254,13 @@ func TestBuildDeployment_WithExtras(t *testing.T) {
 		{Name: "vmod-loader", Image: "busybox:latest", Command: []string{"cp", "/src/libvmod.so", "/dst/"}},
 	}
 
-	deployment := r.buildDeployment(gateway, "test-image:latest", nil, nil, "test-hash", extraVolumes, extraVolumeMounts, extraInitContainers, nil, nil, false)
+	deployment := r.buildDeployment(gateway, deploymentConfig{
+		effectiveImage:      "test-image:latest",
+		infraHash:           "test-hash",
+		extraVolumes:        extraVolumes,
+		extraVolumeMounts:   extraVolumeMounts,
+		extraInitContainers: extraInitContainers,
+	})
 
 	// Verify extra volumes
 	foundVol := false
@@ -1028,13 +1035,13 @@ func TestBuildGatewayContainer(t *testing.T) {
 	}
 
 	tests := []struct {
-		name              string
-		gateway           *gatewayv1.Gateway
-		varnishdExtraArgs []string
-		extraVolumeMounts []corev1.VolumeMount
-		expectPorts       int
-		expectVolMounts   int
-		expectTLSEnv      bool
+		name               string
+		gateway            *gatewayv1.Gateway
+		varnishdExtraArgs  []string
+		extraVolumeMounts  []corev1.VolumeMount
+		expectPorts        int
+		expectVolMounts    int
+		expectTLSEnv       bool
 		expectExtraArgsEnv string
 	}{
 		{
@@ -1077,7 +1084,11 @@ func TestBuildGatewayContainer(t *testing.T) {
 				},
 			}
 
-			container := r.buildGatewayContainer(tc.gateway, "test-image:latest", tc.varnishdExtraArgs, tc.extraVolumeMounts, nil, false)
+			container := r.buildGatewayContainer(tc.gateway, deploymentConfig{
+				effectiveImage:    "test-image:latest",
+				varnishdExtraArgs: tc.varnishdExtraArgs,
+				extraVolumeMounts: tc.extraVolumeMounts,
+			})
 
 			if len(container.Ports) != tc.expectPorts {
 				t.Errorf("expected %d ports, got %d", tc.expectPorts, len(container.Ports))
@@ -1234,7 +1245,7 @@ func TestBuildContainers(t *testing.T) {
 	}
 
 	t.Run("without logging", func(t *testing.T) {
-		containers := r.buildContainers(gateway, "test-image:latest", nil, nil, nil, nil, false)
+		containers := r.buildContainers(gateway, deploymentConfig{effectiveImage: "test-image:latest"})
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container, got %d", len(containers))
 		}
@@ -1245,7 +1256,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("with logging", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishlog"}
-		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil, false)
+		containers := r.buildContainers(gateway, deploymentConfig{effectiveImage: "test-image:latest", logging: logging})
 		if len(containers) != 2 {
 			t.Errorf("expected 2 containers, got %d", len(containers))
 		}
@@ -1256,7 +1267,7 @@ func TestBuildContainers(t *testing.T) {
 
 	t.Run("logging with empty mode is not added", func(t *testing.T) {
 		logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: ""}
-		containers := r.buildContainers(gateway, "test-image:latest", nil, logging, nil, nil, false)
+		containers := r.buildContainers(gateway, deploymentConfig{effectiveImage: "test-image:latest", logging: logging})
 		if len(containers) != 1 {
 			t.Errorf("expected 1 container when logging mode is empty, got %d", len(containers))
 		}
@@ -1269,10 +1280,10 @@ func TestBuildContainers(t *testing.T) {
 
 func TestNeedsDeploymentUpdate(t *testing.T) {
 	tests := []struct {
-		name           string
-		existing       *appsv1.Deployment
-		desired        *appsv1.Deployment
-		expectUpdate   bool
+		name         string
+		existing     *appsv1.Deployment
+		desired      *appsv1.Deployment
+		expectUpdate bool
 	}{
 		{
 			name: "same image same hash",
@@ -1501,14 +1512,14 @@ func TestNeedsServiceUpdate(t *testing.T) {
 			existing: &corev1.Service{
 				Spec: corev1.ServiceSpec{
 					Type:              corev1.ServiceTypeLoadBalancer,
-					LoadBalancerClass: ptr("old"),
+					LoadBalancerClass: ptr.To("old"),
 					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
 				},
 			},
 			desired: &corev1.Service{
 				Spec: corev1.ServiceSpec{
 					Type:              corev1.ServiceTypeLoadBalancer,
-					LoadBalancerClass: ptr("new"),
+					LoadBalancerClass: ptr.To("new"),
 					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
 				},
 			},
@@ -1611,7 +1622,7 @@ func TestNeedsServiceUpdate(t *testing.T) {
 			desired: &corev1.Service{
 				Spec: corev1.ServiceSpec{
 					Type:              corev1.ServiceTypeLoadBalancer,
-					LoadBalancerClass: ptr("new"),
+					LoadBalancerClass: ptr.To("new"),
 					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
 				},
 			},
@@ -1622,7 +1633,7 @@ func TestNeedsServiceUpdate(t *testing.T) {
 			existing: &corev1.Service{
 				Spec: corev1.ServiceSpec{
 					Type:              corev1.ServiceTypeLoadBalancer,
-					LoadBalancerClass: ptr("old"),
+					LoadBalancerClass: ptr.To("old"),
 					Ports:             []corev1.ServicePort{{Name: "http", Port: 80, TargetPort: intstr.FromInt(80), Protocol: corev1.ProtocolTCP}},
 				},
 			},
@@ -1870,7 +1881,7 @@ func TestValidateListenerRouteKinds(t *testing.T) {
 			listener: &gatewayv1.Listener{
 				AllowedRoutes: &gatewayv1.AllowedRoutes{
 					Kinds: []gatewayv1.RouteGroupKind{
-						{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "HTTPRoute"},
+						{Group: ptr.To(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "HTTPRoute"},
 					},
 				},
 			},
@@ -1882,7 +1893,7 @@ func TestValidateListenerRouteKinds(t *testing.T) {
 			listener: &gatewayv1.Listener{
 				AllowedRoutes: &gatewayv1.AllowedRoutes{
 					Kinds: []gatewayv1.RouteGroupKind{
-						{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "TLSRoute"},
+						{Group: ptr.To(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "TLSRoute"},
 					},
 				},
 			},
@@ -1894,8 +1905,8 @@ func TestValidateListenerRouteKinds(t *testing.T) {
 			listener: &gatewayv1.Listener{
 				AllowedRoutes: &gatewayv1.AllowedRoutes{
 					Kinds: []gatewayv1.RouteGroupKind{
-						{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "HTTPRoute"},
-						{Group: ptr(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "GRPCRoute"},
+						{Group: ptr.To(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "HTTPRoute"},
+						{Group: ptr.To(gatewayv1.Group("gateway.networking.k8s.io")), Kind: "GRPCRoute"},
 					},
 				},
 			},
@@ -3488,14 +3499,14 @@ type fakeQueue struct {
 	requests []ctrl.Request
 }
 
-func (q *fakeQueue) Add(item reconcile.Request)                             { q.requests = append(q.requests, item) }
-func (q *fakeQueue) Len() int                                               { return len(q.requests) }
-func (q *fakeQueue) Get() (reconcile.Request, bool)                         { return reconcile.Request{}, false }
-func (q *fakeQueue) Done(item reconcile.Request)                            {}
-func (q *fakeQueue) ShutDown()                                              {}
-func (q *fakeQueue) ShutDownWithDrain()                                     {}
-func (q *fakeQueue) ShuttingDown() bool                                     { return false }
+func (q *fakeQueue) Add(item reconcile.Request)                              { q.requests = append(q.requests, item) }
+func (q *fakeQueue) Len() int                                                { return len(q.requests) }
+func (q *fakeQueue) Get() (reconcile.Request, bool)                          { return reconcile.Request{}, false }
+func (q *fakeQueue) Done(item reconcile.Request)                             {}
+func (q *fakeQueue) ShutDown()                                               {}
+func (q *fakeQueue) ShutDownWithDrain()                                      {}
+func (q *fakeQueue) ShuttingDown() bool                                      { return false }
 func (q *fakeQueue) AddAfter(item reconcile.Request, duration time.Duration) {}
-func (q *fakeQueue) AddRateLimited(item reconcile.Request)                  {}
-func (q *fakeQueue) Forget(item reconcile.Request)                          {}
-func (q *fakeQueue) NumRequeues(item reconcile.Request) int                 { return 0 }
+func (q *fakeQueue) AddRateLimited(item reconcile.Request)                   {}
+func (q *fakeQueue) Forget(item reconcile.Request)                           {}
+func (q *fakeQueue) NumRequeues(item reconcile.Request) int                  { return 0 }

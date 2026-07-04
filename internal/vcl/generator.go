@@ -595,9 +595,9 @@ func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) [
 	}
 
 	// Build lookup maps from gateway listeners in a single pass
-	listenerSockets := make(map[string]string)    // listener name → socket name
-	allSockets := make(map[string]bool)            // all socket names (for "covers all" check)
-	portSockets := make(map[int32][]string)        // port → socket names
+	listenerSockets := make(map[string]string) // listener name → socket name
+	allSockets := make(map[string]bool)        // all socket names (for "covers all" check)
+	portSockets := make(map[int32][]string)    // port → socket names
 	for i := range gateway.Spec.Listeners {
 		l := &gateway.Spec.Listeners[i]
 		socket := socketNameForListener(l)

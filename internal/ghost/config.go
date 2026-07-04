@@ -191,9 +191,9 @@ type Route struct {
 	Port        int               `json:"port"`
 	PortName    string            `json:"port_name,omitempty"` // Service port name for filtering when TargetPort is named
 	Weight      int               `json:"weight"`
-	Listeners   []string          `json:"listeners,omitempty"`    // Varnish socket names (e.g., ["http-80"])
-	RouteName   string            `json:"route_name,omitempty"`   // HTTPRoute namespace/name
-	RuleName    string            `json:"rule_name,omitempty"`    // HTTPRouteRule name for per-rule VCP targeting
+	Listeners   []string          `json:"listeners,omitempty"`  // Varnish socket names (e.g., ["http-80"])
+	RouteName   string            `json:"route_name,omitempty"` // HTTPRoute namespace/name
+	RuleName    string            `json:"rule_name,omitempty"`  // HTTPRouteRule name for per-rule VCP targeting
 	Priority    int               `json:"priority"`
 	RuleIndex   int               `json:"rule_index"`             // Original rule ordering for tiebreaking
 	CachePolicy *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
@@ -225,8 +225,8 @@ type RouteBackends struct {
 	QueryParams   []QueryParamMatch `json:"query_params,omitempty"`
 	Filters       *RouteFilters     `json:"filters,omitempty"`
 	BackendGroups []BackendGroup    `json:"backend_groups"`
-	Listeners     []string          `json:"listeners,omitempty"`    // Varnish socket names (e.g., ["http-80"])
-	RouteName     string            `json:"route_name,omitempty"`   // HTTPRoute namespace/name
+	Listeners     []string          `json:"listeners,omitempty"`  // Varnish socket names (e.g., ["http-80"])
+	RouteName     string            `json:"route_name,omitempty"` // HTTPRoute namespace/name
 	Priority      int               `json:"priority"`
 	RuleIndex     int               `json:"rule_index"`
 	CachePolicy   *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy

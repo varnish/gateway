@@ -423,9 +423,9 @@ func TestBuildService_MultipleLabels_SentinelIsValidLabelValue(t *testing.T) {
 		Type:        corev1.ServiceTypeLoadBalancer,
 		Annotations: map[string]string{},
 		Labels: map[string]string{
-			"team":                          "edge",
-			"tier":                          "cache",
-			"app.kubernetes.io/component":   "gateway",
+			"team":                        "edge",
+			"tier":                        "cache",
+			"app.kubernetes.io/component": "gateway",
 		},
 	})
 
@@ -555,7 +555,7 @@ func TestBuildDeployment_Basic(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "abc123", nil, nil, nil, nil, nil, false)
+	dep := r.buildDeployment(gw, deploymentConfig{effectiveImage: "test-image:latest", infraHash: "abc123"})
 
 	if dep.Name != "my-gw" {
 		t.Errorf("name = %q, want %q", dep.Name, "my-gw")
@@ -586,7 +586,7 @@ func TestBuildDeployment_WithImagePullSecrets(t *testing.T) {
 	}
 	gw := testGateway("my-gw", "default")
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "hash", nil, nil, nil, nil, nil, false)
+	dep := r.buildDeployment(gw, deploymentConfig{effectiveImage: "test-image:latest", infraHash: "hash"})
 
 	secrets := dep.Spec.Template.Spec.ImagePullSecrets
 	if len(secrets) != 2 {
@@ -602,7 +602,7 @@ func TestBuildDeployment_WithLoggingSidecar(t *testing.T) {
 	gw := testGateway("my-gw", "default")
 	logging := &gatewayparamsv1alpha1.VarnishLogging{Mode: "varnishncsa"}
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, logging, "hash", nil, nil, nil, nil, nil, false)
+	dep := r.buildDeployment(gw, deploymentConfig{effectiveImage: "test-image:latest", logging: logging, infraHash: "hash"})
 
 	containers := dep.Spec.Template.Spec.Containers
 	if len(containers) != 2 {
@@ -617,7 +617,7 @@ func TestBuildDeployment_WithBackendTLS(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	dep := r.buildDeployment(gw, "test-image:latest", nil, nil, "hash", nil, nil, nil, nil, nil, true)
+	dep := r.buildDeployment(gw, deploymentConfig{effectiveImage: "test-image:latest", infraHash: "hash", hasBackendTLS: true})
 
 	// Check that backend-ca volume exists
 	volumes := dep.Spec.Template.Spec.Volumes
@@ -699,7 +699,7 @@ func TestBuildGatewayContainer_EnvVars(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
 
 	envMap := map[string]string{}
 	for _, e := range container.Env {
@@ -727,7 +727,7 @@ func TestBuildGatewayContainer_VarnishListen(t *testing.T) {
 		gatewayv1.Listener{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
 	)
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
 
 	var varnishListen string
 	for _, e := range container.Env {
@@ -751,7 +751,7 @@ func TestBuildGatewayContainer_WithVarnishdExtraArgs(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	container := r.buildGatewayContainer(gw, "test:latest", []string{"-p", "thread_pool_stack=160k"}, nil, nil, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest", varnishdExtraArgs: []string{"-p", "thread_pool_stack=160k"}})
 
 	var extraArgs string
 	for _, e := range container.Env {
@@ -771,7 +771,7 @@ func TestBuildGatewayContainer_TLSEnv(t *testing.T) {
 		gatewayv1.Listener{Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
 	)
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
 
 	envMap := map[string]string{}
 	for _, e := range container.Env {
@@ -788,7 +788,7 @@ func TestBuildGatewayContainer_BackendTLSEnv(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, true)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest", hasBackendTLS: true})
 
 	envMap := map[string]string{}
 	for _, e := range container.Env {
@@ -807,7 +807,7 @@ func TestBuildGatewayContainer_Ports(t *testing.T) {
 		gatewayv1.Listener{Name: "http", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
 	)
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
 
 	portNames := map[string]int32{}
 	for _, p := range container.Ports {
@@ -828,7 +828,7 @@ func TestBuildGatewayContainer_DeduplicatesListenerPorts(t *testing.T) {
 		gatewayv1.Listener{Name: "web2", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: new(gatewayv1.Hostname("b.example.com"))},
 	)
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
 
 	// Should have health + dashboard + one http-80, not two
 	httpPorts := 0
@@ -852,7 +852,7 @@ func TestBuildGatewayContainer_CustomResources(t *testing.T) {
 			corev1.ResourceMemory: mustParseQuantity("1Gi"),
 		},
 	}
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, custom, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest", resources: custom})
 
 	if container.Resources.Requests.Cpu().String() != "500m" {
 		t.Errorf("cpu request = %s, want 500m", container.Resources.Requests.Cpu())
@@ -863,7 +863,7 @@ func TestBuildGatewayContainer_DefaultResources(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, false)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
 
 	if container.Resources.Requests.Cpu().String() != "100m" {
 		t.Errorf("default cpu request = %s, want 100m", container.Resources.Requests.Cpu())
@@ -877,7 +877,7 @@ func TestBuildGatewayContainer_VolumeMounts_BackendTLS(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "default")
 
-	container := r.buildGatewayContainer(gw, "test:latest", nil, nil, nil, true)
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest", hasBackendTLS: true})
 
 	mountNames := map[string]bool{}
 	for _, m := range container.VolumeMounts {
@@ -976,4 +976,3 @@ func TestBuildLoggingSidecar_ExtraArgs(t *testing.T) {
 		t.Errorf("expected extra args in: %v", container.Args)
 	}
 }
-

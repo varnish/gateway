@@ -4,8 +4,9 @@
 // small to exercise "hundreds of HTTPRoutes" behaviour.
 //
 // Output layout (into -out dir):
-//   routes.yaml    Gateway + HTTPRoutes, kubectl-applyable.
-//   routes.json    [{host, path, expService}] — mount into k6 as a ConfigMap.
+//
+//	routes.yaml    Gateway + HTTPRoutes, kubectl-applyable.
+//	routes.json    [{host, path, expService}] — mount into k6 as a ConfigMap.
 //
 // The default Gateway fixture and the generator share the "load" gateway
 // name and the "varnish-load" namespace — the generator intentionally

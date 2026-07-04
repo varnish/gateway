@@ -541,49 +541,6 @@ func TestIsOlder(t *testing.T) {
 	}
 }
 
-// --- TestSortVCPsByPrecedence ---
-
-func TestSortVCPsByPrecedence(t *testing.T) {
-	now := metav1.Now()
-	t1 := metav1.NewTime(now.Add(-3 * time.Second))
-	t2 := metav1.NewTime(now.Add(-2 * time.Second))
-	t3 := metav1.NewTime(now.Add(-1 * time.Second))
-
-	vcps := []gatewayparamsv1alpha1.VarnishCachePolicy{
-		{ObjectMeta: metav1.ObjectMeta{Name: "charlie", CreationTimestamp: t3}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "alpha", CreationTimestamp: t1}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "bravo", CreationTimestamp: t2}},
-	}
-
-	SortVCPsByPrecedence(vcps)
-
-	expected := []string{"alpha", "bravo", "charlie"}
-	for i, name := range expected {
-		if vcps[i].Name != name {
-			t.Errorf("position %d: got %q, want %q", i, vcps[i].Name, name)
-		}
-	}
-}
-
-func TestSortVCPsByPrecedence_SameTimestamp(t *testing.T) {
-	ts := metav1.Now()
-
-	vcps := []gatewayparamsv1alpha1.VarnishCachePolicy{
-		{ObjectMeta: metav1.ObjectMeta{Name: "charlie", CreationTimestamp: ts}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "alpha", CreationTimestamp: ts}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "bravo", CreationTimestamp: ts}},
-	}
-
-	SortVCPsByPrecedence(vcps)
-
-	expected := []string{"alpha", "bravo", "charlie"}
-	for i, name := range expected {
-		if vcps[i].Name != name {
-			t.Errorf("position %d: got %q, want %q", i, vcps[i].Name, name)
-		}
-	}
-}
-
 // --- TestReconcile ---
 
 func TestReconcile_TargetNotFound_HTTPRoute(t *testing.T) {
@@ -841,8 +798,8 @@ func TestReconcile_Conflict(t *testing.T) {
 			CreationTimestamp: now,
 		},
 		Spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
-			TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
-			ForcedTTL:  durationPtr(300 * time.Second),
+			TargetRef: vcpTargetRef("HTTPRoute", "my-route", nil),
+			ForcedTTL: durationPtr(300 * time.Second),
 		},
 	}
 
