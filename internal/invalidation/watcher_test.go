@@ -2,6 +2,7 @@ package invalidation
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -43,6 +47,21 @@ func newTestWatcherWithK8s(varnishAddr, gatewayName, namespace, podName string) 
 	w := newTestWatcher(varnishAddr, gatewayName, namespace, podName)
 	w.k8sClient = fake.NewSimpleClientset()
 	return w
+}
+
+func newRunningGatewayPod(name, namespace, gatewayName string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by":                "varnish-gateway-operator",
+				"gateway.networking.k8s.io/gateway-name":      gatewayName,
+				"gateway.networking.k8s.io/gateway-namespace": namespace,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
 }
 
 // --- executePurge tests ---
@@ -550,6 +569,165 @@ func TestGetExpectedPodCount(t *testing.T) {
 	}
 }
 
+// --- updateStatus tests ---
+
+func TestUpdateStatus_AppendsPodResultAndCompletes(t *testing.T) {
+	obj := makeVarnishCacheInvalidation("inv-status", "default", "uid-status", "purge", "example.com", []string{"/ok"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcher("localhost:80", "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+	w.k8sClient = fake.NewSimpleClientset(newRunningGatewayPod("pod-0", "default", "my-gw"))
+
+	pathResults := []any{
+		map[string]any{"path": "/ok", "success": true, "message": "Purge applied successfully"},
+	}
+	w.updateStatus(context.Background(), "default", "inv-status", true, "1/1 paths succeeded", pathResults)
+
+	got := getStoredInvalidation(t, dynClient, "default", "inv-status")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Complete" {
+		t.Fatalf("phase = %v, want Complete", phase)
+	}
+	if _, ok := status["completedAt"].(string); !ok {
+		t.Fatalf("status.completedAt missing or not a string: %#v", status["completedAt"])
+	}
+	podResults := requireNestedSlice(t, got.Object, "status", "podResults")
+	if len(podResults) != 1 {
+		t.Fatalf("podResults length = %d, want 1", len(podResults))
+	}
+	result, ok := podResults[0].(map[string]any)
+	if !ok {
+		t.Fatalf("podResults[0] has type %T, want map[string]any", podResults[0])
+	}
+	if result["podName"] != "pod-0" {
+		t.Errorf("podName = %v, want pod-0", result["podName"])
+	}
+	if result["success"] != true {
+		t.Errorf("success = %v, want true", result["success"])
+	}
+	if result["message"] != "1/1 paths succeeded" {
+		t.Errorf("message = %v, want 1/1 paths succeeded", result["message"])
+	}
+	storedPathResults, ok := result["pathResults"].([]any)
+	if !ok {
+		t.Fatalf("pathResults has type %T, want []any", result["pathResults"])
+	}
+	if len(storedPathResults) != 1 {
+		t.Fatalf("pathResults length = %d, want 1", len(storedPathResults))
+	}
+}
+
+func TestUpdateStatus_PreservesExistingResultsAndStaysInProgress(t *testing.T) {
+	obj := makeVarnishCacheInvalidation("inv-progress", "default", "uid-progress", "purge", "example.com", []string{"/ok"}, "my-gw", "default")
+	existing := []any{
+		map[string]any{
+			"podName":     "pod-1",
+			"success":     true,
+			"message":     "1/1 paths succeeded",
+			"completedAt": "2026-01-01T00:00:00Z",
+			"pathResults": []any{map[string]any{"path": "/ok", "success": true}},
+		},
+	}
+	if err := unstructured.SetNestedSlice(obj.Object, existing, "status", "podResults"); err != nil {
+		t.Fatalf("SetNestedSlice: %v", err)
+	}
+
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcher("localhost:80", "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+	w.k8sClient = fake.NewSimpleClientset(
+		newRunningGatewayPod("pod-0", "default", "my-gw"),
+		newRunningGatewayPod("pod-1", "default", "my-gw"),
+		newRunningGatewayPod("pod-2", "default", "my-gw"),
+	)
+
+	w.updateStatus(context.Background(), "default", "inv-progress", true, "1/1 paths succeeded", nil)
+
+	got := getStoredInvalidation(t, dynClient, "default", "inv-progress")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "InProgress" {
+		t.Fatalf("phase = %v, want InProgress", phase)
+	}
+	if _, found := status["completedAt"]; found {
+		t.Fatalf("status.completedAt = %v, want absent while in progress", status["completedAt"])
+	}
+	podResults := requireNestedSlice(t, got.Object, "status", "podResults")
+	if len(podResults) != 2 {
+		t.Fatalf("podResults length = %d, want 2", len(podResults))
+	}
+	first := podResults[0].(map[string]any)
+	second := podResults[1].(map[string]any)
+	if first["podName"] != "pod-1" || second["podName"] != "pod-0" {
+		t.Fatalf("pod result order/preservation = %#v, want existing pod-1 then pod-0", podResults)
+	}
+}
+
+func TestUpdateStatus_FailsWhenAllPodsReportedAndAnyFailed(t *testing.T) {
+	obj := makeVarnishCacheInvalidation("inv-failed", "default", "uid-failed", "purge", "example.com", []string{"/ok"}, "my-gw", "default")
+	existing := []any{
+		map[string]any{
+			"podName":     "pod-1",
+			"success":     false,
+			"message":     "0/1 paths succeeded",
+			"completedAt": "2026-01-01T00:00:00Z",
+			"pathResults": []any{map[string]any{"path": "/ok", "success": false}},
+		},
+	}
+	if err := unstructured.SetNestedSlice(obj.Object, existing, "status", "podResults"); err != nil {
+		t.Fatalf("SetNestedSlice: %v", err)
+	}
+
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcher("localhost:80", "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+	w.k8sClient = fake.NewSimpleClientset(
+		newRunningGatewayPod("pod-0", "default", "my-gw"),
+		newRunningGatewayPod("pod-1", "default", "my-gw"),
+	)
+
+	w.updateStatus(context.Background(), "default", "inv-failed", true, "1/1 paths succeeded", nil)
+
+	got := getStoredInvalidation(t, dynClient, "default", "inv-failed")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Failed" {
+		t.Fatalf("phase = %v, want Failed", phase)
+	}
+	if _, ok := status["completedAt"].(string); !ok {
+		t.Fatalf("status.completedAt missing or not a string: %#v", status["completedAt"])
+	}
+}
+
+func TestUpdateStatus_DoesNotAppendDuplicatePodResult(t *testing.T) {
+	obj := makeVarnishCacheInvalidation("inv-duplicate", "default", "uid-duplicate", "purge", "example.com", []string{"/ok"}, "my-gw", "default")
+	existing := []any{
+		map[string]any{
+			"podName":     "pod-0",
+			"success":     true,
+			"message":     "1/1 paths succeeded",
+			"completedAt": "2026-01-01T00:00:00Z",
+		},
+	}
+	if err := unstructured.SetNestedSlice(obj.Object, existing, "status", "podResults"); err != nil {
+		t.Fatalf("SetNestedSlice: %v", err)
+	}
+
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcher("localhost:80", "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+	w.k8sClient = fake.NewSimpleClientset(newRunningGatewayPod("pod-0", "default", "my-gw"))
+
+	w.updateStatus(context.Background(), "default", "inv-duplicate", true, "1/1 paths succeeded", nil)
+
+	got := getStoredInvalidation(t, dynClient, "default", "inv-duplicate")
+	podResults := requireNestedSlice(t, got.Object, "status", "podResults")
+	if len(podResults) != 1 {
+		t.Fatalf("podResults length = %d, want 1", len(podResults))
+	}
+	if dynClient.updateStatusCount != 0 {
+		t.Fatalf("UpdateStatus calls = %d, want 0 for duplicate pod result", dynClient.updateStatusCount)
+	}
+}
+
 // --- handleInvalidation: correct method dispatch ---
 
 func TestHandleInvalidation_DispatchesPurge(t *testing.T) {
@@ -647,6 +825,151 @@ func TestHandleInvalidation_MultiplePathsPartialFailure(t *testing.T) {
 	}
 }
 
+func TestHandleInvalidation_WritesSuccessStatus(t *testing.T) {
+	requestCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	obj := makeVarnishCacheInvalidation("inv-success-status", "default", "uid-success-status", "purge", "example.com",
+		[]string{"/ok"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	w.handleInvalidation(context.Background(), obj)
+
+	if requestCount != 1 {
+		t.Fatalf("request count = %d, want 1", requestCount)
+	}
+	got := getStoredInvalidation(t, dynClient, "default", "inv-success-status")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Complete" {
+		t.Fatalf("phase = %v, want Complete", phase)
+	}
+	podResults := requireNestedSlice(t, got.Object, "status", "podResults")
+	if len(podResults) != 1 {
+		t.Fatalf("podResults length = %d, want 1", len(podResults))
+	}
+	result := podResults[0].(map[string]any)
+	if result["podName"] != "pod-0" {
+		t.Errorf("podName = %v, want pod-0", result["podName"])
+	}
+	if result["success"] != true {
+		t.Errorf("success = %v, want true", result["success"])
+	}
+	if result["message"] != "1/1 paths succeeded" {
+		t.Errorf("message = %v, want 1/1 paths succeeded", result["message"])
+	}
+	pathResults, ok := result["pathResults"].([]any)
+	if !ok {
+		t.Fatalf("pathResults has type %T, want []any", result["pathResults"])
+	}
+	if len(pathResults) != 1 {
+		t.Fatalf("pathResults length = %d, want 1", len(pathResults))
+	}
+	pathResult := pathResults[0].(map[string]any)
+	if pathResult["path"] != "/ok" {
+		t.Errorf("path = %v, want /ok", pathResult["path"])
+	}
+	if pathResult["success"] != true {
+		t.Errorf("path success = %v, want true", pathResult["success"])
+	}
+}
+
+func TestHandleInvalidation_WritesPartialFailureStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fail" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	obj := makeVarnishCacheInvalidation("inv-failure-status", "default", "uid-failure-status", "purge", "example.com",
+		[]string{"/ok", "/fail"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	w.handleInvalidation(context.Background(), obj)
+
+	got := getStoredInvalidation(t, dynClient, "default", "inv-failure-status")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Failed" {
+		t.Fatalf("phase = %v, want Failed", phase)
+	}
+	podResults := requireNestedSlice(t, got.Object, "status", "podResults")
+	if len(podResults) != 1 {
+		t.Fatalf("podResults length = %d, want 1", len(podResults))
+	}
+	result := podResults[0].(map[string]any)
+	if result["success"] != false {
+		t.Errorf("success = %v, want false", result["success"])
+	}
+	if result["message"] != "1/2 paths succeeded" {
+		t.Errorf("message = %v, want 1/2 paths succeeded", result["message"])
+	}
+	pathResults, ok := result["pathResults"].([]any)
+	if !ok {
+		t.Fatalf("pathResults has type %T, want []any", result["pathResults"])
+	}
+	if len(pathResults) != 2 {
+		t.Fatalf("pathResults length = %d, want 2", len(pathResults))
+	}
+	failed := pathResults[1].(map[string]any)
+	if failed["path"] != "/fail" {
+		t.Errorf("failed path = %v, want /fail", failed["path"])
+	}
+	if failed["success"] != false {
+		t.Errorf("failed path success = %v, want false", failed["success"])
+	}
+	msg, _ := failed["message"].(string)
+	if !strings.Contains(msg, "HTTP 500") {
+		t.Errorf("failure message = %q, want HTTP 500", msg)
+	}
+}
+
+func TestProcessExisting_ProcessesMatchingGatewayOnly(t *testing.T) {
+	var gotPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	matching := makeVarnishCacheInvalidation("inv-matching", "default", "uid-matching", "purge", "example.com",
+		[]string{"/match"}, "my-gw", "default")
+	otherGateway := makeVarnishCacheInvalidation("inv-other", "default", "uid-other", "purge", "example.com",
+		[]string{"/other"}, "other-gw", "default")
+	dynClient := newMemoryDynamicClient(matching, otherGateway)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	if err := w.processExisting(context.Background()); err != nil {
+		t.Fatalf("processExisting returned error: %v", err)
+	}
+
+	if len(gotPaths) != 1 || gotPaths[0] != "/match" {
+		t.Fatalf("got paths = %#v, want only /match", gotPaths)
+	}
+	gotMatching := getStoredInvalidation(t, dynClient, "default", "inv-matching")
+	status := requireNestedMap(t, gotMatching.Object, "status")
+	if phase := status["phase"]; phase != "Complete" {
+		t.Fatalf("matching phase = %v, want Complete", phase)
+	}
+	gotOther := getStoredInvalidation(t, dynClient, "default", "inv-other")
+	if _, found, err := unstructured.NestedMap(gotOther.Object, "status"); err != nil || found {
+		t.Fatalf("other gateway status found=%v err=%v, want no status", found, err)
+	}
+}
+
 // makeVarnishCacheInvalidation is a helper to build an unstructured VarnishCacheInvalidation object.
 func makeVarnishCacheInvalidation(name, ns, uid, invType, hostname string, paths []string, gwName, gwNS string) *unstructured.Unstructured {
 	// Convert []string to []any for unstructured
@@ -674,6 +997,164 @@ func makeVarnishCacheInvalidation(name, ns, uid, invType, hostname string, paths
 			},
 		},
 	}
+}
+
+func getStoredInvalidation(t *testing.T, dynClient *memoryDynamicClient, namespace, name string) *unstructured.Unstructured {
+	t.Helper()
+	obj, err := dynClient.Resource(varnishCacheInvalidationGVR).Namespace(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get stored invalidation %s/%s: %v", namespace, name, err)
+	}
+	return obj
+}
+
+func requireNestedMap(t *testing.T, obj map[string]any, fields ...string) map[string]any {
+	t.Helper()
+	m, found, err := unstructured.NestedMap(obj, fields...)
+	if err != nil {
+		t.Fatalf("NestedMap(%v): %v", fields, err)
+	}
+	if !found {
+		t.Fatalf("NestedMap(%v) not found", fields)
+	}
+	return m
+}
+
+func requireNestedSlice(t *testing.T, obj map[string]any, fields ...string) []any {
+	t.Helper()
+	s, found, err := unstructured.NestedSlice(obj, fields...)
+	if err != nil {
+		t.Fatalf("NestedSlice(%v): %v", fields, err)
+	}
+	if !found {
+		t.Fatalf("NestedSlice(%v) not found", fields)
+	}
+	return s
+}
+
+type memoryDynamicClient struct {
+	mu                sync.Mutex
+	objects           map[string]*unstructured.Unstructured
+	updateStatusCount int
+}
+
+var _ dynamic.Interface = (*memoryDynamicClient)(nil)
+
+func newMemoryDynamicClient(objs ...*unstructured.Unstructured) *memoryDynamicClient {
+	client := &memoryDynamicClient{objects: make(map[string]*unstructured.Unstructured)}
+	for _, obj := range objs {
+		client.objects[objectKey(obj.GetNamespace(), obj.GetName())] = obj.DeepCopy()
+	}
+	return client
+}
+
+func (c *memoryDynamicClient) Resource(resource schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
+	return &memoryDynamicResource{client: c, resource: resource}
+}
+
+type memoryDynamicResource struct {
+	client    *memoryDynamicClient
+	resource  schema.GroupVersionResource
+	namespace string
+}
+
+var _ dynamic.NamespaceableResourceInterface = (*memoryDynamicResource)(nil)
+
+func (r *memoryDynamicResource) Namespace(namespace string) dynamic.ResourceInterface {
+	return &memoryDynamicResource{
+		client:    r.client,
+		resource:  r.resource,
+		namespace: namespace,
+	}
+}
+
+func (r *memoryDynamicResource) Create(ctx context.Context, obj *unstructured.Unstructured, options metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	return nil, fmt.Errorf("Create not implemented")
+}
+
+func (r *memoryDynamicResource) Update(ctx context.Context, obj *unstructured.Unstructured, options metav1.UpdateOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	return nil, fmt.Errorf("Update not implemented")
+}
+
+func (r *memoryDynamicResource) UpdateStatus(ctx context.Context, obj *unstructured.Unstructured, options metav1.UpdateOptions) (*unstructured.Unstructured, error) {
+	if err := r.checkResource(); err != nil {
+		return nil, err
+	}
+	key := objectKey(r.namespace, obj.GetName())
+	r.client.mu.Lock()
+	defer r.client.mu.Unlock()
+	if _, ok := r.client.objects[key]; !ok {
+		return nil, fmt.Errorf("%s not found", key)
+	}
+	stored := obj.DeepCopy()
+	stored.SetNamespace(r.namespace)
+	r.client.objects[key] = stored
+	r.client.updateStatusCount++
+	return stored.DeepCopy(), nil
+}
+
+func (r *memoryDynamicResource) Delete(ctx context.Context, name string, options metav1.DeleteOptions, subresources ...string) error {
+	return fmt.Errorf("Delete not implemented")
+}
+
+func (r *memoryDynamicResource) DeleteCollection(ctx context.Context, options metav1.DeleteOptions, listOptions metav1.ListOptions) error {
+	return fmt.Errorf("DeleteCollection not implemented")
+}
+
+func (r *memoryDynamicResource) Get(ctx context.Context, name string, options metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	if err := r.checkResource(); err != nil {
+		return nil, err
+	}
+	r.client.mu.Lock()
+	defer r.client.mu.Unlock()
+	obj, ok := r.client.objects[objectKey(r.namespace, name)]
+	if !ok {
+		return nil, fmt.Errorf("%s/%s not found", r.namespace, name)
+	}
+	return obj.DeepCopy(), nil
+}
+
+func (r *memoryDynamicResource) List(ctx context.Context, opts metav1.ListOptions) (*unstructured.UnstructuredList, error) {
+	if err := r.checkResource(); err != nil {
+		return nil, err
+	}
+	r.client.mu.Lock()
+	defer r.client.mu.Unlock()
+	list := &unstructured.UnstructuredList{}
+	for _, obj := range r.client.objects {
+		if r.namespace != "" && obj.GetNamespace() != r.namespace {
+			continue
+		}
+		list.Items = append(list.Items, *obj.DeepCopy())
+	}
+	return list, nil
+}
+
+func (r *memoryDynamicResource) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	return nil, fmt.Errorf("Watch not implemented")
+}
+
+func (r *memoryDynamicResource) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, options metav1.PatchOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	return nil, fmt.Errorf("Patch not implemented")
+}
+
+func (r *memoryDynamicResource) Apply(ctx context.Context, name string, obj *unstructured.Unstructured, options metav1.ApplyOptions, subresources ...string) (*unstructured.Unstructured, error) {
+	return nil, fmt.Errorf("Apply not implemented")
+}
+
+func (r *memoryDynamicResource) ApplyStatus(ctx context.Context, name string, obj *unstructured.Unstructured, options metav1.ApplyOptions) (*unstructured.Unstructured, error) {
+	return nil, fmt.Errorf("ApplyStatus not implemented")
+}
+
+func (r *memoryDynamicResource) checkResource() error {
+	if r.resource != varnishCacheInvalidationGVR {
+		return fmt.Errorf("unexpected resource %s, want %s", r.resource, varnishCacheInvalidationGVR)
+	}
+	return nil
+}
+
+func objectKey(namespace, name string) string {
+	return namespace + "/" + name
 }
 
 // Test that the GVR constant is set correctly.
