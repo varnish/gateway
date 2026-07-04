@@ -45,7 +45,6 @@ WORKDIR /build
 COPY ghost/Cargo.toml ghost/Cargo.lock* ./
 COPY ghost/build.rs ./build.rs
 COPY ghost/src ./src
-COPY ghost/patches ./patches
 
 # Build ghost vmod
 RUN cargo build --release
