@@ -220,3 +220,62 @@ client c5 {
     expect resp.status == 301
     expect resp.http.Location == "https://new.example.com/v2/api?token=abc"
 } -run
+
+# Test 6: Extended status codes - 303 and 308
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+  "version": 2,
+  "vhosts": {
+    "seeother.example.com": {
+      "routes": [
+        {
+          "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 1}]}],
+          "priority": 100,
+          "filters": {
+            "request_redirect": {
+              "scheme": "https",
+              "status_code": 303
+            }
+          }
+        }
+      ]
+    },
+    "permanent.example.com": {
+      "routes": [
+        {
+          "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 1}]}],
+          "priority": 100,
+          "filters": {
+            "request_redirect": {
+              "scheme": "https",
+              "status_code": 308
+            }
+          }
+        }
+      ]
+    }
+  }
+}
+EOF
+}
+
+client c_reload6 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c6_303 {
+    txreq -url "/users" -hdr "Host: seeother.example.com"
+    rxresp
+    expect resp.status == 303
+    expect resp.http.Location == "https://seeother.example.com/users"
+} -run
+
+client c6_308 {
+    txreq -url "/users" -hdr "Host: permanent.example.com"
+    rxresp
+    expect resp.status == 308
+    expect resp.http.Location == "https://permanent.example.com/users"
+} -run
