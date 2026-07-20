@@ -69,10 +69,10 @@ docker build -f docker/chaperone.Dockerfile -t varnish-gateway .
 
 ```bash
 # Unit tests (work in debug and release mode)
-cargo test --lib -- --skip run_vtc_tests
+cargo test --lib -- --skip vtc_
 
 # VTC integration tests (must use release mode - see DEBUG_MODE_LIMITATIONS.md)
-cargo test --release run_vtc_tests
+cargo test --release vtc_
 
 # All tests in release mode (recommended)
 cargo test --release
