@@ -156,7 +156,7 @@ shell {
           "filters": {
             "request_redirect": {
               "replace_full_path": "/new/path",
-              "status_code": 301
+              "status_code": 303
             }
           }
         }
@@ -176,7 +176,7 @@ client c_reload4 {
 client c4 {
     txreq -url "/old/path?foo=bar" -hdr "Host: api.example.com"
     rxresp
-    expect resp.status == 301
+    expect resp.status == 303
     expect resp.http.Location == "http://api.example.com/new/path?foo=bar"
 } -run
 
@@ -197,7 +197,7 @@ shell {
               "hostname": "new.example.com",
               "port": 443,
               "replace_full_path": "/v2/api",
-              "status_code": 301
+              "status_code": 308
             }
           }
         }
@@ -217,6 +217,7 @@ client c_reload5 {
 client c5 {
     txreq -url "/v1/api?token=abc" -hdr "Host: old.example.com:8080"
     rxresp
-    expect resp.status == 301
+    expect resp.status == 308
     expect resp.http.Location == "https://new.example.com/v2/api?token=abc"
 } -run
+
