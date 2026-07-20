@@ -4,7 +4,7 @@
 Release: {{ .Release.Name }}
 Namespace: {{ include "varnish-gateway.namespace" . }}
 
-Chaperone image: {{ .Values.chaperone.image.repository }}:{{ .Values.chaperone.image.tag | default .Chart.AppVersion }}
+Chaperone image: {{ include "varnish-gateway.chaperoneImage" . }}
 {{- with (.Values.chaperone).varnishVersion }}
 Bundled Varnish: {{ . }}
   → If you load custom VMODs, they must be built against this Varnish version.

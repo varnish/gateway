@@ -74,9 +74,14 @@ Create the name of the service account to use
 
 {{/*
 Operator image
+
+The default tag is the chart appVersion normalized to the registry's
+v-prefixed form: Chart.yaml checked into the repo carries appVersion
+without the "v" (e.g. "0.22.0") while published images are tagged
+"v0.22.0". An explicit .Values tag is passed through untouched.
 */}}
 {{- define "varnish-gateway.operatorImage" -}}
-{{- $tag := .Values.operator.image.tag | default .Chart.AppVersion }}
+{{- $tag := .Values.operator.image.tag | default (print "v" (.Chart.AppVersion | trimPrefix "v")) }}
 {{- printf "%s:%s" .Values.operator.image.repository $tag }}
 {{- end }}
 
@@ -84,7 +89,7 @@ Operator image
 Chaperone image
 */}}
 {{- define "varnish-gateway.chaperoneImage" -}}
-{{- $tag := .Values.chaperone.image.tag | default .Chart.AppVersion }}
+{{- $tag := .Values.chaperone.image.tag | default (print "v" (.Chart.AppVersion | trimPrefix "v")) }}
 {{- printf "%s:%s" .Values.chaperone.image.repository $tag }}
 {{- end }}
 

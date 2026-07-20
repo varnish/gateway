@@ -2,9 +2,9 @@
 
 ## Version Management
 
-Chart versions are managed by the `.version` file at the repository root. The `Chart.yaml` file contains a placeholder version (0.0.0-dev) that is overridden at package time using `helm package --version` and `--app-version` flags.
+Chart versions are managed by the `.version` file at the repository root, which is the single source of truth for all component versions. `go tool bump` rewrites `charts/varnish-gateway/Chart.yaml` on every bump: `version` is strict SemVer without a `v` prefix (a Helm requirement) and `appVersion` carries the same value.
 
-This ensures the `.version` file is the single source of truth for all component versions.
+Docker image tags in ghcr.io carry the `v` prefix (e.g. `gateway-operator:v0.22.0`). The chart's image helpers in `templates/_helpers.tpl` normalize the default tag derived from `appVersion` to that form, so rendering or installing from a repo checkout produces pullable images. At package time, CI additionally passes `helm package --version`/`--app-version` so the published chart embeds the exact release version.
 
 ## Automated Publishing
 
