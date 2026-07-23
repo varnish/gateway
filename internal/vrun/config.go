@@ -11,7 +11,7 @@ import (
 type Config struct {
 	// Required - used internally by BuildArgs
 	WorkDir   string // Secret file path is derived from this
-	AdminPort int    // -M localhost:<port>
+	AdminPort int    // -M 127.0.0.1:<port>
 
 	// Optional
 	VarnishDir string // -n argument, empty for default
@@ -48,7 +48,12 @@ func BuildArgs(cfg *Config) ([]string, error) {
 
 	secretPath := filepath.Join(cfg.WorkDir, "secret")
 	args = append(args, "-S", secretPath)
-	args = append(args, "-M", fmt.Sprintf("localhost:%d", cfg.AdminPort))
+	// Dial IPv4 loopback explicitly (not "localhost") so this matches the
+	// address the varnishadm reverse-mode server binds (127.0.0.1). Using
+	// "localhost" would risk resolving to ::1 while the server listens on
+	// 127.0.0.1, breaking the admin channel; the literal keeps both sides in
+	// agreement and the channel pod-local.
+	args = append(args, "-M", fmt.Sprintf("127.0.0.1:%d", cfg.AdminPort))
 
 	if cfg.VarnishDir != "" {
 		args = append(args, "-n", cfg.VarnishDir)

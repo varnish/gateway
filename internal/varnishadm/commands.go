@@ -1,8 +1,11 @@
 package varnishadm
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -46,10 +49,51 @@ func (v *Server) VCLLoad(name, path string) (VarnishResponse, error) {
 	return v.Exec(cmd)
 }
 
-// VCLInline loads VCL configuration inline (without a file)
+// VCLInline loads VCL configuration inline (without a file).
+//
+// The VCL is delivered via a Varnish CLI heredoc. Using a fixed delimiter
+// (e.g. "EOF") is unsafe: user VCL is merged verbatim, so a line in the VCL
+// that is exactly the delimiter would close the heredoc early and let the
+// following lines execute as CLI commands (stop, param.set cc_command, ...).
+// We generate an unguessable per-call delimiter from crypto/rand so no
+// attacker-supplied VCL can predict and inject it, and additionally reject
+// (rather than silently mis-parse) the astronomically unlikely case where the
+// VCL still contains a line equal to the chosen delimiter.
 func (v *Server) VCLInline(name, vcl string) (VarnishResponse, error) {
-	cmd := fmt.Sprintf("vcl.inline %s << EOF\n%s\nEOF", name, vcl)
+	delimiter, err := heredocDelimiter()
+	if err != nil {
+		return VarnishResponse{}, fmt.Errorf("heredocDelimiter(): %w", err)
+	}
+	// Belt-and-suspenders: guarantee the delimiter cannot appear as a standalone
+	// line in the payload. With 128 bits of randomness this should never fire.
+	if containsLine(vcl, delimiter) {
+		return VarnishResponse{}, fmt.Errorf("VCLInline: generated heredoc delimiter %q collides with a line in the VCL payload", delimiter)
+	}
+	cmd := fmt.Sprintf("vcl.inline %s << %s\n%s\n%s", name, delimiter, vcl, delimiter)
 	return v.Exec(cmd)
+}
+
+// heredocDelimiter returns an unguessable heredoc delimiter word of the form
+// "EOF_<32 hex chars>" backed by 128 bits of cryptographic randomness. The
+// Varnish CLI accepts any single word as the heredoc terminator.
+func heredocDelimiter() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("rand.Read: %w", err)
+	}
+	return "EOF_" + hex.EncodeToString(b[:]), nil
+}
+
+// containsLine reports whether s contains a line exactly equal to line.
+// Both "\n" and "\r\n" line endings are considered so a trailing CR cannot
+// smuggle a delimiter past the check.
+func containsLine(s, line string) bool {
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimRight(l, "\r") == line {
+			return true
+		}
+	}
+	return false
 }
 
 // VCLUse switches to using the specified VCL configuration

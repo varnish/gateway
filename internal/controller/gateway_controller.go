@@ -18,12 +18,14 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -1735,57 +1737,87 @@ func gatewayHasCrossNSCertRefTo(gateway *gatewayv1.Gateway, targetNamespace stri
 	return false
 }
 
+// gatewayRequestsForRoute returns reconcile requests for the Gateways (managed by
+// our GatewayClass) referenced by the given route's parentRefs, deduplicated.
+func (r *GatewayReconciler) gatewayRequestsForRoute(ctx context.Context, route *gatewayv1.HTTPRoute) []ctrl.Request {
+	var requests []ctrl.Request
+	seen := make(map[types.NamespacedName]bool)
+
+	for _, parentRef := range route.Spec.ParentRefs {
+		// Skip non-Gateway refs
+		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+			continue
+		}
+		if parentRef.Group != nil && *parentRef.Group != gatewayv1.Group(gatewayv1.GroupName) {
+			continue
+		}
+
+		// Determine namespace
+		namespace := route.Namespace
+		if parentRef.Namespace != nil {
+			namespace = string(*parentRef.Namespace)
+		}
+
+		nn := types.NamespacedName{
+			Name:      string(parentRef.Name),
+			Namespace: namespace,
+		}
+		if seen[nn] {
+			continue
+		}
+		seen[nn] = true
+
+		// Verify the Gateway uses our GatewayClass before enqueuing
+		var gw gatewayv1.Gateway
+		if err := r.Get(ctx, nn, &gw); err != nil {
+			continue
+		}
+		if !isOurGatewayClass(ctx, r.Client, string(gw.Spec.GatewayClassName)) {
+			continue
+		}
+
+		requests = append(requests, ctrl.Request{NamespacedName: nn})
+	}
+
+	return requests
+}
+
 // enqueueGatewaysForHTTPRoute returns an EventHandler that enqueues Gateways
-// referenced by a changed HTTPRoute. This allows the Gateway controller to
-// update AttachedRoutes counts when routes are created, updated, or deleted.
+// referenced by a changed HTTPRoute. This allows the Gateway controller to update
+// AttachedRoutes counts when routes are created, updated, or deleted.
+//
+// On update it enqueues BOTH the old and new parent Gateways. Without the old
+// parents, a route that changes its parentRefs (edited sectionName, moved from
+// Gateway A to Gateway B, or dropped to zero) would leave the previous Gateway
+// never reconciled — its AttachedRoutes count (and, via the HTTPRoute controller,
+// its routing.json) would stay stale indefinitely.
 func (r *GatewayReconciler) enqueueGatewaysForHTTPRoute() handler.EventHandler {
-	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+	enqueue := func(ctx context.Context, obj client.Object, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
 		route, ok := obj.(*gatewayv1.HTTPRoute)
 		if !ok {
-			return nil
+			return
 		}
-
-		var requests []ctrl.Request
-		seen := make(map[types.NamespacedName]bool)
-
-		for _, parentRef := range route.Spec.ParentRefs {
-			// Skip non-Gateway refs
-			if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
-				continue
-			}
-			if parentRef.Group != nil && *parentRef.Group != gatewayv1.Group(gatewayv1.GroupName) {
-				continue
-			}
-
-			// Determine namespace
-			namespace := route.Namespace
-			if parentRef.Namespace != nil {
-				namespace = string(*parentRef.Namespace)
-			}
-
-			nn := types.NamespacedName{
-				Name:      string(parentRef.Name),
-				Namespace: namespace,
-			}
-			if seen[nn] {
-				continue
-			}
-			seen[nn] = true
-
-			// Verify the Gateway uses our GatewayClass before enqueuing
-			var gw gatewayv1.Gateway
-			if err := r.Get(ctx, nn, &gw); err != nil {
-				continue
-			}
-			if !isOurGatewayClass(ctx, r.Client, string(gw.Spec.GatewayClassName)) {
-				continue
-			}
-
-			requests = append(requests, ctrl.Request{NamespacedName: nn})
+		for _, req := range r.gatewayRequestsForRoute(ctx, route) {
+			q.Add(req)
 		}
+	}
 
-		return requests
-	})
+	return handler.Funcs{
+		CreateFunc: func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+			enqueue(ctx, e.Object, q)
+		},
+		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+			// Enqueue old and new parents; the workqueue deduplicates overlaps.
+			enqueue(ctx, e.ObjectOld, q)
+			enqueue(ctx, e.ObjectNew, q)
+		},
+		DeleteFunc: func(ctx context.Context, e event.DeleteEvent, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+			enqueue(ctx, e.Object, q)
+		},
+		GenericFunc: func(ctx context.Context, e event.GenericEvent, q workqueue.TypedRateLimitingInterface[ctrl.Request]) {
+			enqueue(ctx, e.Object, q)
+		},
+	}
 }
 
 // enqueueGatewaysForBackendTLSPolicy returns an EventHandler that enqueues

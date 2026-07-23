@@ -60,9 +60,38 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
 	}
-	// 2. Skip if no parentRefs
+	// Capture the Gateways this route was previously programmed onto (from its
+	// existing status) BEFORE we mutate status below. Comparing against the
+	// current parentRefs lets us regenerate routing.json for Gateways the route
+	// has since detached from (edited parentRefs, moved A→B, or dropped to zero).
+	previousGateways := gatewaysFromRouteStatus(&route)
+	currentGateways := gatewaysFromRouteSpec(&route)
+
+	// 2. Handle routes with no parentRefs.
 	if len(route.Spec.ParentRefs) == 0 {
-		log.Debug("HTTPRoute has no parentRefs, skipping")
+		log.Debug("HTTPRoute has no parentRefs")
+		// The route detached from every parent. Regenerate any Gateways we
+		// previously programmed it onto so its stale routing.json entries are
+		// removed. currentGateways is empty, so all previous parents are detached.
+		if err := r.regenerateDetachedGateways(ctx, previousGateways, currentGateways); err != nil {
+			log.Error("failed to regenerate detached gateways", "error", err)
+			return ctrl.Result{}, err
+		}
+		// Drop our now-stale status.Parents entries (currentGateways is empty).
+		if len(previousGateways) > 0 {
+			pruneDetachedRouteParents(&route, currentGateways)
+			routeStatus := route.Status
+			if err := r.Get(ctx, req.NamespacedName, &route); err != nil {
+				if apierrors.IsNotFound(err) {
+					return ctrl.Result{}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf("r.Get (re-fetch for status): %w", err)
+			}
+			route.Status = routeStatus
+			if err := r.Status().Update(ctx, &route); err != nil {
+				return ctrl.Result{}, fmt.Errorf("r.Status().Update: %w", err)
+			}
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -80,6 +109,15 @@ func (r *HTTPRouteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			processErr = err
 		}
 	}
+
+	// 3b. Regenerate routing.json for Gateways the route has detached from
+	// (present in the previous status but not in the current parentRefs), and
+	// prune their stale status.Parents entries.
+	if err := r.regenerateDetachedGateways(ctx, previousGateways, currentGateways); err != nil {
+		log.Error("failed to regenerate detached gateways", "error", err)
+		processErr = err
+	}
+	pruneDetachedRouteParents(&route, currentGateways)
 
 	// 4. Update HTTPRoute status
 	// Re-fetch the route to get the latest resourceVersion before updating status.
@@ -300,71 +338,125 @@ func listAcceptedRoutesForGateway(ctx context.Context, c client.Client, gateway 
 	return attached, nil
 }
 
+// parentRefTargetsGateway reports whether a single parentRef references the given
+// Gateway (correct Kind/Group, name, and namespace). It does NOT apply
+// sectionName/port or AllowedRoutes policy — that is layered on by callers.
+func parentRefTargetsGateway(parentRef *gatewayv1.ParentReference, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) bool {
+	// Skip non-Gateway refs
+	if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
+		return false
+	}
+	// Check group (default to gateway.networking.k8s.io)
+	if parentRef.Group != nil && *parentRef.Group != gatewayv1.Group(gatewayv1.GroupName) {
+		return false
+	}
+	// Check name
+	if string(parentRef.Name) != gateway.Name {
+		return false
+	}
+	// Check namespace (default to route's namespace)
+	refNamespace := route.Namespace
+	if parentRef.Namespace != nil {
+		refNamespace = string(*parentRef.Namespace)
+	}
+	return refNamespace == gateway.Namespace
+}
+
 // routeAttachedToGateway checks if a route references the given Gateway (package-level).
 func routeAttachedToGateway(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) bool {
-	for _, parentRef := range route.Spec.ParentRefs {
-		// Skip non-Gateway refs
-		if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
-			continue
+	for i := range route.Spec.ParentRefs {
+		if parentRefTargetsGateway(&route.Spec.ParentRefs[i], route, gateway) {
+			return true
 		}
-
-		// Check name
-		if string(parentRef.Name) != gateway.Name {
-			continue
-		}
-
-		// Check namespace
-		refNamespace := route.Namespace
-		if parentRef.Namespace != nil {
-			refNamespace = string(*parentRef.Namespace)
-		}
-		if refNamespace != gateway.Namespace {
-			continue
-		}
-
-		// Check group (default to gateway.networking.k8s.io)
-		if parentRef.Group != nil && *parentRef.Group != gatewayv1.Group(gatewayv1.GroupName) {
-			continue
-		}
-
-		return true
 	}
 	return false
 }
 
-// isRouteAllowedByGateway checks if the route is allowed by any of the Gateway's listeners (package-level).
-// A route is allowed if at least one listener:
-// 1. Allows the route's namespace (per AllowedRoutes policy)
-// 2. Has hostname intersection with the route (or either has no hostname)
-// Returns (true, "", "") if any listener allows the route, or (false, reasonCode, message) if none do.
-// The reasonCode distinguishes between NotAllowedByListeners and NoMatchingListenerHostname.
+// listenerAttachment records the outcome of computing which of a Gateway's
+// listeners a route validly attaches to.
+type listenerAttachment struct {
+	// listenerNames is the deduplicated set of listener names the route attaches
+	// to: for each parentRef, candidate listeners are restricted by sectionName/port,
+	// then MUST individually satisfy the listener's AllowedRoutes namespace policy
+	// AND have a hostname intersection with the route. This is the union of passing
+	// (parentRef × listener) pairs.
+	listenerNames []string
+	// namespaceAllowed is true if at least one candidate listener allowed the
+	// route's namespace (even if the hostname did not intersect). It distinguishes
+	// NotAllowedByListeners (no listener allowed the namespace) from
+	// NoMatchingListenerHostname (namespace allowed, hostname mismatch).
+	namespaceAllowed bool
+}
+
+// computeListenerAttachment computes, per listener, whether a route validly
+// attaches to a Gateway. Unlike a whole-Gateway "any listener allows it" check,
+// this enforces the AllowedRoutes namespace policy AND hostname intersection on
+// the SAME listener, restricted per parentRef by sectionName/port. The resulting
+// listenerNames set is the authoritative attachment used both for the Accepted
+// status and for the socket set programmed into routing.json — closing the
+// per-listener namespace bypass where a foreign-namespace route could be served on
+// a from:Same listener merely because some other listener allowed it.
+func computeListenerAttachment(ctx context.Context, c client.Reader, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) listenerAttachment {
+	var att listenerAttachment
+	seen := make(map[string]bool)
+
+	for i := range route.Spec.ParentRefs {
+		parentRef := &route.Spec.ParentRefs[i]
+		if !parentRefTargetsGateway(parentRef, route, gateway) {
+			continue
+		}
+
+		for j := range gateway.Spec.Listeners {
+			listener := &gateway.Spec.Listeners[j]
+
+			// Restrict candidate listeners by this parentRef's sectionName/port.
+			if parentRef.SectionName != nil && string(listener.Name) != string(*parentRef.SectionName) {
+				continue
+			}
+			if parentRef.Port != nil && listener.Port != *parentRef.Port {
+				continue
+			}
+
+			// Namespace policy MUST hold on this specific listener.
+			allowed, err := listenerAllowsRouteNamespace(ctx, c, route, gateway, *listener)
+			if err != nil || !allowed {
+				continue
+			}
+			att.namespaceAllowed = true
+
+			// Hostname intersection MUST hold on this same listener.
+			if !hostnamesIntersect(route.Spec.Hostnames, listener.Hostname) {
+				continue
+			}
+
+			if !seen[string(listener.Name)] {
+				seen[string(listener.Name)] = true
+				att.listenerNames = append(att.listenerNames, string(listener.Name))
+			}
+		}
+	}
+
+	return att
+}
+
+// isRouteAllowedByGateway checks if the route validly attaches to at least one of
+// the Gateway's listeners (package-level). Per-listener, a route must satisfy BOTH
+// the AllowedRoutes namespace policy AND a hostname intersection on the same
+// listener. Returns (true, "", "") when at least one listener passes, or
+// (false, reasonCode, message) otherwise. The reasonCode distinguishes between
+// NotAllowedByListeners and NoMatchingListenerHostname.
 func isRouteAllowedByGateway(ctx context.Context, c client.Reader, route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) (bool, string, string) {
 	if len(gateway.Spec.Listeners) == 0 {
 		return false, string(gatewayv1.RouteReasonNotAllowedByListeners), "Gateway has no listeners"
 	}
 
-	namespaceAllowed := false
-	for _, listener := range gateway.Spec.Listeners {
-		// Check namespace policy
-		allowed, err := listenerAllowsRouteNamespace(ctx, c, route, gateway, listener)
-		if err != nil {
-			continue
-		}
-		if !allowed {
-			continue
-		}
-		namespaceAllowed = true
-
-		// Check hostname intersection
-		if !hostnamesIntersect(route.Spec.Hostnames, listener.Hostname) {
-			continue
-		}
-
+	att := computeListenerAttachment(ctx, c, route, gateway)
+	if len(att.listenerNames) > 0 {
 		return true, "", ""
 	}
 
-	if namespaceAllowed {
-		// Namespace was allowed by at least one listener, but hostnames didn't intersect
+	if att.namespaceAllowed {
+		// A listener allowed the namespace, but no allowed listener's hostname intersected.
 		return false, string(gatewayv1.RouteReasonNoMatchingListenerHostname),
 			fmt.Sprintf("No matching listener hostname on Gateway %s/%s", gateway.Namespace, gateway.Name)
 	}
@@ -409,48 +501,60 @@ func listenerAllowsRouteNamespace(ctx context.Context, c client.Reader, route *g
 }
 
 // effectiveHostnames computes the set of effective hostnames for a route against
-// the gateway's listeners filtered by sectionName and/or port. This is the intersection of
-// route hostnames with listener hostnames, producing the most specific hostname
-// from each match pair.
+// the gateway's listeners filtered by sectionName and/or port. This is the
+// intersection of route hostnames with listener hostnames, producing the most
+// specific hostname from each match pair.
+//
 // If sectionName is non-nil, only listeners matching that name are considered.
 // If port is non-nil, only listeners matching that port are considered.
-func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, sectionName *gatewayv1.SectionName, port *gatewayv1.PortNumber) []gatewayv1.Hostname {
+// If allowedNames is non-nil, only listeners whose name is in the set are
+// considered — this restricts hostnames to listeners that actually passed the
+// per-listener namespace policy, keeping the emitted hostname set consistent with
+// the programmed socket set.
+//
+// The second return value reports whether the match is a genuine catch-all: a
+// route with no hostnames attaching to a listener with no hostname. This is
+// distinct from "no hostnames intersected" (empty slice, false) and from
+// "sectionName/port/allowedNames matched no listener" (empty slice, false); those
+// cases mean this parentRef contributes nothing, NOT that the route serves all
+// hostnames.
+func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, sectionName *gatewayv1.SectionName, port *gatewayv1.PortNumber, allowedNames map[string]bool) ([]gatewayv1.Hostname, bool) {
 	routeHostnames := route.Spec.Hostnames
 
-	// Collect listener hostnames, filtered by sectionName and/or port if specified
+	// Collect listener hostnames, filtered by sectionName, port, and allowedNames.
 	var listenerHostnames []*gatewayv1.Hostname
 	for i := range gateway.Spec.Listeners {
-		if sectionName != nil && string(gateway.Spec.Listeners[i].Name) != string(*sectionName) {
+		l := &gateway.Spec.Listeners[i]
+		if sectionName != nil && string(l.Name) != string(*sectionName) {
 			continue
 		}
-		if port != nil && gateway.Spec.Listeners[i].Port != *port {
+		if port != nil && l.Port != *port {
 			continue
 		}
-		listenerHostnames = append(listenerHostnames, gateway.Spec.Listeners[i].Hostname)
+		if allowedNames != nil && !allowedNames[string(l.Name)] {
+			continue
+		}
+		listenerHostnames = append(listenerHostnames, l.Hostname)
 	}
 
-	// If route has no hostnames and any listener has no hostname, result is catch-all
-	// If route has no hostnames, effective hostnames are the listener hostnames
+	// Route with no hostnames: effective hostnames are the listener hostnames,
+	// unless a candidate listener also has no hostname — then it is a genuine
+	// catch-all and the route serves all hostnames.
 	if len(routeHostnames) == 0 {
 		seen := make(map[string]bool)
 		var result []gatewayv1.Hostname
 		for _, lh := range listenerHostnames {
 			if lh == nil {
-				// Catch-all: route with no hostnames + listener with no hostname
-				if !seen["*"] {
-					seen["*"] = true
-					// Return empty to signal catch-all (CollectHTTPRouteBackends handles this)
-					return nil
-				}
-			} else {
-				h := string(*lh)
-				if !seen[h] {
-					seen[h] = true
-					result = append(result, gatewayv1.Hostname(h))
-				}
+				// Genuine catch-all: route with no hostnames + listener with no hostname.
+				return nil, true
+			}
+			h := string(*lh)
+			if !seen[h] {
+				seen[h] = true
+				result = append(result, gatewayv1.Hostname(h))
 			}
 		}
-		return result
+		return result, false
 	}
 
 	// Route has hostnames - intersect each with each listener hostname
@@ -476,7 +580,7 @@ func effectiveHostnames(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, 
 		}
 	}
 
-	return result
+	return result, false
 }
 
 // computeEffectiveHostname returns the most specific hostname from the intersection
@@ -523,40 +627,52 @@ func computeEffectiveHostname(routeHostname, listenerHostname string) string {
 }
 
 // filterRouteHostnames returns copies of routes with hostnames filtered to only
-// those that intersect with the gateway's listeners. Each route's parentRefs are
-// inspected to determine which listener(s) it targets via sectionName, so that
-// a route targeting listener-1 only gets hostnames from that listener.
-func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) []gatewayv1.HTTPRoute {
+// those that intersect with the gateway's listeners the route validly attaches to.
+// Each route's parentRefs are inspected to determine which listener(s) it targets
+// via sectionName/port, and attachments restricts consideration to listeners that
+// passed the per-listener namespace policy — so a route only gets hostnames from
+// listeners it is actually permitted (and programmed) to serve on.
+//
+// attachments maps a route key ("namespace/name") to its computed listener
+// attachment. A route whose key is absent falls back to no allowed-name filtering.
+func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, attachments map[string]listenerAttachment) []gatewayv1.HTTPRoute {
 	filtered := make([]gatewayv1.HTTPRoute, 0, len(routes))
 	for i := range routes {
+		key := routes[i].Namespace + "/" + routes[i].Name
+
+		// Restrict to listeners that passed the per-listener namespace policy.
+		var allowedNames map[string]bool
+		if att, ok := attachments[key]; ok {
+			allowedNames = make(map[string]bool, len(att.listenerNames))
+			for _, n := range att.listenerNames {
+				allowedNames[n] = true
+			}
+		}
+
 		// Collect effective hostnames across all parentRefs targeting this gateway.
 		// A route may have multiple parentRefs with different sectionNames.
 		seen := make(map[string]bool)
 		var allEffective []gatewayv1.Hostname
 		isCatchAll := false
 
-		for _, parentRef := range routes[i].Spec.ParentRefs {
-			// Skip non-Gateway refs
-			if parentRef.Kind != nil && *parentRef.Kind != "Gateway" {
-				continue
-			}
-			// Check this parentRef targets the given gateway
-			if string(parentRef.Name) != gateway.Name {
-				continue
-			}
-			refNS := routes[i].Namespace
-			if parentRef.Namespace != nil {
-				refNS = string(*parentRef.Namespace)
-			}
-			if refNS != gateway.Namespace {
+		for j := range routes[i].Spec.ParentRefs {
+			parentRef := &routes[i].Spec.ParentRefs[j]
+			if !parentRefTargetsGateway(parentRef, &routes[i], gateway) {
 				continue
 			}
 
-			effective := effectiveHostnames(&routes[i], gateway, parentRef.SectionName, parentRef.Port)
-			if effective == nil {
-				// Catch-all from this parentRef
+			effective, catchAll := effectiveHostnames(&routes[i], gateway, parentRef.SectionName, parentRef.Port, allowedNames)
+			if catchAll {
+				// Genuine catch-all: the route serves all hostnames. This is a
+				// superset of anything other parentRefs could contribute.
 				isCatchAll = true
 				break
+			}
+			if len(effective) == 0 {
+				// No hostname intersection from this parentRef (or it matched no
+				// permitted listener). It contributes nothing — skip it, but do NOT
+				// discard hostnames contributed by other parentRefs.
+				continue
 			}
 			// Apply listener isolation: remove hostnames claimed by more specific listeners
 			if parentRef.SectionName != nil {
@@ -576,7 +692,8 @@ func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gatew
 			continue
 		}
 		if len(allEffective) == 0 {
-			// No intersection - skip this route entirely
+			// No intersection from any parentRef and not a genuine catch-all -
+			// skip this route entirely rather than programming its full hostname set.
 			continue
 		}
 		// Create a copy with only the intersecting hostnames
@@ -589,8 +706,22 @@ func filterRouteHostnames(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gatew
 
 // updateConfigMap updates the Gateway's ConfigMap with routing.json (preserves main.vcl).
 func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gatewayv1.Gateway, routes []gatewayv1.HTTPRoute) error {
-	// Filter route hostnames to only those intersecting with gateway listeners
-	filteredRoutes := filterRouteHostnames(routes, gateway)
+	// Compute the authoritative per-listener attachment for each route once. This
+	// enforces the AllowedRoutes namespace policy AND hostname intersection on the
+	// same listener, and drives both the emitted hostname set and the socket set —
+	// so a route is only ever programmed onto listeners it is truly permitted on.
+	attachments := make(map[string]listenerAttachment, len(routes))
+	routeListeners := make(map[string][]string, len(routes))
+	for i := range routes {
+		key := routes[i].Namespace + "/" + routes[i].Name
+		att := computeListenerAttachment(ctx, r.Client, &routes[i], gateway)
+		attachments[key] = att
+		routeListeners[key] = att.listenerNames
+	}
+
+	// Filter route hostnames to only those intersecting with the listeners the
+	// route validly attaches to.
+	filteredRoutes := filterRouteHostnames(routes, gateway, attachments)
 
 	// Build port map to resolve service ports to target ports
 	portMap := r.buildServicePortMap(ctx, filteredRoutes, gateway.Namespace)
@@ -598,8 +729,9 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	// Compute blocked cross-namespace backend refs (not permitted by ReferenceGrants)
 	blockedRefs := r.computeBlockedBackendRefs(ctx, filteredRoutes)
 
-	// Generate routing.json for ghost with path-based routing
-	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace, portMap, blockedRefs)
+	// Generate routing.json for ghost with path-based routing. routeListeners
+	// supplies the authoritative socket set per route (respecting namespace policy).
+	collectedRoutes := vcl.CollectHTTPRouteBackends(filteredRoutes, gateway, gateway.Namespace, portMap, blockedRefs, routeListeners)
 
 	// Attach VarnishCachePolicy to each route
 	r.attachCachePolicies(ctx, collectedRoutes, filteredRoutes, gateway)
@@ -927,6 +1059,112 @@ func (r *HTTPRouteReconciler) buildServicePortMap(ctx context.Context, routes []
 		}
 	}
 	return portMap
+}
+
+// gatewaysFromRouteSpec returns the set of Gateways (our group) currently
+// referenced by the route's parentRefs, keyed by NamespacedName.
+func gatewaysFromRouteSpec(route *gatewayv1.HTTPRoute) map[types.NamespacedName]bool {
+	result := make(map[types.NamespacedName]bool)
+	for i := range route.Spec.ParentRefs {
+		pr := &route.Spec.ParentRefs[i]
+		if pr.Kind != nil && *pr.Kind != "Gateway" {
+			continue
+		}
+		if pr.Group != nil && *pr.Group != gatewayv1.Group(gatewayv1.GroupName) {
+			continue
+		}
+		ns := route.Namespace
+		if pr.Namespace != nil {
+			ns = string(*pr.Namespace)
+		}
+		result[types.NamespacedName{Name: string(pr.Name), Namespace: ns}] = true
+	}
+	return result
+}
+
+// gatewaysFromRouteStatus returns the set of Gateways this controller previously
+// programmed the route onto, derived from the route's existing status.Parents
+// entries owned by our ControllerName. Used to detect parents the route has since
+// detached from.
+func gatewaysFromRouteStatus(route *gatewayv1.HTTPRoute) map[types.NamespacedName]bool {
+	result := make(map[types.NamespacedName]bool)
+	for _, ps := range route.Status.Parents {
+		if string(ps.ControllerName) != ControllerName {
+			continue
+		}
+		pr := ps.ParentRef
+		if pr.Kind != nil && *pr.Kind != "Gateway" {
+			continue
+		}
+		if pr.Group != nil && *pr.Group != gatewayv1.Group(gatewayv1.GroupName) {
+			continue
+		}
+		ns := route.Namespace
+		if pr.Namespace != nil {
+			ns = string(*pr.Namespace)
+		}
+		result[types.NamespacedName{Name: string(pr.Name), Namespace: ns}] = true
+	}
+	return result
+}
+
+// pruneDetachedRouteParents removes RouteParentStatus entries owned by our
+// controller whose Gateway is no longer referenced by the route's spec (the
+// `current` set). Entries owned by other controllers, and entries for still-current
+// Gateways, are preserved.
+func pruneDetachedRouteParents(route *gatewayv1.HTTPRoute, current map[types.NamespacedName]bool) {
+	kept := make([]gatewayv1.RouteParentStatus, 0, len(route.Status.Parents))
+	for _, ps := range route.Status.Parents {
+		if string(ps.ControllerName) == ControllerName {
+			pr := ps.ParentRef
+			isGateway := pr.Kind == nil || *pr.Kind == "Gateway"
+			isOurGroup := pr.Group == nil || *pr.Group == gatewayv1.Group(gatewayv1.GroupName)
+			if isGateway && isOurGroup {
+				ns := route.Namespace
+				if pr.Namespace != nil {
+					ns = string(*pr.Namespace)
+				}
+				nn := types.NamespacedName{Name: string(pr.Name), Namespace: ns}
+				if !current[nn] {
+					continue // drop stale entry for a detached Gateway
+				}
+			}
+		}
+		kept = append(kept, ps)
+	}
+	route.Status.Parents = kept
+}
+
+// regenerateDetachedGateways regenerates routing.json for every Gateway present in
+// `previous` but absent from `current` — i.e. Gateways the route has detached from.
+// This removes the route's stale routing.json entries when parentRefs are edited,
+// the route is moved between Gateways, or its parentRefs are dropped to zero.
+// Deleted Gateways and Gateways not managed by our GatewayClass are skipped.
+func (r *HTTPRouteReconciler) regenerateDetachedGateways(ctx context.Context, previous, current map[types.NamespacedName]bool) error {
+	for nn := range previous {
+		if current[nn] {
+			continue
+		}
+		var gw gatewayv1.Gateway
+		if err := r.Get(ctx, nn, &gw); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue // Gateway gone; its ConfigMap went with it
+			}
+			return fmt.Errorf("r.Get(%s): %w", nn, err)
+		}
+		if !isOurGatewayClass(ctx, r.Client, string(gw.Spec.GatewayClassName)) {
+			continue
+		}
+		routes, err := r.listRoutesForGateway(ctx, &gw)
+		if err != nil {
+			return fmt.Errorf("r.listRoutesForGateway(%s): %w", nn, err)
+		}
+		if err := r.updateConfigMap(ctx, &gw, routes); err != nil {
+			return fmt.Errorf("r.updateConfigMap(%s): %w", nn, err)
+		}
+		r.Logger.Info("regenerated routing.json for detached gateway", "gateway", nn.String())
+	}
+	return nil
 }
 
 // regenerateAllGateways lists all Gateways managed by our GatewayClass and

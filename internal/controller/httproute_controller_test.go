@@ -1049,6 +1049,16 @@ func TestIsRouteAllowedByGateway(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			// Real routes always reference the Gateway via a parentRef; the
+			// per-listener attachment check operates over parentRefs. Synthesize a
+			// parentRef targeting the Gateway (in the Gateway's namespace, so
+			// cross-namespace routes still target it) when the case omits one.
+			if len(tc.route.Spec.ParentRefs) == 0 {
+				gwNS := gatewayv1.Namespace(tc.gateway.Namespace)
+				tc.route.Spec.ParentRefs = []gatewayv1.ParentReference{
+					{Name: gatewayv1.ObjectName(tc.gateway.Name), Namespace: &gwNS},
+				}
+			}
 			objs := append([]runtime.Object{}, tc.objs...)
 			r := newHTTPRouteTestReconciler(scheme, objs...)
 			got, _, _ := isRouteAllowedByGateway(context.Background(), r.Client, tc.route, tc.gateway)
@@ -1930,3 +1940,269 @@ func TestReconcile_ExternalNameBackend(t *testing.T) {
 }
 
 // NOTE: getUserVCL tests removed - functionality moved to Gateway controller
+
+// --- H-3: per-listener AllowedRoutes namespace policy ---
+
+// TestComputeListenerAttachment_PerListenerNamespace verifies that attachment is
+// computed per listener: a foreign-namespace route on a Gateway with a from:Same
+// and a from:All listener attaches ONLY to the from:All listener, never leaking
+// onto the from:Same listener (the H-3 bypass).
+func TestComputeListenerAttachment_PerListenerNamespace(t *testing.T) {
+	scheme := newTestScheme()
+	fromSame := gatewayv1.NamespacesFromSame
+	fromAll := gatewayv1.NamespacesFromAll
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{
+					Name: "http-same", Port: 80, Protocol: gatewayv1.HTTPProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{From: &fromSame},
+					},
+				},
+				{
+					Name: "http-all", Port: 8080, Protocol: gatewayv1.HTTPProtocolType,
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Namespaces: &gatewayv1.RouteNamespaces{From: &fromAll},
+					},
+				},
+			},
+		},
+	}
+
+	gwNS := gatewayv1.Namespace("default")
+
+	t.Run("foreign namespace attaches only to from:All listener", func(t *testing.T) {
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "other"},
+			Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Namespace: &gwNS}},
+			}},
+		}
+		r := newHTTPRouteTestReconciler(scheme)
+		att := computeListenerAttachment(context.Background(), r.Client, route, gateway)
+		if len(att.listenerNames) != 1 || att.listenerNames[0] != "http-all" {
+			t.Fatalf("expected attachment [http-all], got %v", att.listenerNames)
+		}
+		if !att.namespaceAllowed {
+			t.Error("expected namespaceAllowed=true (from:All listener allowed the namespace)")
+		}
+	})
+
+	t.Run("same namespace attaches to both listeners", func(t *testing.T) {
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw"}},
+			}},
+		}
+		r := newHTTPRouteTestReconciler(scheme)
+		att := computeListenerAttachment(context.Background(), r.Client, route, gateway)
+		if len(att.listenerNames) != 2 {
+			t.Fatalf("expected attachment to both listeners, got %v", att.listenerNames)
+		}
+	})
+
+	t.Run("foreign namespace pinned to from:Same via sectionName is rejected", func(t *testing.T) {
+		sn := gatewayv1.SectionName("http-same")
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "other"},
+			Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw", Namespace: &gwNS, SectionName: &sn}},
+			}},
+		}
+		r := newHTTPRouteTestReconciler(scheme)
+		att := computeListenerAttachment(context.Background(), r.Client, route, gateway)
+		if len(att.listenerNames) != 0 {
+			t.Fatalf("expected no attachment (from:Same denies foreign ns), got %v", att.listenerNames)
+		}
+		allowed, reason, _ := isRouteAllowedByGateway(context.Background(), r.Client, route, gateway)
+		if allowed {
+			t.Error("expected route not allowed")
+		}
+		if reason != string(gatewayv1.RouteReasonNotAllowedByListeners) {
+			t.Errorf("expected NotAllowedByListeners, got %s", reason)
+		}
+	})
+}
+
+// --- H-4: effectiveHostnames catch-all vs no-intersection ---
+
+func TestEffectiveHostnames_CatchAllSignal(t *testing.T) {
+	hn := func(s string) *gatewayv1.Hostname { h := gatewayv1.Hostname(s); return &h }
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "l-open", Port: 80, Protocol: gatewayv1.HTTPProtocolType}, // no hostname
+				{Name: "l-a", Port: 8080, Protocol: gatewayv1.HTTPProtocolType, Hostname: hn("a.com")},
+			},
+		},
+	}
+
+	t.Run("genuine catch-all", func(t *testing.T) {
+		route := &gatewayv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"}}
+		snOpen := gatewayv1.SectionName("l-open")
+		got, catchAll := effectiveHostnames(route, gateway, &snOpen, nil, nil)
+		if !catchAll {
+			t.Fatalf("expected catchAll=true, got hostnames=%v", got)
+		}
+	})
+
+	t.Run("no intersection is not catch-all", func(t *testing.T) {
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+			Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"b.com"}},
+		}
+		snA := gatewayv1.SectionName("l-a")
+		got, catchAll := effectiveHostnames(route, gateway, &snA, nil, nil)
+		if catchAll {
+			t.Fatal("expected catchAll=false for no-intersection")
+		}
+		if len(got) != 0 {
+			t.Errorf("expected no effective hostnames, got %v", got)
+		}
+	})
+
+	t.Run("sectionName matching no listener is not catch-all", func(t *testing.T) {
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+			Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"a.com"}},
+		}
+		snMissing := gatewayv1.SectionName("does-not-exist")
+		got, catchAll := effectiveHostnames(route, gateway, &snMissing, nil, nil)
+		if catchAll {
+			t.Fatal("expected catchAll=false when sectionName matches no listener")
+		}
+		if len(got) != 0 {
+			t.Errorf("expected no effective hostnames, got %v", got)
+		}
+	})
+
+	t.Run("intersection yields effective hostname", func(t *testing.T) {
+		route := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+			Spec:       gatewayv1.HTTPRouteSpec{Hostnames: []gatewayv1.Hostname{"a.com"}},
+		}
+		snA := gatewayv1.SectionName("l-a")
+		got, catchAll := effectiveHostnames(route, gateway, &snA, nil, nil)
+		if catchAll {
+			t.Fatal("expected catchAll=false")
+		}
+		if len(got) != 1 || got[0] != "a.com" {
+			t.Errorf("expected [a.com], got %v", got)
+		}
+	})
+}
+
+// TestFilterRouteHostnames_MultiParentRefNoBreak verifies that a parentRef with no
+// hostname intersection contributes nothing but does NOT discard hostnames from
+// other parentRefs, and is not misinterpreted as a full catch-all (H-4).
+func TestFilterRouteHostnames_MultiParentRefNoBreak(t *testing.T) {
+	scheme := newTestScheme()
+	hn := func(s string) *gatewayv1.Hostname { h := gatewayv1.Hostname(s); return &h }
+
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "la", Port: 80, Protocol: gatewayv1.HTTPProtocolType, Hostname: hn("a.com")},
+				{Name: "lc", Port: 8080, Protocol: gatewayv1.HTTPProtocolType, Hostname: hn("c.com")},
+			},
+		},
+	}
+
+	snLc := gatewayv1.SectionName("lc")
+	snLa := gatewayv1.SectionName("la")
+	route := gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{
+					// First parentRef targets lc (c.com) — no intersection with the
+					// route's hostnames. The buggy code broke here and promoted the
+					// route to catch-all, keeping the full hostname set.
+					{Name: "gw", SectionName: &snLc},
+					{Name: "gw", SectionName: &snLa},
+				},
+			},
+			Hostnames: []gatewayv1.Hostname{"a.com", "b.com"},
+		},
+	}
+
+	r := newHTTPRouteTestReconciler(scheme)
+	att := computeListenerAttachment(context.Background(), r.Client, &route, gateway)
+	attachments := map[string]listenerAttachment{"default/r": att}
+
+	filtered := filterRouteHostnames([]gatewayv1.HTTPRoute{route}, gateway, attachments)
+	if len(filtered) != 1 {
+		t.Fatalf("expected 1 filtered route, got %d", len(filtered))
+	}
+	got := filtered[0].Spec.Hostnames
+	if len(got) != 1 || got[0] != "a.com" {
+		t.Errorf("expected hostnames [a.com] (b.com dropped, not promoted to catch-all), got %v", got)
+	}
+}
+
+// --- H-5: stale-route cleanup helpers ---
+
+func TestGatewaysFromRouteSpecAndStatus(t *testing.T) {
+	nsB := gatewayv1.Namespace("gw-ns")
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
+			ParentRefs: []gatewayv1.ParentReference{
+				{Name: "gw-a"},                  // default ns
+				{Name: "gw-b", Namespace: &nsB}, // explicit ns
+			},
+		}},
+		Status: gatewayv1.HTTPRouteStatus{RouteStatus: gatewayv1.RouteStatus{
+			Parents: []gatewayv1.RouteParentStatus{
+				{ControllerName: ControllerName, ParentRef: gatewayv1.ParentReference{Name: "gw-a"}},
+				{ControllerName: "someone-else/controller", ParentRef: gatewayv1.ParentReference{Name: "gw-x"}},
+			},
+		}},
+	}
+
+	spec := gatewaysFromRouteSpec(route)
+	if !spec[types.NamespacedName{Name: "gw-a", Namespace: "default"}] ||
+		!spec[types.NamespacedName{Name: "gw-b", Namespace: "gw-ns"}] {
+		t.Errorf("gatewaysFromRouteSpec missing expected gateways: %v", spec)
+	}
+
+	status := gatewaysFromRouteStatus(route)
+	if !status[types.NamespacedName{Name: "gw-a", Namespace: "default"}] {
+		t.Errorf("gatewaysFromRouteStatus should include our gw-a: %v", status)
+	}
+	if status[types.NamespacedName{Name: "gw-x", Namespace: "default"}] {
+		t.Errorf("gatewaysFromRouteStatus should exclude other controller's gw-x: %v", status)
+	}
+}
+
+func TestPruneDetachedRouteParents(t *testing.T) {
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+		Status: gatewayv1.HTTPRouteStatus{RouteStatus: gatewayv1.RouteStatus{
+			Parents: []gatewayv1.RouteParentStatus{
+				{ControllerName: ControllerName, ParentRef: gatewayv1.ParentReference{Name: "gw-a"}},            // detached
+				{ControllerName: ControllerName, ParentRef: gatewayv1.ParentReference{Name: "gw-b"}},            // current
+				{ControllerName: "someone-else/controller", ParentRef: gatewayv1.ParentReference{Name: "gw-a"}}, // foreign, keep
+			},
+		}},
+	}
+	current := map[types.NamespacedName]bool{{Name: "gw-b", Namespace: "default"}: true}
+
+	pruneDetachedRouteParents(route, current)
+
+	if len(route.Status.Parents) != 2 {
+		t.Fatalf("expected 2 parents after prune, got %d: %+v", len(route.Status.Parents), route.Status.Parents)
+	}
+	for _, ps := range route.Status.Parents {
+		if string(ps.ControllerName) == ControllerName && ps.ParentRef.Name == "gw-a" {
+			t.Error("stale our-controller gw-a entry should have been pruned")
+		}
+	}
+}

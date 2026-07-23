@@ -150,10 +150,17 @@ func (v *Server) Run(ctx context.Context) error {
 	// Signal shutdown to any pending Exec callers on return.
 	defer v.doneOnce.Do(func() { close(v.done) })
 
-	v.logger.Debug("Starting varnishadm server on localhost", "port", v.Port)
-	l, err := net.Listen("tcp", fmt.Sprintf(":%d", v.Port))
+	// Bind IPv4 loopback only. varnishd runs in the same pod and dials
+	// -M 127.0.0.1:<port> (see vrun.BuildArgs). Both sides must agree on the
+	// same loopback address; binding 127.0.0.1 (rather than ":" = all
+	// interfaces) keeps the reverse-mode admin channel unreachable from
+	// outside the pod. Using the literal 127.0.0.1 on both sides avoids the
+	// IPv4/IPv6 ambiguity that "localhost" resolution can introduce.
+	listenAddr := fmt.Sprintf("127.0.0.1:%d", v.Port)
+	v.logger.Debug("Starting varnishadm server on loopback", "addr", listenAddr)
+	l, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return fmt.Errorf("net.Listen(port: %d): %w", v.Port, err)
+		return fmt.Errorf("net.Listen(%s): %w", listenAddr, err)
 	}
 	go func() {
 		<-ctx.Done()
@@ -186,7 +193,19 @@ func (v *Server) Run(ctx context.Context) error {
 	}
 }
 
-func (v *Server) handleConnection(ctx context.Context, conn net.Conn) error {
+func (v *Server) handleConnection(ctx context.Context, conn net.Conn) (returnErr error) {
+	// Recover from any panic on the connection-handling path so a malformed
+	// peer can never crash the whole chaperone. processRequest has its own
+	// recover for the post-auth command loop, but the banner/auth path
+	// (readBanner -> readFromConnection) runs before that and is otherwise
+	// unguarded; this defer covers every path in handleConnection.
+	defer func() {
+		if r := recover(); r != nil {
+			v.logger.Error("recovered from panic in handleConnection", "panic", r)
+			returnErr = fmt.Errorf("panic in handleConnection: %v", r)
+		}
+	}()
+
 	// make sure it is a TCP connection:
 	tcpConn, ok := conn.(*net.TCPConn)
 	if !ok {
@@ -550,14 +569,12 @@ func (v *Server) readFromConnection(conn *net.TCPConn, timeout time.Duration) (s
 	}
 	reader := bufio.NewReader(conn)
 
-	// Read the 13-byte header (including newline)
+	// Read the 13-byte header (including newline). io.ReadFull returns a
+	// non-nil error unless it fills the whole slice, so a nil error already
+	// guarantees exactly 13 bytes — no separate length check is needed.
 	header := make([]byte, 13)
-	n, err := io.ReadFull(reader, header)
-	if err != nil {
+	if _, err := io.ReadFull(reader, header); err != nil {
 		return "", 0, fmt.Errorf("io.ReadFull(header): %w", err)
-	}
-	if n != 13 {
-		return "", 0, fmt.Errorf("incomplete header: got %d bytes, expected 13", n)
 	}
 
 	// Validate header format
@@ -581,8 +598,12 @@ func (v *Server) readFromConnection(conn *net.TCPConn, timeout time.Duration) (s
 	if err != nil {
 		return "", 0, fmt.Errorf("invalid body length '%s': %w", lengthStr, err)
 	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		return "", 0, fmt.Errorf("conn.SetDeadline(body): %w", err)
+	// Reject out-of-range lengths before allocating. A negative value (a
+	// malformed or malicious peer) would otherwise reach make([]byte, bodyLen+1)
+	// — which panics for bodyLen <= -2 — or index bodyWithNewline[bodyLen] at -1.
+	// Bounds-check both ends alongside the upper limit.
+	if bodyLen < 0 {
+		return "", 0, fmt.Errorf("invalid negative body length %d", bodyLen)
 	}
 	if bodyLen > maxResponseBodyLen {
 		return "", 0, fmt.Errorf("response body length %d exceeds maximum %d", bodyLen, maxResponseBodyLen)
@@ -593,12 +614,9 @@ func (v *Server) readFromConnection(conn *net.TCPConn, timeout time.Duration) (s
 	if err := conn.SetDeadline(deadline); err != nil {
 		return "", 0, fmt.Errorf("conn.SetDeadline(body): %w", err)
 	}
-	n, err = io.ReadFull(reader, bodyWithNewline)
+	_, err = io.ReadFull(reader, bodyWithNewline)
 	if err != nil {
 		return "", 0, fmt.Errorf("failed to read body: %w", err)
-	}
-	if n != bodyLen+1 {
-		return "", 0, fmt.Errorf("incomplete body: got %d bytes, expected %d", n, bodyLen+1)
 	}
 
 	// Validate trailing newline
