@@ -115,6 +115,23 @@ func TestBuildArgs(t *testing.T) {
 	if !paramFound {
 		t.Error("Param arguments not found in args")
 	}
+
+	// Verify -M targets IPv4 loopback explicitly (H-6): the reverse-mode admin
+	// channel must stay pod-local and agree with the address the varnishadm
+	// server binds (127.0.0.1). "localhost" is deliberately avoided.
+	mFound := false
+	for i, arg := range args {
+		if arg == "-M" && i+1 < len(args) {
+			if args[i+1] != "127.0.0.1:6082" {
+				t.Errorf("-M target = %q, want 127.0.0.1:6082", args[i+1])
+			}
+			mFound = true
+			break
+		}
+	}
+	if !mFound {
+		t.Error("-M argument not found in args")
+	}
 }
 
 func TestBuildArgsWithExtraArgs(t *testing.T) {

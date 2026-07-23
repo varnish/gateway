@@ -267,6 +267,35 @@ func TestReadFromConnection(t *testing.T) {
 		}
 	})
 
+	t.Run("negative body length", func(t *testing.T) {
+		// A malformed/malicious peer sending a negative length must be rejected
+		// with an error, never reach make([]byte, bodyLen+1) (which panics for
+		// bodyLen <= -2) or index bodyWithNewline[bodyLen] at -1. Regression
+		// test for H-7.
+		negLengths := []int{-1, -2, -100}
+		for _, nl := range negLengths {
+			t.Run(fmt.Sprintf("len_%d", nl), func(t *testing.T) {
+				serverSide, varnishdSide := makeTCPPair(t)
+				defer serverSide.Close()
+				defer varnishdSide.Close()
+
+				go func() {
+					// 8-char right-justified length field, e.g. "      -1".
+					header := fmt.Sprintf("200 %8d\n", nl)
+					_, _ = varnishdSide.Write([]byte(header))
+				}()
+
+				_, _, err := s.readFromConnection(serverSide, 5*time.Second)
+				if err == nil {
+					t.Fatalf("expected error for negative body length %d", nl)
+				}
+				if !strings.Contains(err.Error(), "negative body length") {
+					t.Errorf("error = %q, want 'negative body length' message", err.Error())
+				}
+			})
+		}
+	})
+
 	t.Run("body length exceeds maximum", func(t *testing.T) {
 		serverSide, varnishdSide := makeTCPPair(t)
 		defer serverSide.Close()

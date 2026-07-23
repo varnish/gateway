@@ -233,6 +233,27 @@ func (r *Reloader) reloadAllCerts() error {
 	return nil
 }
 
+// shouldReload reports whether an fsnotify event should trigger a certificate
+// reload. Two kinds of change are relevant:
+//
+//  1. Direct .pem writes — used by non-Kubernetes deployments and tests.
+//  2. Kubernetes Secret volume rotation. K8s populates mounted Secret volumes
+//     with the atomic-writer pattern: it writes cert data into a new
+//     "..<timestamp>" directory and atomically swaps the "..data" symlink to
+//     point at it (surfacing as a Create/Rename on "..data"). The visible
+//     foo.pem entries are symlinks created only at initial volume setup and
+//     never touched again, so no .pem event ever fires on renewal. Watching
+//     "..data" is what makes cert-manager renewals / Secret updates actually
+//     trigger a reload instead of serving the stale cert until pod restart.
+func shouldReload(event fsnotify.Event) bool {
+	// Only act on ops that can change cert contents on disk.
+	if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) && !event.Has(fsnotify.Remove) && !event.Has(fsnotify.Rename) {
+		return false
+	}
+	// event.Name is a full path; the atomic-writer symlink is the base "..data".
+	return filepath.Base(event.Name) == "..data" || strings.HasSuffix(event.Name, ".pem")
+}
+
 // Run starts watching the cert directory for changes and reloads certs when files change.
 // It blocks until the context is cancelled.
 func (r *Reloader) Run(ctx context.Context) error {
@@ -256,12 +277,7 @@ func (r *Reloader) Run(ctx context.Context) error {
 				return nil
 			}
 
-			// React to write, create, and remove events on .pem files
-			if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) && !event.Has(fsnotify.Remove) && !event.Has(fsnotify.Rename) {
-				continue
-			}
-
-			if !strings.HasSuffix(event.Name, ".pem") {
+			if !shouldReload(event) {
 				continue
 			}
 

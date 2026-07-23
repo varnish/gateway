@@ -93,11 +93,18 @@ func (b *EventBus) Subscribe() chan Event {
 }
 
 // Unsubscribe removes a subscriber channel.
+//
+// The channel is deliberately NOT closed here. Publish snapshots the
+// subscriber set under the lock, releases it, then does non-blocking sends;
+// a send racing a close panics ("send on closed channel"), and select/default
+// does not guard against that. Receivers already terminate via ctx.Done()
+// (see server.handleSSE and runMetricsUpdater), so the channel simply becomes
+// unreferenced after Unsubscribe and is garbage-collected. Do not reintroduce
+// close(ch).
 func (b *EventBus) Unsubscribe(ch chan Event) {
 	b.mu.Lock()
 	delete(b.subscribers, ch)
 	b.mu.Unlock()
-	close(ch)
 }
 
 // Recent returns all events in the ring buffer, oldest first.

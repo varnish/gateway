@@ -16,6 +16,25 @@ sub vcl_init {
 }
 
 sub vcl_recv {
+    # Trust boundary: strip all internal control headers from client input.
+    # Ghost and the gateway VCL trust these X-Ghost-*/X-Gateway-* headers, but
+    # they are internal signalling only. A client could otherwise spoof them
+    # (varnishd appends header slots and readers take the first slot, so a
+    # client-supplied copy would win over ours). Unset them unconditionally as
+    # the very first thing, before any routing or ghost producer runs. VCL has
+    # no wildcard unset, so every name is enumerated explicitly.
+    unset req.http.X-Ghost-Pass;
+    unset req.http.X-Ghost-Forced-TTL;
+    unset req.http.X-Ghost-Default-TTL;
+    unset req.http.X-Ghost-Grace;
+    unset req.http.X-Ghost-Keep;
+    unset req.http.X-Ghost-Cache-Key-Extra;
+    unset req.http.X-Ghost-Filter-Context;
+    unset req.http.X-Ghost-Redirect-Config;
+    unset req.http.X-Ghost-Error;
+    unset req.http.X-Gateway-Listener;
+    unset req.http.X-Gateway-Route;
+
     # Handle reload endpoint (localhost only)
     if (req.url == "/.varnish-ghost/reload" && client.ip ~ localhost) {
         if (router.reload()) {

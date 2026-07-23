@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -68,7 +69,15 @@ type Config struct {
 	TLSListen  []string // -a arguments for HTTPS (e.g., "https=:8443,https")
 
 	// Health endpoint
-	HealthAddr string // address for health endpoint
+	HealthAddr string // address for health endpoint (pod interface; kubelet probes it)
+
+	// Debug endpoint (pprof + backend.list). Bound to loopback only; reached
+	// via kubectl port-forward. kubelet does not need it.
+	DebugAddr string
+
+	// DrainToken is the shared secret required (via the X-Drain-Token header)
+	// to invoke /drain. Empty disables the endpoint entirely.
+	DrainToken string
 
 	// Dashboard (optional, empty = disabled)
 	DashboardAddr string // address for dashboard UI
@@ -99,6 +108,8 @@ func loadConfig() (*Config, error) {
 		TLSCertDir:        os.Getenv("TLS_CERT_DIR"),                  // empty by default
 		TLSListen:         parseList(os.Getenv("VARNISH_TLS_LISTEN")), // empty by default
 		HealthAddr:        getEnvOrDefault("HEALTH_ADDR", ":8080"),
+		DebugAddr:         getEnvOrDefault("DEBUG_ADDR", "127.0.0.1:6060"),
+		DrainToken:        os.Getenv("DRAIN_TOKEN"),    // empty = /drain disabled
 		DashboardAddr:     os.Getenv("DASHBOARD_ADDR"), // empty = disabled
 		GatewayName:       os.Getenv("GATEWAY_NAME"),
 		PodName:           os.Getenv("POD_NAME"),
@@ -371,23 +382,46 @@ func run() error {
 	k8sutil.RegisterClientGoMetrics(promReg)
 	chapMetrics := newChaperoneMetrics(promReg)
 
-	// Start health server with drain endpoint for graceful shutdown
+	// Health server: bound to the pod interface because the kubelet reaches
+	// the readiness probe (/health) and the preStop hook (/drain) via the pod
+	// IP, and Prometheus scrapes /metrics. /drain is token-gated so a peer pod
+	// cannot drain the gateway with a single unauthenticated request.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", makeHealthHandler(dashState))
-	mux.HandleFunc("/drain", makeDrainHandler(dashState))
-	mux.HandleFunc("/debug/backends", makeBackendsHandler(vadm))
+	mux.HandleFunc("/drain", makeDrainHandler(dashState, cfg.DrainToken))
 	mux.Handle("/metrics", promhttp.HandlerFor(promReg, promhttp.HandlerOpts{}))
-	// pprof on the same mux. Service is ClusterIP-only; chaos soaks fetch
-	// profiles via kubectl proxy when a slope threshold trips.
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	healthServer := &http.Server{
 		Addr:    cfg.HealthAddr,
 		Handler: mux,
+		// Health/metrics/drain requests are all small and fast, so cap every
+		// phase to defend against Slowloris-style slow-header/body attacks.
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
+	// Debug server: pprof + backend.list, bound to loopback only. These carry
+	// no auth and are diagnostic, so they must not be exposed on the pod
+	// interface. Reach them with `kubectl port-forward`, which forwards into
+	// the pod netns and can connect to 127.0.0.1.
+	debugMux := http.NewServeMux()
+	debugMux.HandleFunc("/debug/backends", makeBackendsHandler(vadm))
+	debugMux.HandleFunc("/debug/pprof/", pprof.Index)
+	debugMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	debugMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	debugMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	debugMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	debugServer := &http.Server{
+		Addr:    cfg.DebugAddr,
+		Handler: debugMux,
+		// pprof profile/trace stream for their full duration (default 30s and
+		// up), so leave WriteTimeout unbounded. ReadHeaderTimeout + IdleTimeout
+		// still bound header stalls and idle keep-alives.
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Start all components concurrently using errgroup.
@@ -472,6 +506,24 @@ func run() error {
 		<-gctx.Done()
 		if err := healthServer.Close(); err != nil {
 			slog.Error("health server close failed", "error", err)
+		}
+		return nil
+	})
+
+	// Debug server (loopback-only: pprof + backend.list)
+	g.Go(func() error {
+		slog.Debug("debug server starting", "addr", cfg.DebugAddr)
+		if err := debugServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("debugServer.ListenAndServe: %w", err)
+		}
+		return nil
+	})
+
+	// Shutdown debug server when context is cancelled
+	g.Go(func() error {
+		<-gctx.Done()
+		if err := debugServer.Close(); err != nil {
+			slog.Error("debug server close failed", "error", err)
 		}
 		return nil
 	})
@@ -580,8 +632,30 @@ func makeHealthHandler(state *dashboard.StateTracker) http.HandlerFunc {
 	}
 }
 
-func makeDrainHandler(state *dashboard.StateTracker) http.HandlerFunc {
+// makeDrainHandler returns the /drain handler. Draining flips readiness to 503,
+// so it must be authenticated: without a token, any pod that can reach the pod
+// interface could take the gateway out of rotation with a single request.
+//
+// The endpoint lives on the pod interface (not loopback) because the kubelet
+// invokes it from the preStop lifecycle hook against the pod IP. The shared
+// token — supplied by the operator via both the DRAIN_TOKEN env var and the
+// preStop hook's X-Drain-Token header — is the access control. The kubelet
+// HTTPGet lifecycle handler can only issue GET, so we cannot additionally
+// require POST here; the token alone closes the cross-pod DoS.
+func makeDrainHandler(state *dashboard.StateTracker, token string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if token == "" {
+			// No token configured: refuse rather than drain on any request.
+			slog.Warn("drain requested but DRAIN_TOKEN is unset; refusing")
+			http.Error(w, "drain endpoint disabled", http.StatusForbidden)
+			return
+		}
+		provided := r.Header.Get("X-Drain-Token")
+		if subtle.ConstantTimeCompare([]byte(provided), []byte(token)) != 1 {
+			slog.Warn("drain requested with missing or invalid token; rejecting", "remote", r.RemoteAddr)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		state.SetDraining()
 		slog.Info("drain requested via endpoint, health will now return 503")
 		w.WriteHeader(http.StatusOK)

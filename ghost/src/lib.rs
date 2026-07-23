@@ -218,7 +218,12 @@ mod ghost {
                 not_found: not_found_backend,
                 redirect: redirect_backend,
                 internal_error: internal_error_backend,
-            } = GhostDirectorBundle::new(ctx, Arc::new(empty_directors), backend_pool, config_path)?;
+            } = GhostDirectorBundle::new(
+                ctx,
+                Arc::new(empty_directors),
+                backend_pool,
+                config_path,
+            )?;
 
             // Pre-load config if the file already exists on disk.
             // On initial startup the file won't exist yet (chaperone hasn't
@@ -282,17 +287,22 @@ mod ghost {
             // The postamble vcl_recv checks this header and calls return(pass).
             if result.pass {
                 if let Some(req) = ctx.http_req.as_mut() {
+                    // Must unset first since set_header() appends a header slot.
+                    req.unset_header("X-Ghost-Pass");
                     let _ = req.set_header("X-Ghost-Pass", "true");
                 }
             }
 
             // Set X-Gateway-Listener and X-Gateway-Route headers for user VCL
-            // Re-borrow req from ctx since the previous borrow ended after route_request
+            // Re-borrow req from ctx since the previous borrow ended after route_request.
+            // Must unset first since set_header() appends a header slot.
             if let Some(req) = ctx.http_req.as_mut() {
                 if let Some(ref listener) = listener_owned {
+                    req.unset_header("X-Gateway-Listener");
                     let _ = req.set_header("X-Gateway-Listener", listener);
                 }
                 if let Some(ref name) = result.route_name {
+                    req.unset_header("X-Gateway-Route");
                     let _ = req.set_header("X-Gateway-Route", name);
                 }
             }
@@ -358,14 +368,8 @@ mod test_stubs {
     pub unsafe extern "C" fn VRT_DelDirector(_bp: *mut *const c_void) {}
 
     #[no_mangle]
-    pub unsafe extern "C" fn VRT_delete_backend(
-        _ctx: *const c_void,
-        _bp: *mut *const c_void,
-    ) {}
+    pub unsafe extern "C" fn VRT_delete_backend(_ctx: *const c_void, _bp: *mut *const c_void) {}
 
     #[no_mangle]
-    pub unsafe extern "C" fn VRT_Assign_Backend(
-        _dst: *mut *const c_void,
-        _src: *const c_void,
-    ) {}
+    pub unsafe extern "C" fn VRT_Assign_Backend(_dst: *mut *const c_void, _src: *const c_void) {}
 }

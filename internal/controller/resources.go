@@ -2,6 +2,7 @@ package controller
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"sort"
@@ -126,6 +127,21 @@ func (r *GatewayReconciler) buildAdminSecret(gateway *gatewayv1.Gateway) *corev1
 			"secret": []byte(secretHex),
 		},
 	}
+}
+
+// drainToken derives a stable, non-guessable token that guards the /drain
+// endpoint against a cross-pod one-request DoS.
+//
+// It is derived deterministically from the Gateway UID (assigned by the API
+// server at creation, stable for the object's lifetime) rather than freshly
+// randomized: a value that changed on every reconcile would rewrite the pod
+// template each time and trigger endless rolling restarts, and the env var
+// must stay in lockstep with the preStop hook header. The token never appears
+// on the HTTP data path — learning it requires read access to the Gateway
+// object (RBAC-gated), which a peer pod firing a raw packet does not have.
+func drainToken(gateway *gatewayv1.Gateway) string {
+	sum := sha256.Sum256([]byte("varnish-gateway-drain\x00" + string(gateway.UID)))
+	return hex.EncodeToString(sum[:])
 }
 
 // buildTLSSecret creates a Secret containing the combined PEM files for TLS termination.
@@ -425,7 +441,14 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, cf
 		{Name: "WORK_DIR", Value: "/var/run/varnish"},
 		{Name: "VARNISH_DIR", Value: "/var/run/varnish/vsm"}, // VSM subdirectory on shared volume
 		{Name: "HEALTH_ADDR", Value: fmt.Sprintf(":%d", chaperoneHealthPort)},
-		{Name: "DASHBOARD_ADDR", Value: fmt.Sprintf(":%d", chaperoneDashboardPort)},
+		// Dashboard binds to loopback only. It is reached via `kubectl
+		// port-forward`, which forwards into the pod network namespace and can
+		// reach 127.0.0.1 — so binding loopback keeps port-forward working
+		// while removing the dashboard from the cluster-internal attack surface.
+		{Name: "DASHBOARD_ADDR", Value: fmt.Sprintf("127.0.0.1:%d", chaperoneDashboardPort)},
+		// DRAIN_TOKEN guards the /drain endpoint (see drainToken). The same
+		// value is sent by the preStop hook below via the X-Drain-Token header.
+		{Name: "DRAIN_TOKEN", Value: drainToken(gateway)},
 		{Name: "GATEWAY_NAME", Value: gateway.Name},
 		{
 			Name: "POD_NAME",
@@ -539,13 +562,21 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, cf
 		Ports:        ports,
 		VolumeMounts: volumeMounts,
 		Resources:    resourceReqs,
-		// PreStop hook triggers graceful shutdown before SIGTERM
+		// PreStop hook triggers graceful shutdown before SIGTERM.
+		// The kubelet runs this HTTPGet against the pod IP, so /drain must stay
+		// reachable on the pod interface — it cannot move to loopback. To stop
+		// any peer pod from draining the gateway with a single unauthenticated
+		// request, /drain requires the shared-secret X-Drain-Token header,
+		// which only this pod's spec carries.
 		Lifecycle: &corev1.Lifecycle{
 			PreStop: &corev1.LifecycleHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path:   "/drain",
 					Port:   intstr.FromInt(chaperoneHealthPort),
 					Scheme: corev1.URISchemeHTTP,
+					HTTPHeaders: []corev1.HTTPHeader{
+						{Name: "X-Drain-Token", Value: drainToken(gateway)},
+					},
 				},
 			},
 		},

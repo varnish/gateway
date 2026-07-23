@@ -50,6 +50,13 @@ func (s *Server) Run(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:    s.addr,
 		Handler: mux,
+		// The dashboard serves long-lived SSE streams (/api/events,
+		// /api/varnishlog), so WriteTimeout must stay 0 (unbounded) — a finite
+		// value would kill active streams mid-flight. ReadHeaderTimeout guards
+		// against Slowloris-style header stalls, and IdleTimeout reaps idle
+		// keep-alive connections.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
@@ -94,7 +101,6 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	flusher.Flush()
 
 	ch := s.bus.Subscribe()

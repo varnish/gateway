@@ -3436,6 +3436,46 @@ func TestEnqueueGatewaysForHTTPRoute(t *testing.T) {
 			t.Errorf("expected 0 requests, got %d", len(requests))
 		}
 	})
+
+	t.Run("update moving route A->B enqueues both old and new gateways", func(t *testing.T) {
+		gwA := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "gw-a", Namespace: "default"},
+			Spec:       gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
+		}
+		gwB := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "gw-b", Namespace: "default"},
+			Spec:       gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
+		}
+		r := newTestReconciler(scheme, gwA, gwB)
+		h := r.enqueueGatewaysForHTTPRoute()
+
+		oldRoute := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw-a"}},
+			}},
+		}
+		newRoute := &gatewayv1.HTTPRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: "route", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw-b"}},
+			}},
+		}
+
+		q := &fakeQueue{}
+		h.Update(ctx, event.UpdateEvent{ObjectOld: oldRoute, ObjectNew: newRoute}, q)
+
+		got := map[string]bool{}
+		for _, req := range q.requests {
+			got[req.Name] = true
+		}
+		if !got["gw-a"] {
+			t.Error("expected old parent gw-a to be enqueued (so its stale routing/AttachedRoutes are refreshed)")
+		}
+		if !got["gw-b"] {
+			t.Error("expected new parent gw-b to be enqueued")
+		}
+	})
 }
 
 // ============================================================

@@ -112,7 +112,16 @@ func BlockedBackendKey(routeNamespace, namespace, name string) string {
 	return routeNamespace + "/" + namespace + "/" + name
 }
 
-func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, namespace string, portMap ServicePortMap, blockedRefs map[string]bool) []ghost.Route {
+// routeListeners maps a route key ("namespace/name") to the set of gateway
+// listener NAMES the route is permitted to serve on. This is the authoritative
+// per-listener attachment computed by the controller — it already accounts for
+// each listener's AllowedRoutes namespace policy and hostname intersection.
+// When routeListeners is nil, or a route key is absent, CollectHTTPRouteBackends
+// falls back to the legacy sectionName/port-only computation (listenersForRoute).
+// That fallback exists only for callers without policy context (unit tests); the
+// operator always supplies routeListeners so the per-listener namespace boundary
+// is enforced.
+func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway, namespace string, portMap ServicePortMap, blockedRefs map[string]bool, routeListeners map[string][]string) []ghost.Route {
 	var collectedRoutes []ghost.Route
 
 	ruleIndex := 0
@@ -122,11 +131,18 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 			routeNS = namespace
 		}
 
-		// Compute which listeners this route applies to
-		listeners := listenersForRoute(&route, gateway)
-
 		// Route name for X-Gateway-Route header (namespace/name)
 		routeName := routeNS + "/" + route.Name
+
+		// Compute which listeners this route applies to. Prefer the authoritative
+		// attachment set supplied by the caller (respects per-listener namespace
+		// policy); fall back to sectionName/port-only computation otherwise.
+		var listeners []string
+		if names, ok := routeListeners[routeName]; ok {
+			listeners = socketsForListenerNames(names, gateway)
+		} else {
+			listeners = listenersForRoute(&route, gateway)
+		}
 
 		// When no hostnames are specified, the route matches all hostnames.
 		// Use "*" as a sentinel that ghost VMOD treats as a catch-all.
@@ -660,6 +676,53 @@ func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) [
 	}
 
 	// Build sorted result
+	var result []string
+	for s := range socketSet {
+		result = append(result, s)
+	}
+	slices.Sort(result)
+	return result
+}
+
+// socketsForListenerNames maps a set of gateway listener names to their Varnish
+// socket names. It returns nil when the given names cover ALL of the gateway's
+// listeners (nil signals "no filtering" to the ghost VMOD, i.e. serve on every
+// socket). An empty or unknown name set yields nil socket coverage — callers must
+// ensure only routes with at least one permitted listener reach here (routes that
+// attach to no listener are filtered out upstream and never programmed).
+func socketsForListenerNames(names []string, gateway *gatewayv1.Gateway) []string {
+	if gateway == nil {
+		return nil
+	}
+
+	nameSet := make(map[string]bool, len(names))
+	for _, n := range names {
+		nameSet[n] = true
+	}
+
+	socketSet := make(map[string]bool)
+	allSockets := make(map[string]bool)
+	for i := range gateway.Spec.Listeners {
+		l := &gateway.Spec.Listeners[i]
+		sock := socketNameForListener(l)
+		allSockets[sock] = true
+		if nameSet[string(l.Name)] {
+			socketSet[sock] = true
+		}
+	}
+
+	// If the permitted listeners cover every socket, no filtering is needed.
+	coversAll := len(socketSet) > 0
+	for s := range allSockets {
+		if !socketSet[s] {
+			coversAll = false
+			break
+		}
+	}
+	if coversAll {
+		return nil
+	}
+
 	var result []string
 	for s := range socketSet {
 		result = append(result, s)

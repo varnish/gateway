@@ -50,6 +50,11 @@ impl VclBackend<RedirectBody> for RedirectBackend {
             e
         })?;
 
+        // Validate the redirect status against the Gateway API allowed set.
+        // The config header is internal, but defence-in-depth: never emit an
+        // arbitrary status. Fall back to 302 Found for out-of-range values.
+        let status_code = sanitize_redirect_status(config.filter.status_code);
+
         // Set response status and Location header
         {
             let beresp = ctx
@@ -57,7 +62,7 @@ impl VclBackend<RedirectBody> for RedirectBackend {
                 .as_mut()
                 .ok_or_else(|| VclError::new("Missing beresp in redirect backend".to_string()))?;
 
-            beresp.set_status(config.filter.status_code as u16);
+            beresp.set_status(status_code);
             beresp.set_header("Location", &location)?;
             beresp.set_header("Cache-Control", "no-store")?;
         }
@@ -73,10 +78,19 @@ impl VclBackend<RedirectBody> for RedirectBackend {
 
         ctx.log(
             LogTag::Debug,
-            format!("Redirect {} -> {}", config.filter.status_code, location),
+            format!("Redirect {} -> {}", status_code, location),
         );
 
         Ok(Some(RedirectBody::new()))
+    }
+}
+
+/// Clamp a redirect status code to the Gateway API allowed set
+/// ({301, 302, 303, 307, 308}), falling back to 302 Found otherwise.
+fn sanitize_redirect_status(status_code: u16) -> u16 {
+    match status_code {
+        301 | 302 | 303 | 307 | 308 => status_code,
+        _ => 302,
     }
 }
 
@@ -414,6 +428,19 @@ mod tests {
 
         let result = rewrite_path(&filter, "/v1", Some("/v1")).unwrap();
         assert_eq!(result, "/v2");
+    }
+
+    #[test]
+    fn test_sanitize_redirect_status() {
+        // Allowed Gateway API redirect codes pass through unchanged.
+        for code in [301, 302, 303, 307, 308] {
+            assert_eq!(sanitize_redirect_status(code), code);
+        }
+        // Out-of-range / spoofed values fall back to 302.
+        assert_eq!(sanitize_redirect_status(200), 302);
+        assert_eq!(sanitize_redirect_status(500), 302);
+        assert_eq!(sanitize_redirect_status(0), 302);
+        assert_eq!(sanitize_redirect_status(999), 302);
     }
 
     #[test]

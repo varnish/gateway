@@ -108,12 +108,9 @@ impl VhostDirector {
     /// Check if this director has any routes with backends or filters
     /// Routes with redirect filters but no backends are considered "healthy"
     fn has_backends(&self) -> bool {
-        self.routes.iter().any(|r| {
-            r.backend_groups
-                .iter()
-                .any(|g| !g.backends.is_empty())
-                || r.filters.is_some()
-        })
+        self.routes
+            .iter()
+            .any(|r| r.backend_groups.iter().any(|g| !g.backends.is_empty()) || r.filters.is_some())
     }
 
     /// Collect all backend keys used by this director
@@ -270,7 +267,12 @@ impl VhostDirector {
             listener,
         ) {
             Some(r) => r,
-            None => return RouteRequestResult { log_msgs, ..Default::default() },
+            None => {
+                return RouteRequestResult {
+                    log_msgs,
+                    ..Default::default()
+                }
+            }
         };
         let backend_groups = match_result.backend_groups;
         let matched_filters = match_result.filters.as_ref();
@@ -280,7 +282,10 @@ impl VhostDirector {
         if let Some(filters) = matched_filters {
             // RequestRedirect - takes precedence over all other filters
             if let Some(redirect_filter) = &filters.request_redirect {
-                log_msgs.push((LogTag::Debug, "Applying request redirect filter".to_string()));
+                log_msgs.push((
+                    LogTag::Debug,
+                    "Applying request redirect filter".to_string(),
+                ));
 
                 // Extract original request components
                 let (original_scheme, original_hostname, original_port) = {
@@ -301,8 +306,7 @@ impl VhostDirector {
                         "http"
                     };
 
-                    let port =
-                        port_opt.unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
+                    let port = port_opt.unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
 
                     (scheme.to_string(), hostname.to_string(), port)
                 };
@@ -339,6 +343,8 @@ impl VhostDirector {
                     }
                 };
 
+                // Must unset first since set_header() appends a header slot.
+                http.unset_header("X-Ghost-Redirect-Config");
                 if let Err(e) = http.set_header("X-Ghost-Redirect-Config", &config_json) {
                     log_msgs.push((
                         LogTag::Error,
@@ -403,12 +409,14 @@ impl VhostDirector {
         // Look up in backend pool
         let entry = match self.backend_pool.get(backend_key) {
             Some(e) => e,
-            None => return RouteRequestResult {
-                backend: None,
-                route_name,
-                log_msgs,
-                pass,
-            },
+            None => {
+                return RouteRequestResult {
+                    backend: None,
+                    route_name,
+                    log_msgs,
+                    pass,
+                }
+            }
         };
 
         RouteRequestResult {
@@ -569,19 +577,25 @@ fn apply_cache_policy_headers(
         }
     }
 
-    // Set TTL headers (bridge to vcl_backend_response via bereq)
+    // Set TTL headers (bridge to vcl_backend_response via bereq).
+    // Must unset first since set_header() appends a header slot.
     if let Some(ttl) = cache_policy.default_ttl_seconds {
+        http.unset_header("X-Ghost-Default-TTL");
         let _ = http.set_header("X-Ghost-Default-TTL", &format!("{}s", ttl));
     }
     if let Some(ttl) = cache_policy.forced_ttl_seconds {
+        http.unset_header("X-Ghost-Forced-TTL");
         let _ = http.set_header("X-Ghost-Forced-TTL", &format!("{}s", ttl));
     }
 
-    // Set grace and keep (bridge to vcl_backend_response via bereq)
+    // Set grace and keep (bridge to vcl_backend_response via bereq).
+    // Must unset first since set_header() appends a header slot.
     if cache_policy.grace_seconds > 0 {
+        http.unset_header("X-Ghost-Grace");
         let _ = http.set_header("X-Ghost-Grace", &format!("{}s", cache_policy.grace_seconds));
     }
     if cache_policy.keep_seconds > 0 {
+        http.unset_header("X-Ghost-Keep");
         let _ = http.set_header("X-Ghost-Keep", &format!("{}s", cache_policy.keep_seconds));
     }
 
@@ -615,6 +629,8 @@ fn apply_cache_policy_headers(
         }
 
         if !extra_parts.is_empty() {
+            // Must unset first since set_header() appends a header slot.
+            http.unset_header("X-Ghost-Cache-Key-Extra");
             let _ = http.set_header("X-Ghost-Cache-Key-Extra", &extra_parts.join("|"));
         }
     }
@@ -733,7 +749,6 @@ fn extract_path_and_query(url: &str) -> (&str, Option<&str>) {
         (final_path, None)
     }
 }
-
 
 fn apply_request_header_filter(
     http: &mut HttpHeaders,
@@ -1005,11 +1020,16 @@ fn parse_host_and_port(host_header: &str) -> (&str, Option<u16>) {
     (host_header, None)
 }
 
-fn store_filter_context(http: &mut HttpHeaders, filters: &Arc<RouteFilters>) -> Result<(), VclError> {
+fn store_filter_context(
+    http: &mut HttpHeaders,
+    filters: &Arc<RouteFilters>,
+) -> Result<(), VclError> {
     // Serialize response filter to JSON
     if let Some(resp_filter) = &filters.response_header_modifier {
         let json = serde_json::to_string(resp_filter)
             .map_err(|e| VclError::new(format!("serialize filter: {}", e)))?;
+        // Must unset first since set_header() appends a header slot.
+        http.unset_header(FILTER_CONTEXT_HEADER);
         http.set_header(FILTER_CONTEXT_HEADER, &json)?;
     }
 
@@ -1056,17 +1076,11 @@ mod tests {
         let groups = vec![
             WeightedBackendGroup {
                 weight: 90,
-                backends: vec![
-                    "10.0.0.1:8080".to_string(),
-                    "10.0.0.2:8080".to_string(),
-                ],
+                backends: vec!["10.0.0.1:8080".to_string(), "10.0.0.2:8080".to_string()],
             },
             WeightedBackendGroup {
                 weight: 10,
-                backends: vec![
-                    "10.0.0.3:8080".to_string(),
-                    "10.0.0.4:8080".to_string(),
-                ],
+                backends: vec!["10.0.0.3:8080".to_string(), "10.0.0.4:8080".to_string()],
             },
         ];
 
@@ -1106,10 +1120,7 @@ mod tests {
         // Single group with 2 pods — should distribute ~50/50
         let groups = vec![WeightedBackendGroup {
             weight: 100,
-            backends: vec![
-                "10.0.0.1:8080".to_string(),
-                "10.0.0.2:8080".to_string(),
-            ],
+            backends: vec!["10.0.0.1:8080".to_string(), "10.0.0.2:8080".to_string()],
         }];
 
         let mut counts = HashMap::new();

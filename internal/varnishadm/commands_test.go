@@ -668,3 +668,53 @@ func TestCommands_BackendCommands(t *testing.T) {
 		}
 	})
 }
+
+// TestHeredocDelimiter verifies the per-call heredoc delimiter is unguessable
+// and unique (H-8 regression). Each call must produce a distinct, well-formed
+// "EOF_<hex>" word so attacker-supplied VCL cannot predict and inject it.
+func TestHeredocDelimiter(t *testing.T) {
+	seen := make(map[string]struct{})
+	for i := 0; i < 1000; i++ {
+		d, err := heredocDelimiter()
+		if err != nil {
+			t.Fatalf("heredocDelimiter() error: %v", err)
+		}
+		if !strings.HasPrefix(d, "EOF_") {
+			t.Fatalf("delimiter %q missing EOF_ prefix", d)
+		}
+		hexPart := strings.TrimPrefix(d, "EOF_")
+		if len(hexPart) != 32 {
+			t.Fatalf("delimiter %q hex part = %d chars, want 32", d, len(hexPart))
+		}
+		if _, dup := seen[d]; dup {
+			t.Fatalf("duplicate delimiter generated: %q", d)
+		}
+		seen[d] = struct{}{}
+	}
+}
+
+// TestContainsLine covers the belt-and-suspenders guard that stops a VCL
+// payload from smuggling a line equal to the heredoc delimiter (H-8).
+func TestContainsLine(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		line string
+		want bool
+	}{
+		{"empty payload", "", "EOF", false},
+		{"exact single line", "EOF", "EOF", true},
+		{"line in middle", "a\nEOF\nb", "EOF", true},
+		{"substring not a full line", "xEOFy", "EOF", false},
+		{"trailing CR still matches", "a\nEOF\r\nb", "EOF", true},
+		{"not present", "vcl 4.0;\nbackend b {}", "EOF_deadbeef", false},
+		{"delimiter as last line no newline", "a\nb\nEOF", "EOF", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := containsLine(tt.s, tt.line); got != tt.want {
+				t.Errorf("containsLine(%q, %q) = %v, want %v", tt.s, tt.line, got, tt.want)
+			}
+		})
+	}
+}

@@ -331,7 +331,7 @@ func TestCollectHTTPRouteBackends_WithPathMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil, nil)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil, nil, nil)
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -558,7 +558,7 @@ func TestMethodMatchingConformanceFullPipeline(t *testing.T) {
 	}
 
 	// Step 1: CollectHTTPRouteBackends (what the operator does)
-	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, nil, ns, nil, nil)
+	collectedRoutes := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{httpRoute}, nil, ns, nil, nil, nil)
 
 	t.Logf("CollectHTTPRouteBackends produced %d routes:", len(collectedRoutes))
 	for i, r := range collectedRoutes {
@@ -745,7 +745,7 @@ func TestCollectHTTPRouteBackends_NoMatches(t *testing.T) {
 		},
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil, nil)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil, nil, nil)
 
 	if len(collectedRoutes) != 1 {
 		t.Fatalf("expected 1 route, got %d", len(collectedRoutes))
@@ -809,7 +809,7 @@ func TestCollectHTTPRouteBackends_PortMapResolution(t *testing.T) {
 		"default/fallback-svc:8080": {Port: 9090}, // service port 8080 → target port 9090
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap, nil)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap, nil, nil)
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -888,7 +888,7 @@ func TestCollectHTTPRouteBackends_PortMapPartialResolution(t *testing.T) {
 		// unmapped-svc:9090 not in map → falls through to service port
 	}
 
-	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap, nil)
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", portMap, nil, nil)
 
 	if len(collectedRoutes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(collectedRoutes))
@@ -917,6 +917,114 @@ func TestCollectHTTPRouteBackends_PortMapPartialResolution(t *testing.T) {
 	}
 	if unmappedRoute.Port != 9090 {
 		t.Errorf("unmapped route port = %d, want 9090 (should keep service port)", unmappedRoute.Port)
+	}
+}
+
+func TestSocketsForListenerNames(t *testing.T) {
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http-80", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "https-443", Port: 443, Protocol: gatewayv1.HTTPSProtocolType},
+				{Name: "http-8080", Port: 8080, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		names []string
+		want  []string // nil means "all listeners" (no filtering)
+	}{
+		{
+			name:  "subset of listeners",
+			names: []string{"https-443"},
+			want:  []string{"https-443"},
+		},
+		{
+			name:  "two of three listeners",
+			names: []string{"http-80", "https-443"},
+			want:  []string{"http-80", "https-443"},
+		},
+		{
+			name:  "all listeners collapses to nil",
+			names: []string{"http-80", "https-443", "http-8080"},
+			want:  nil,
+		},
+		{
+			name:  "unknown listener names yield empty (not all)",
+			names: []string{"does-not-exist"},
+			want:  nil, // no matching sockets; caller must ensure this never programs a route
+		},
+		{
+			name:  "empty name set",
+			names: nil,
+			want:  nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := socketsForListenerNames(tc.names, gateway)
+			if len(tc.want) == 0 {
+				if len(got) != 0 {
+					t.Errorf("want empty/nil, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("index %d: want %q, got %q", i, tc.want[i], got[i])
+				}
+			}
+		})
+	}
+}
+
+// TestCollectHTTPRouteBackends_RouteListenersOverride verifies the authoritative
+// per-listener attachment set supplied by the caller wins over the sectionName/port
+// computation, so the socket set respects per-listener namespace policy.
+func TestCollectHTTPRouteBackends_RouteListenersOverride(t *testing.T) {
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "http-80", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+				{Name: "http-8080", Port: 8080, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+	// Route has NO sectionName/port, so listenersForRoute would return nil (all
+	// sockets). The caller-supplied routeListeners restricts it to http-80 only.
+	route := gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "r", Namespace: "default"},
+		Spec: gatewayv1.HTTPRouteSpec{
+			CommonRouteSpec: gatewayv1.CommonRouteSpec{
+				ParentRefs: []gatewayv1.ParentReference{{Name: "gw"}},
+			},
+			Rules: []gatewayv1.HTTPRouteRule{
+				{BackendRefs: []gatewayv1.HTTPBackendRef{{
+					BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
+						Name: "svc", Port: ptr(gatewayv1.PortNumber(80)),
+					}},
+				}}},
+			},
+		},
+	}
+
+	routeListeners := map[string][]string{"default/r": {"http-80"}}
+	got := CollectHTTPRouteBackends([]gatewayv1.HTTPRoute{route}, gateway, "default", nil, nil, routeListeners)
+	if len(got) == 0 {
+		t.Fatal("expected at least one collected route")
+	}
+	for _, r := range got {
+		if len(r.Listeners) != 1 || r.Listeners[0] != "http-80" {
+			t.Errorf("expected listeners [http-80], got %v", r.Listeners)
+		}
 	}
 }
 

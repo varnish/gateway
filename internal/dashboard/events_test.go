@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -127,16 +128,52 @@ func TestEventBus_Subscribe_ReceivesEvents(t *testing.T) {
 	bus.Unsubscribe(ch)
 }
 
-func TestEventBus_Unsubscribe_ClosesChannel(t *testing.T) {
+// TestEventBus_Unsubscribe_DoesNotCloseChannel guards the H-10 fix: Unsubscribe
+// must NOT close the subscriber channel. Publish does non-blocking sends after
+// releasing the lock, and a send racing a close panics ("send on closed
+// channel") — select/default does not guard against that. Receivers terminate
+// via ctx.Done() instead, so the channel is simply left for GC.
+func TestEventBus_Unsubscribe_DoesNotCloseChannel(t *testing.T) {
 	bus := NewEventBus(10)
 	ch := bus.Subscribe()
 	bus.Unsubscribe(ch)
 
-	// Channel should be closed
-	_, ok := <-ch
-	if ok {
-		t.Fatal("expected channel to be closed after unsubscribe")
+	// Channel must remain open (not closed). A receive should block rather
+	// than return the closed-channel zero value, so use a short timeout.
+	select {
+	case _, ok := <-ch:
+		if !ok {
+			t.Fatal("channel was closed by Unsubscribe; this reintroduces the send-on-closed-channel panic (H-10)")
+		}
+		t.Fatal("unexpected event delivered after unsubscribe")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: open, empty channel blocks.
 	}
+}
+
+// TestEventBus_ConcurrentPublishUnsubscribe is a regression test for H-10: a
+// Publish racing an Unsubscribe must never panic. It fails (panics) if
+// Unsubscribe closes the channel while Publish is sending.
+func TestEventBus_ConcurrentPublishUnsubscribe(t *testing.T) {
+	bus := NewEventBus(10)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 50; i++ {
+		ch := bus.Subscribe()
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				bus.Publish(Event{Type: EventReady, Message: "race"})
+			}
+		}()
+		go func(c chan Event) {
+			defer wg.Done()
+			bus.Unsubscribe(c)
+		}(ch)
+	}
+
+	wg.Wait()
 }
 
 func TestEventBus_Unsubscribe_StopsDelivery(t *testing.T) {

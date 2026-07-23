@@ -888,6 +888,79 @@ func TestBuildGatewayContainer_VolumeMounts_BackendTLS(t *testing.T) {
 	}
 }
 
+// TestBuildGatewayContainer_DashboardLoopback verifies the dashboard binds to
+// loopback (H-2) so it is not exposed on the pod interface.
+func TestBuildGatewayContainer_DashboardLoopback(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
+
+	var dashAddr string
+	for _, e := range container.Env {
+		if e.Name == "DASHBOARD_ADDR" {
+			dashAddr = e.Value
+		}
+	}
+	want := "127.0.0.1:9000"
+	if dashAddr != want {
+		t.Errorf("DASHBOARD_ADDR = %q, want %q (must bind loopback only)", dashAddr, want)
+	}
+}
+
+// TestBuildGatewayContainer_DrainTokenWired verifies the /drain shared secret
+// is injected via env and matched by the preStop hook header (H-2).
+func TestBuildGatewayContainer_DrainTokenWired(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default")
+	gw.UID = "11111111-2222-3333-4444-555555555555"
+
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
+
+	var envToken string
+	for _, e := range container.Env {
+		if e.Name == "DRAIN_TOKEN" {
+			envToken = e.Value
+		}
+	}
+	if envToken == "" {
+		t.Fatal("DRAIN_TOKEN env var not set")
+	}
+	if envToken != drainToken(gw) {
+		t.Errorf("DRAIN_TOKEN env = %q, want %q", envToken, drainToken(gw))
+	}
+
+	if container.Lifecycle == nil || container.Lifecycle.PreStop == nil || container.Lifecycle.PreStop.HTTPGet == nil {
+		t.Fatal("expected preStop HTTPGet hook")
+	}
+	var hdrToken string
+	for _, h := range container.Lifecycle.PreStop.HTTPGet.HTTPHeaders {
+		if h.Name == "X-Drain-Token" {
+			hdrToken = h.Value
+		}
+	}
+	if hdrToken != envToken {
+		t.Errorf("preStop X-Drain-Token = %q, want it to match DRAIN_TOKEN env %q", hdrToken, envToken)
+	}
+}
+
+// TestDrainToken_StableAndDistinct verifies the token is deterministic for a
+// given Gateway UID (so it does not churn the pod template across reconciles)
+// and differs across UIDs.
+func TestDrainToken_StableAndDistinct(t *testing.T) {
+	a := testGateway("gw-a", "default")
+	a.UID = "aaaa"
+	b := testGateway("gw-b", "default")
+	b.UID = "bbbb"
+
+	if drainToken(a) != drainToken(a) {
+		t.Error("drainToken not deterministic for the same UID")
+	}
+	if drainToken(a) == drainToken(b) {
+		t.Error("drainToken collided across distinct UIDs")
+	}
+}
+
 // --- buildLoggingSidecar ---
 
 func TestBuildLoggingSidecar_Varnishlog(t *testing.T) {
