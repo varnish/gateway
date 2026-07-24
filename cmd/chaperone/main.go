@@ -272,6 +272,12 @@ func run() error {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		var lastActive int64 = -1
+		// Tolerate transient varnishstat failures: keep polling rather than
+		// aborting the drain early (which would cut off in-flight connections).
+		// The drainCtx deadline still bounds the loop; the counter just caps
+		// how many consecutive failures we ride out before giving up.
+		consecutiveErrors := 0
+		const maxConsecutiveErrors = 5
 		for {
 			select {
 			case <-drainCtx.Done():
@@ -281,9 +287,16 @@ func run() error {
 			}
 			active, err := varnishstat.ActiveSessions(drainCtx, cfg.VarnishDir)
 			if err != nil {
-				slog.Warn("failed to fetch session count, proceeding with shutdown", "error", err)
-				break
+				consecutiveErrors++
+				slog.Warn("failed to fetch session count during drain",
+					"error", err, "consecutive_errors", consecutiveErrors)
+				if consecutiveErrors >= maxConsecutiveErrors {
+					slog.Warn("too many consecutive session-count failures, proceeding with shutdown")
+					break
+				}
+				continue
 			}
+			consecutiveErrors = 0
 			if active != lastActive {
 				slog.Info("draining connections", "active_sessions", active)
 				lastActive = active

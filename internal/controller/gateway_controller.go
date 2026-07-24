@@ -233,6 +233,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	infraConfig := InfrastructureConfig{
 		GatewayImage:              effectiveImage,
 		VarnishdExtraArgs:         varnishdExtraArgs,
+		LogLevel:                  r.Config.LogLevel,
 		Logging:                   logging,
 		ImagePullSecrets:          imagePullSecrets,
 		ListenerSpecs:             listenerSpecs(gateway),
@@ -249,7 +250,6 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	// ConfigMap must be created first so HTTPRoute controller can process routes immediately
 	resources := []client.Object{
 		r.buildVCLConfigMap(gateway, vclContent),
-		r.buildAdminSecret(gateway),
 	}
 	// Add TLS bundle Secret if any HTTPS listeners with certs exist
 	if hasTLS {
@@ -1198,7 +1198,7 @@ func (r *GatewayReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.G
 // generateVCL generates ghost preamble VCL and merges it with user VCL
 func (r *GatewayReconciler) generateVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
 	// Generate ghost preamble VCL
-	generatedVCL := vcl.Generate(nil, vcl.GeneratorConfig{})
+	generatedVCL := vcl.Generate()
 
 	// Get user VCL if configured
 	userVCL := r.getUserVCL(ctx, gateway)

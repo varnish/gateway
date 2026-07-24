@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -130,32 +129,6 @@ func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway, vclCon
 		Data: map[string]string{
 			"main.vcl":     vclContent,
 			"routing.json": routingJSON,
-		},
-	}
-}
-
-// buildAdminSecret creates the Secret containing the varnishadm authentication secret.
-func (r *GatewayReconciler) buildAdminSecret(gateway *gatewayv1.Gateway) *corev1.Secret {
-	// Generate random secret for varnishadm authentication
-	secretBytes := make([]byte, 32)
-	if _, err := rand.Read(secretBytes); err != nil {
-		panic(fmt.Sprintf("crypto/rand.Read: %v", err))
-	}
-	secretHex := hex.EncodeToString(secretBytes)
-
-	return &corev1.Secret{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Secret",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-secret", gateway.Name),
-			Namespace: gateway.Namespace,
-			Labels:    r.buildLabels(gateway),
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: map[string][]byte{
-			"secret": []byte(secretHex),
 		},
 	}
 }

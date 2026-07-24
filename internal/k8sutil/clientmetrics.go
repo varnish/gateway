@@ -21,7 +21,10 @@ var (
 // clientmetrics.Register is sync.Once-gated, and prometheus.MustRegister
 // panics on duplicates — guard the whole setup so a second call is a no-op
 // rather than a partial/broken registration.
-var registerClientGoOnce sync.Once
+var (
+	registerClientGoOnce         sync.Once
+	registerClientGoDurationOnce sync.Once
+)
 
 // RegisterClientGoMetrics installs the full set of client-go REST metrics
 // (requests_total, request_duration_seconds, rate_limiter_duration_seconds,
@@ -48,16 +51,18 @@ func RegisterClientGoMetrics(reg prometheus.Registerer) {
 // Direct assignment to the exported global is the same workaround used by
 // kube-controller-manager.
 func RegisterClientGoDurationMetric(reg prometheus.Registerer) {
-	h := prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "rest_client_request_duration_seconds",
-			Help:    "Request latency in seconds. Broken down by verb and host.",
-			Buckets: latencyBuckets,
-		},
-		[]string{"verb", "host"},
-	)
-	reg.MustRegister(h)
-	clientmetrics.RequestLatency = &latencyAdapter{metric: h}
+	registerClientGoDurationOnce.Do(func() {
+		h := prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:    "rest_client_request_duration_seconds",
+				Help:    "Request latency in seconds. Broken down by verb and host.",
+				Buckets: latencyBuckets,
+			},
+			[]string{"verb", "host"},
+		)
+		reg.MustRegister(h)
+		clientmetrics.RequestLatency = &latencyAdapter{metric: h}
+	})
 }
 
 func newClientGoCollectors() (

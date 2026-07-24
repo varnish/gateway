@@ -406,33 +406,6 @@ func TestBuildVCLConfigMap(t *testing.T) {
 	}
 }
 
-func TestBuildAdminSecret(t *testing.T) {
-	r := &GatewayReconciler{
-		Config: Config{},
-	}
-
-	gateway := &gatewayv1.Gateway{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-gateway",
-			Namespace: "default",
-		},
-	}
-
-	secret := r.buildAdminSecret(gateway)
-
-	if secret.Name != "test-gateway-secret" {
-		t.Errorf("expected secret name %q, got %q", "test-gateway-secret", secret.Name)
-	}
-
-	secretData, ok := secret.Data["secret"]
-	if !ok {
-		t.Error("expected secret data key 'secret'")
-	}
-	if len(secretData) != 64 { // 32 bytes hex encoded = 64 chars
-		t.Errorf("expected secret length 64, got %d", len(secretData))
-	}
-}
-
 func TestBuildServiceAccount(t *testing.T) {
 	r := &GatewayReconciler{
 		Config: Config{},

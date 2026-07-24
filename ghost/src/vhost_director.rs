@@ -113,6 +113,12 @@ impl VhostDirector {
             .any(|r| r.backend_groups.iter().any(|g| !g.backends.is_empty()) || r.filters.is_some())
     }
 
+    /// Number of routes this director serves (matches the "routes" count in
+    /// VhostDirector::list_json).
+    pub fn route_count(&self) -> usize {
+        self.routes.len()
+    }
+
     /// Collect all backend keys used by this director
     pub fn backend_keys(&self) -> Vec<String> {
         let mut keys = Vec::new();
@@ -696,18 +702,19 @@ fn select_backend_from_groups(groups: &[WeightedBackendGroup]) -> Option<&str> {
     use rand::Rng;
     let mut rng = rand::thread_rng();
 
-    // Level 1: pick a group by weight
-    let total_weight: u32 = groups.iter().map(|g| g.weight).sum();
+    // Level 1: pick a group by weight. Sum as u64 so many high-weight groups
+    // can't overflow the accumulator (weights are u32 and operator-supplied).
+    let total_weight: u64 = groups.iter().map(|g| g.weight as u64).sum();
 
     if total_weight == 0 {
         return None;
     }
 
     let r = rng.gen_range(0..total_weight);
-    let mut cumulative = 0u32;
+    let mut cumulative = 0u64;
     let mut selected_group = &groups[0];
     for group in groups {
-        cumulative += group.weight;
+        cumulative += group.weight as u64;
         if r < cumulative {
             selected_group = group;
             break;

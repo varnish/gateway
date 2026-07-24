@@ -605,7 +605,7 @@ impl GhostDirector {
                     "type": "vhost_director",
                     "admin": "auto",
                     "health": if director.probe(ctx).healthy { "healthy" } else { "sick" },
-                    "routes": director.backend_keys().len(),
+                    "routes": director.route_count(),
                     "total_requests": total,
                     "last_request": director.stats().last_request().map(|t| {
                         use crate::format::format_timestamp;

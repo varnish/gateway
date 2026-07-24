@@ -16,23 +16,15 @@ var preambleVCL string
 //go:embed postamble.vcl
 var postambleVCL string
 
-// GeneratorConfig holds configuration for VCL generation.
-type GeneratorConfig struct {
-	GhostConfigPath string // Path to ghost.json (default: /var/run/varnish/ghost.json)
-}
-
 // DefaultGhostConfigPath is the default location for ghost.json.
 const DefaultGhostConfigPath = "/var/run/varnish/ghost.json"
 
 // Generate produces VCL preamble that integrates with the ghost VMOD.
 // The ghost VMOD handles all routing logic internally; VCL just initializes it.
-// The VCL template is embedded from preamble.vcl.
-func Generate(routes []gatewayv1.HTTPRoute, config GeneratorConfig) string {
-	if config.GhostConfigPath == "" {
-		config.GhostConfigPath = DefaultGhostConfigPath
-	}
-
-	return fmt.Sprintf(preambleVCL, config.GhostConfigPath)
+// The VCL template is embedded from preamble.vcl. The ghost config path is a
+// compile-time constant, so interpolating it into the template is safe.
+func Generate() string {
+	return fmt.Sprintf(preambleVCL, DefaultGhostConfigPath)
 }
 
 // CalculateRoutePriority calculates the priority for a route based on all match criteria.

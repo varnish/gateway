@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -73,7 +74,7 @@ func TestEventBus_RingBuffer_Wrap(t *testing.T) {
 
 	// Publish 5 events into a buffer of size 3
 	for i := 0; i < 5; i++ {
-		bus.Publish(Event{Type: EventReady, Message: itoa(i)})
+		bus.Publish(Event{Type: EventReady, Message: strconv.Itoa(i)})
 	}
 
 	events := bus.Recent()
@@ -96,7 +97,7 @@ func TestEventBus_RingBuffer_ExactFill(t *testing.T) {
 	bus := NewEventBus(3)
 
 	for i := 0; i < 3; i++ {
-		bus.Publish(Event{Type: EventReady, Message: itoa(i)})
+		bus.Publish(Event{Type: EventReady, Message: strconv.Itoa(i)})
 	}
 
 	events := bus.Recent()
@@ -104,8 +105,8 @@ func TestEventBus_RingBuffer_ExactFill(t *testing.T) {
 		t.Fatalf("expected 3 events, got %d", len(events))
 	}
 	for i, e := range events {
-		if e.Message != itoa(i) {
-			t.Errorf("event[%d]: expected %q, got %q", i, itoa(i), e.Message)
+		if e.Message != strconv.Itoa(i) {
+			t.Errorf("event[%d]: expected %q, got %q", i, strconv.Itoa(i), e.Message)
 		}
 	}
 }
@@ -214,7 +215,7 @@ func TestEventBus_SlowSubscriber_DoesNotBlock(t *testing.T) {
 
 	// Publish more than the channel buffer
 	for i := 0; i < 100; i++ {
-		bus.Publish(Event{Type: EventReady, Message: itoa(i)})
+		bus.Publish(Event{Type: EventReady, Message: strconv.Itoa(i)})
 	}
 	// Should not deadlock; some events will be dropped for the slow subscriber
 

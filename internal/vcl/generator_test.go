@@ -15,7 +15,7 @@ func ptr[T any](v T) *T {
 }
 
 func TestGenerate_GhostPreamble(t *testing.T) {
-	result := Generate(nil, GeneratorConfig{})
+	result := Generate()
 
 	// Check VCL version header
 	if !strings.Contains(result, "vcl 4.1;") {
@@ -74,7 +74,7 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 }
 
 func TestGenerate_GhostReloadHandler(t *testing.T) {
-	result := Generate(nil, GeneratorConfig{})
+	result := Generate()
 
 	// Check vcl_recv uses localhost ACL for reload endpoint
 	if !strings.Contains(result, "client.ip ~ localhost") {
@@ -108,7 +108,7 @@ func TestGenerate_GhostReloadHandler(t *testing.T) {
 }
 
 func TestGenerate_GhostErrorSurfacing(t *testing.T) {
-	result := Generate(nil, GeneratorConfig{})
+	result := Generate()
 
 	// Check vcl_synth is generated
 	if !strings.Contains(result, "sub vcl_synth {") {
@@ -131,17 +131,8 @@ func TestGenerate_GhostErrorSurfacing(t *testing.T) {
 	}
 }
 
-func TestGenerate_CustomGhostConfigPath(t *testing.T) {
-	config := GeneratorConfig{GhostConfigPath: "/custom/path/ghost.json"}
-	result := Generate(nil, config)
-
-	if !strings.Contains(result, `ghost.init("/custom/path/ghost.json")`) {
-		t.Errorf("expected custom ghost config path in output, got:\n%s", result)
-	}
-}
-
 func TestGenerate_DefaultGhostConfigPath(t *testing.T) {
-	result := Generate(nil, GeneratorConfig{})
+	result := Generate()
 
 	if !strings.Contains(result, DefaultGhostConfigPath) {
 		t.Errorf("expected default ghost config path %q in output", DefaultGhostConfigPath)
@@ -149,33 +140,10 @@ func TestGenerate_DefaultGhostConfigPath(t *testing.T) {
 }
 
 func TestGenerate_DeterministicOutput(t *testing.T) {
-	routes := []gatewayv1.HTTPRoute{
-		{
-			ObjectMeta: metav1.ObjectMeta{Name: "route-a", Namespace: "default"},
-			Spec: gatewayv1.HTTPRouteSpec{
-				Hostnames: []gatewayv1.Hostname{"a.example.com"},
-				Rules: []gatewayv1.HTTPRouteRule{
-					{
-						BackendRefs: []gatewayv1.HTTPBackendRef{
-							{
-								BackendRef: gatewayv1.BackendRef{
-									BackendObjectReference: gatewayv1.BackendObjectReference{
-										Name: "svc-a",
-										Port: ptr(gatewayv1.PortNumber(8080)),
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	first := Generate(routes, GeneratorConfig{})
+	first := Generate()
 
 	for i := 0; i < 10; i++ {
-		result := Generate(routes, GeneratorConfig{})
+		result := Generate()
 		if result != first {
 			t.Errorf("output not deterministic on iteration %d", i)
 		}

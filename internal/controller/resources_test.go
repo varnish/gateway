@@ -154,29 +154,6 @@ func TestBuildVCLConfigMap_RoutingJSON(t *testing.T) {
 	}
 }
 
-// --- buildAdminSecret ---
-
-func TestBuildAdminSecret_SecretLength(t *testing.T) {
-	r := testReconcilerSimple()
-	gw := testGateway("my-gw", "default")
-
-	s := r.buildAdminSecret(gw)
-
-	if s.Name != "my-gw-secret" {
-		t.Errorf("name = %q, want %q", s.Name, "my-gw-secret")
-	}
-	if s.Type != corev1.SecretTypeOpaque {
-		t.Errorf("type = %v, want Opaque", s.Type)
-	}
-	secret, ok := s.Data["secret"]
-	if !ok {
-		t.Fatal("missing 'secret' key")
-	}
-	if len(secret) != 64 { // 32 bytes hex-encoded
-		t.Errorf("secret length = %d, want 64", len(secret))
-	}
-}
-
 // --- buildTLSSecret ---
 
 func TestBuildTLSSecret_CertData(t *testing.T) {

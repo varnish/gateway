@@ -249,6 +249,16 @@ func (s *Server) handleVarnishlog(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 	}
 
+	// A read error (most likely a line longer than varnishlogBufSize) ends the
+	// scan while the child is still running. Kill it so cmd.Wait() below can't
+	// block forever on a stdout pipe nobody is draining.
+	if scanErr := scanner.Err(); scanErr != nil {
+		s.logger.Error("varnishlog-json scan aborted, killing process", "error", scanErr, "args", args)
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+
 	ctxErr := ctx.Err()
 	waitErr := cmd.Wait()
 

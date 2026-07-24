@@ -203,10 +203,20 @@ impl BackendPool {
 }
 
 /// Map a backend key into a valid Varnish backend name (alphanumeric + underscore).
+///
+/// A short hash of the original key is appended so two distinct keys that would
+/// otherwise sanitize to the same skeleton (e.g. `a-b` and `a_b`) can't collapse
+/// onto one Varnish backend name and fail creation / collide in `backend.list`.
 fn sanitize_backend_name(key: &str) -> String {
-    key.chars()
+    use std::hash::{Hash, Hasher};
+    let mut name: String = key
+        .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    name.push_str(&format!("_{:08x}", hasher.finish() as u32));
+    name
 }
 
 #[cfg(test)]
@@ -220,10 +230,17 @@ mod tests {
     }
 
     #[test]
-    fn test_backend_name_format() {
-        let key = "10.0.0.1:8080";
-        let name = format!("ghost_{}", key.replace([':', '.'], "_"));
-        assert_eq!(name, "ghost_10_0_0_1_8080");
+    fn test_backend_name_sanitization() {
+        // The readable skeleton is preserved as a prefix.
+        assert!(sanitize_backend_name("10.0.0.1:8080").starts_with("10_0_0_1_8080_"));
+        // Distinct keys with the same skeleton must not collide.
+        let a = sanitize_backend_name("a-b");
+        let b = sanitize_backend_name("a_b");
+        assert!(a.starts_with("a_b_"));
+        assert!(b.starts_with("a_b_"));
+        assert_ne!(a, b);
+        // Deterministic within a build.
+        assert_eq!(a, sanitize_backend_name("a-b"));
     }
 
     #[test]

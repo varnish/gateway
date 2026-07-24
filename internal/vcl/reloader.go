@@ -7,11 +7,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/varnishadm"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -43,6 +45,10 @@ type Reloader struct {
 	lastVCL            string
 	lastVCLMux         sync.RWMutex
 	lastConfigMapRV    string
+
+	// vclSeq is a monotonic counter appended to generated VCL names so two
+	// reloads within the same millisecond can't collide on the same name.
+	vclSeq atomic.Uint64
 
 	// firstLoadDone is closed after the first successful VCL load via the
 	// ConfigMap informer. Callers can wait on Ready() to know when the
@@ -102,11 +108,16 @@ func (r *Reloader) Run(ctx context.Context) error {
 		"namespace", r.configMapNamespace,
 		"keepCount", r.keepCount)
 
-	// Set up ConfigMap informer
+	// Set up ConfigMap informer. Restrict it to the single ConfigMap we care
+	// about via a field selector so the informer doesn't cache every ConfigMap
+	// in the namespace.
 	factory := informers.NewSharedInformerFactoryWithOptions(
 		r.kubeClient,
 		30*time.Second,
 		informers.WithNamespace(r.configMapNamespace),
+		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.FieldSelector = "metadata.name=" + r.configMapName
+		}),
 	)
 
 	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
@@ -309,12 +320,15 @@ func (r *Reloader) garbageCollect() error {
 	return nil
 }
 
-// generateVCLName creates a unique timestamped VCL name
+// generateVCLName creates a unique timestamped VCL name. A monotonic sequence
+// number guarantees uniqueness even when two reloads land in the same
+// millisecond (the timestamp alone has only millisecond resolution).
 func (r *Reloader) generateVCLName() string {
 	now := time.Now()
-	return fmt.Sprintf("%s%s_%03d",
+	return fmt.Sprintf("%s%s_%03d_%d",
 		vclPrefix,
 		now.Format("20060102_150405"),
 		now.Nanosecond()/1e6, // milliseconds
+		r.vclSeq.Add(1),
 	)
 }

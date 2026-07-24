@@ -189,9 +189,19 @@ func (w *Watcher) watchLoop(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("watch channel closed")
 			}
-			if event.Type == watch.Added || event.Type == watch.Modified {
+			switch event.Type {
+			case watch.Added, watch.Modified:
 				if u, ok := event.Object.(*unstructured.Unstructured); ok {
 					w.handleInvalidation(ctx, u)
+				}
+			case watch.Deleted:
+				// Drop the UID from the local dedup map once the CR is gone
+				// (deleted or GC'd after TTL) so processed stays bounded to
+				// live resources rather than growing for the pod's lifetime.
+				if u, ok := event.Object.(*unstructured.Unstructured); ok {
+					w.mu.Lock()
+					delete(w.processed, string(u.GetUID()))
+					w.mu.Unlock()
 				}
 			}
 		}

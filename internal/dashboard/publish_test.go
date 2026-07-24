@@ -6,27 +6,6 @@ import (
 	"time"
 )
 
-func TestItoa(t *testing.T) {
-	tests := []struct {
-		input    int
-		expected string
-	}{
-		{0, "0"},
-		{1, "1"},
-		{42, "42"},
-		{100, "100"},
-		{-1, "-1"},
-		{-42, "-42"},
-		{999999, "999999"},
-	}
-	for _, tc := range tests {
-		got := itoa(tc.input)
-		if got != tc.expected {
-			t.Errorf("itoa(%d) = %q, want %q", tc.input, got, tc.expected)
-		}
-	}
-}
-
 func TestPublish_NilBus(t *testing.T) {
 	// All publish helpers should be safe to call with a nil bus
 	PublishEndpointsChanged(nil, "test", 1, 0, 1)

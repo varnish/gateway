@@ -179,8 +179,10 @@ func TestInfrastructureConfig_HashChangesOnChange(t *testing.T) {
 	}
 }
 
-func TestInfrastructureConfig_ArgOrderDoesNotAffectHash(t *testing.T) {
-	// Args in different order should produce same hash (they get sorted)
+func TestInfrastructureConfig_ArgOrderAffectsHash(t *testing.T) {
+	// varnishd arg order is significant (a later `-p name=…` overrides an
+	// earlier one), so a reorder must change the hash and roll the pods rather
+	// than be masked by sorting.
 	config1 := InfrastructureConfig{
 		GatewayImage:      "ghcr.io/varnish/gateway:v1.0.0",
 		VarnishdExtraArgs: []string{"-p", "thread_pool_stack=160k", "-p", "thread_pools=2"},
@@ -195,11 +197,8 @@ func TestInfrastructureConfig_ArgOrderDoesNotAffectHash(t *testing.T) {
 		ImagePullSecrets:  nil,
 	}
 
-	hash1 := config1.ComputeHash()
-	hash2 := config2.ComputeHash()
-
-	if hash1 != hash2 {
-		t.Errorf("ComputeHash() affected by arg order: %s != %s", hash1, hash2)
+	if config1.ComputeHash() == config2.ComputeHash() {
+		t.Error("ComputeHash() should be affected by varnishd arg order")
 	}
 }
 

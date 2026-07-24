@@ -1,6 +1,9 @@
 package dashboard
 
-import "time"
+import (
+	"strconv"
+	"time"
+)
 
 // Publish helpers for common events.
 
@@ -13,9 +16,9 @@ func PublishEndpointsChanged(bus *EventBus, service string, added, removed, tota
 		Message: service,
 		Data: map[string]string{
 			"service": service,
-			"added":   itoa(added),
-			"removed": itoa(removed),
-			"total":   itoa(total),
+			"added":   strconv.Itoa(added),
+			"removed": strconv.Itoa(removed),
+			"total":   strconv.Itoa(total),
 		},
 	})
 }
@@ -28,9 +31,9 @@ func PublishGhostReload(bus *EventBus, vhosts, services, backends int) {
 		Type:    EventGhostReload,
 		Message: "ghost.json regenerated and reloaded",
 		Data: map[string]string{
-			"vhosts":   itoa(vhosts),
-			"services": itoa(services),
-			"backends": itoa(backends),
+			"vhosts":   strconv.Itoa(vhosts),
+			"services": strconv.Itoa(services),
+			"backends": strconv.Itoa(backends),
 		},
 	})
 }
@@ -73,7 +76,7 @@ func PublishTLSReload(bus *EventBus, count int) {
 	bus.Publish(Event{
 		Type:    EventTLSReload,
 		Message: "TLS certificates reloaded",
-		Data:    map[string]string{"count": itoa(count)},
+		Data:    map[string]string{"count": strconv.Itoa(count)},
 	})
 }
 
@@ -106,24 +109,4 @@ func PublishVarnishConnected(bus *EventBus) {
 		Type:    EventVarnishConnected,
 		Message: "varnishadm connection established",
 	})
-}
-
-func itoa(n int) string {
-	// Avoid importing strconv for this simple helper
-	if n == 0 {
-		return "0"
-	}
-	if n < 0 {
-		return "-" + itoa(-n)
-	}
-	digits := make([]byte, 0, 10)
-	for n > 0 {
-		digits = append(digits, byte('0'+n%10))
-		n /= 10
-	}
-	// Reverse
-	for i, j := 0, len(digits)-1; i < j; i, j = i+1, j-1 {
-		digits[i], digits[j] = digits[j], digits[i]
-	}
-	return string(digits)
 }

@@ -27,6 +27,10 @@ type InfrastructureConfig struct {
 	// VarnishdExtraArgs are additional arguments passed to varnishd
 	VarnishdExtraArgs []string
 
+	// LogLevel is the operator-configured log level propagated to gateway pods
+	// via the LOG_LEVEL env var. A change must roll the pods to take effect.
+	LogLevel string
+
 	// Logging configuration for varnish
 	Logging *gatewayparamsv1alpha1.VarnishLogging
 
@@ -71,11 +75,14 @@ func (c *InfrastructureConfig) ComputeHash() string {
 	h.Write([]byte(c.GatewayImage))
 	h.Write([]byte{0}) // separator
 
-	// Include varnishd extra args (sorted for determinism)
-	sortedArgs := make([]string, len(c.VarnishdExtraArgs))
-	copy(sortedArgs, c.VarnishdExtraArgs)
-	sort.Strings(sortedArgs)
-	h.Write([]byte(strings.Join(sortedArgs, "\x00")))
+	// Include varnishd extra args in user-supplied order. Order is significant
+	// (a later `-p name=…` overrides an earlier one), so sorting would let a
+	// meaningful reorder hash identically and skip the required rollout.
+	h.Write([]byte(strings.Join(c.VarnishdExtraArgs, "\x00")))
+	h.Write([]byte{0}) // separator
+
+	// Include operator log level (propagated to pods via LOG_LEVEL env)
+	h.Write([]byte(c.LogLevel))
 	h.Write([]byte{0}) // separator
 
 	// Include logging config
@@ -86,11 +93,8 @@ func (c *InfrastructureConfig) ComputeHash() string {
 		h.Write([]byte{0})
 		h.Write([]byte(c.Logging.Image))
 		h.Write([]byte{0})
-		// Include extra args (sorted for determinism)
-		sortedLogArgs := make([]string, len(c.Logging.ExtraArgs))
-		copy(sortedLogArgs, c.Logging.ExtraArgs)
-		sort.Strings(sortedLogArgs)
-		h.Write([]byte(strings.Join(sortedLogArgs, "\x00")))
+		// Include extra args in user-supplied order (order is significant)
+		h.Write([]byte(strings.Join(c.Logging.ExtraArgs, "\x00")))
 		h.Write([]byte{0})
 	}
 

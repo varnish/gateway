@@ -388,7 +388,7 @@ const HOP_BY_HOP: &[&str] = &[
     "proxy-authenticate",
     "proxy-authorization",
     "te",
-    "trailers",
+    "trailer",
     "transfer-encoding",
     "upgrade",
 ];
