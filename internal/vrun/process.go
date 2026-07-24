@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -109,9 +110,16 @@ func (m *Manager) Start(ctx context.Context, varnishCmd string, args []string) (
 	// Create ready channel - closed when varnishd signals readiness
 	ready := make(chan struct{})
 
+	// Both the stdout and stderr logWriters can independently observe the
+	// readiness line ("Child starts"). Share a single sync.Once across both
+	// so the ready channel is closed at most once regardless of which stream
+	// the line appears on (see M-17: per-writer Once only dedupes within one
+	// stream, and a close from the other stream would panic).
+	var readyOnce sync.Once
+
 	// Route varnishd output through our structured logging
-	m.stdoutLog = newLogWriter(m.logger, "varnishd", ready)
-	m.stderrLog = newLogWriter(m.logger, "varnishd", ready)
+	m.stdoutLog = newLogWriter(m.logger, "varnishd", ready, &readyOnce)
+	m.stderrLog = newLogWriter(m.logger, "varnishd", ready, &readyOnce)
 	m.cmd.Stdout = m.stdoutLog
 	m.cmd.Stderr = m.stderrLog
 

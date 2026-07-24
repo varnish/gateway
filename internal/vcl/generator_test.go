@@ -751,14 +751,15 @@ func TestCollectHTTPRouteBackends_NoMatches(t *testing.T) {
 		t.Fatalf("expected 1 route, got %d", len(collectedRoutes))
 	}
 
-	if collectedRoutes[0].PathMatch == nil {
-		t.Fatal("expected path match to be set")
+	// M-9: a rule with no matches is equivalent to matches:[{path:PathPrefix "/"}],
+	// which carries no specificity. It must be normalized to a nil PathMatch with
+	// priority 0 — identical to the explicit-"/" handling — so it does not outrank
+	// an equivalent explicit "/" route.
+	if collectedRoutes[0].PathMatch != nil {
+		t.Errorf("expected nil path match for no-match rule, got %+v", collectedRoutes[0].PathMatch)
 	}
-	if collectedRoutes[0].PathMatch.Type != ghost.PathMatchPathPrefix {
-		t.Errorf("expected path match type PathPrefix, got %v", collectedRoutes[0].PathMatch.Type)
-	}
-	if collectedRoutes[0].PathMatch.Value != "/" {
-		t.Errorf("expected path match value /, got %s", collectedRoutes[0].PathMatch.Value)
+	if collectedRoutes[0].Priority != 0 {
+		t.Errorf("expected priority 0 for no-match rule, got %d", collectedRoutes[0].Priority)
 	}
 }
 
@@ -822,7 +823,8 @@ func TestCollectHTTPRouteBackends_PortMapResolution(t *testing.T) {
 		if r.PathMatch != nil && r.PathMatch.Value == "/api" {
 			apiRoute = r
 		}
-		if r.PathMatch != nil && r.PathMatch.Value == "/" {
+		// The no-match (default) rule now yields a nil PathMatch (M-9).
+		if r.PathMatch == nil {
 			defaultRoute = r
 		}
 	}
@@ -1106,6 +1108,23 @@ func TestListenersForRoute_PortFilter(t *testing.T) {
 			},
 			want: nil,
 		},
+		{
+			// M-24: filter present but resolves to no existing listener. Must match
+			// NOTHING (sentinel), not everything. Emitting nil here would be dropped
+			// by omitempty and ghost would treat the route as "all listeners".
+			name: "sectionName resolves to nothing = match-nothing sentinel",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", SectionName: ptr(gatewayv1.SectionName("no-such-listener"))},
+			},
+			want: []string{noSuchListenerSocket},
+		},
+		{
+			name: "port resolves to nothing = match-nothing sentinel",
+			parentRefs: []gatewayv1.ParentReference{
+				{Name: "gw", Port: ptr(gatewayv1.PortNumber(9999))},
+			},
+			want: []string{noSuchListenerSocket},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1134,5 +1153,131 @@ func TestListenersForRoute_PortFilter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCollectHTTPRouteBackends_DefaultWeightIsOne verifies M-8: a backendRef with
+// no explicit weight defaults to 1 (Gateway API spec) in the matches branch too
+// (not 100). Mixing explicit and implicit weights previously inverted intended
+// splits (e.g. {a,weight:10},{b} yielded 10:100 instead of 10:1).
+func TestCollectHTTPRouteBackends_DefaultWeightIsOne(t *testing.T) {
+	prefixType := gatewayv1.PathMatchPathPrefix
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Hostnames: []gatewayv1.Hostname{"api.example.com"},
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/split")}},
+						},
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-a", Port: ptr(gatewayv1.PortNumber(80))},
+								Weight:                 ptr(int32(10)),
+							}},
+							{BackendRef: gatewayv1.BackendRef{
+								// no weight -> should default to 1
+								BackendObjectReference: gatewayv1.BackendObjectReference{Name: "svc-b", Port: ptr(gatewayv1.PortNumber(80))},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	collected := CollectHTTPRouteBackends(routes, nil, "default", nil, nil, nil)
+
+	var wA, wB int
+	found := 0
+	for _, r := range collected {
+		switch r.Service {
+		case "svc-a":
+			wA = r.Weight
+			found++
+		case "svc-b":
+			wB = r.Weight
+			found++
+		}
+	}
+	if found != 2 {
+		t.Fatalf("expected svc-a and svc-b routes, found %d", found)
+	}
+	if wA != 10 {
+		t.Errorf("svc-a weight = %d, want 10", wA)
+	}
+	if wB != 1 {
+		t.Errorf("svc-b weight = %d, want 1 (Gateway API default), not 100", wB)
+	}
+}
+
+// TestNoMatchRuleMatchesExplicitSlashPriority verifies M-9: a rule with no matches
+// must produce the same priority (0) as an equivalent rule with an explicit
+// PathPrefix "/" match, since both match all paths with no specificity.
+func TestNoMatchRuleMatchesExplicitSlashPriority(t *testing.T) {
+	prefixType := gatewayv1.PathMatchPathPrefix
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Hostnames: []gatewayv1.Hostname{"api.example.com"},
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						// no-match rule
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{Name: "nomatch-svc", Port: ptr(gatewayv1.PortNumber(80))},
+							}},
+						},
+					},
+					{
+						// explicit PathPrefix "/"
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/")}},
+						},
+						BackendRefs: []gatewayv1.HTTPBackendRef{
+							{BackendRef: gatewayv1.BackendRef{
+								BackendObjectReference: gatewayv1.BackendObjectReference{Name: "explicit-svc", Port: ptr(gatewayv1.PortNumber(80))},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	collected := CollectHTTPRouteBackends(routes, nil, "default", nil, nil, nil)
+
+	var noMatchPrio, explicitPrio int
+	foundNoMatch, foundExplicit := false, false
+	for _, r := range collected {
+		switch r.Service {
+		case "nomatch-svc":
+			noMatchPrio = r.Priority
+			foundNoMatch = true
+			if r.PathMatch != nil {
+				t.Errorf("no-match rule should have nil PathMatch, got %+v", r.PathMatch)
+			}
+		case "explicit-svc":
+			explicitPrio = r.Priority
+			foundExplicit = true
+			if r.PathMatch != nil {
+				t.Errorf("explicit-/ rule should have nil PathMatch, got %+v", r.PathMatch)
+			}
+		}
+	}
+	if !foundNoMatch || !foundExplicit {
+		t.Fatalf("expected both routes; noMatch=%v explicit=%v", foundNoMatch, foundExplicit)
+	}
+	if noMatchPrio != 0 {
+		t.Errorf("no-match rule priority = %d, want 0", noMatchPrio)
+	}
+	if explicitPrio != 0 {
+		t.Errorf("explicit-/ rule priority = %d, want 0", explicitPrio)
+	}
+	if noMatchPrio != explicitPrio {
+		t.Errorf("no-match (%d) and explicit-/ (%d) priorities must be equal", noMatchPrio, explicitPrio)
 	}
 }

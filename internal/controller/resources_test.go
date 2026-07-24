@@ -1049,3 +1049,68 @@ func TestBuildLoggingSidecar_ExtraArgs(t *testing.T) {
 		t.Errorf("expected extra args in: %v", container.Args)
 	}
 }
+
+// TestIsReservedPort covers M-11: the internal data-plane bind ports must be
+// recognized as reserved.
+func TestIsReservedPort(t *testing.T) {
+	for _, p := range []int32{1969, 6060, 6082, 8081, 9000} {
+		if !isReservedPort(p) {
+			t.Errorf("port %d should be reserved", p)
+		}
+	}
+	for _, p := range []int32{80, 443, 8080, 3000} {
+		if isReservedPort(p) {
+			t.Errorf("port %d should not be reserved", p)
+		}
+	}
+}
+
+// TestBuildGatewayContainer_SkipsReservedPort covers M-11: a listener on a
+// reserved port must not be programmed into VARNISH_LISTEN or the container
+// ports (which would crash-loop the pod).
+func TestBuildGatewayContainer_SkipsReservedPort(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default",
+		gatewayv1.Listener{Name: "ok", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+		gatewayv1.Listener{Name: "bad", Port: 8081, Protocol: gatewayv1.HTTPProtocolType},
+	)
+
+	container := r.buildGatewayContainer(gw, deploymentConfig{effectiveImage: "test:latest"})
+
+	var varnishListen string
+	for _, e := range container.Env {
+		if e.Name == "VARNISH_LISTEN" {
+			varnishListen = e.Value
+		}
+	}
+	if !strings.Contains(varnishListen, "http-80=:80,http") {
+		t.Errorf("VARNISH_LISTEN %q should program port 80", varnishListen)
+	}
+	if strings.Contains(varnishListen, ":8081") {
+		t.Errorf("VARNISH_LISTEN %q must not program reserved port 8081", varnishListen)
+	}
+	for _, p := range container.Ports {
+		if p.ContainerPort == 8081 && p.Name == "http-8081" {
+			t.Errorf("reserved listener port 8081 must not be exposed as a container port")
+		}
+	}
+}
+
+// TestBuildService_SkipsReservedPort covers M-11: reserved listener ports must
+// not be exposed as Service ports either.
+func TestBuildService_SkipsReservedPort(t *testing.T) {
+	r := testReconcilerSimple()
+	gw := testGateway("my-gw", "default",
+		gatewayv1.Listener{Name: "ok", Port: 80, Protocol: gatewayv1.HTTPProtocolType},
+		gatewayv1.Listener{Name: "bad", Port: 9000, Protocol: gatewayv1.HTTPProtocolType},
+	)
+
+	svc := r.buildService(gw, ResolvedServiceConfig{Type: corev1.ServiceTypeLoadBalancer, Annotations: map[string]string{}, Labels: map[string]string{}})
+
+	if len(svc.Spec.Ports) != 1 {
+		t.Fatalf("expected 1 service port (reserved port skipped), got %d", len(svc.Spec.Ports))
+	}
+	if svc.Spec.Ports[0].Port != 80 {
+		t.Errorf("expected port 80, got %d", svc.Spec.Ports[0].Port)
+	}
+}

@@ -56,6 +56,18 @@ sub vcl_recv {
     # Chaperone sends: BAN /pattern.* HTTP/1.1 \n Host: example.com
     # Uses ban lurker friendly expressions (obj.http.*) for background cleanup.
     # Only handles localhost requests; non-localhost BAN falls through to user VCL.
+    #
+    # std.ban() takes a single string with no escaping mechanism, so req.http.host
+    # and req.url are concatenated raw into the ban expression below. This is safe
+    # ONLY because the request originates from the chaperone, which validates the
+    # VarnishCacheInvalidation spec before issuing the BAN (see
+    # validateInvalidationSpec in internal/invalidation/watcher.go): the hostname
+    # must be an RFC 1123 hostname (no whitespace, quotes or '&') and every path
+    # must start with '/' and contain no whitespace or quotes. Those constraints
+    # make it impossible for either value to inject additional ban conditions
+    # (e.g. a trailing "&& ..." that would flush unrelated vhosts). The BAN method
+    # is further restricted to localhost above. Do not relax this validation
+    # without revisiting the injection surface here.
     if (req.method == "BAN" && client.ip ~ localhost) {
         if (std.ban("obj.http.x-cache-host == " + req.http.host +
                      " && obj.http.x-cache-url ~ " + req.url)) {

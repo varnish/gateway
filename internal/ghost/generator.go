@@ -114,11 +114,16 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 		filters     string // JSON serialization of Filters
 		listeners   string // sorted, comma-joined
 		cachePolicy string // JSON serialization of CachePolicy
-		backendTLS  string // TLS hostname (routes with different TLS must not merge)
 		priority    int
 		ruleIndex   int
 	}
 
+	// NOTE: BackendTLS is intentionally NOT part of the merge key. Each BackendGroup
+	// carries its own BackendTLS (see routeToBackendGroup), so backends with and
+	// without a BackendTLSPolicy in the same rule must merge into ONE route with
+	// multiple weighted groups. Keying on BackendTLS would split them into two
+	// routes with identical match criteria; ghost returns the FIRST matching route,
+	// so the weighted split would silently collapse (and output order is nondeterministic).
 	grouped := make(map[routeKey][]Route)
 	for _, route := range routes {
 		key := routeKey{
@@ -129,7 +134,6 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			filters:     serializeFilters(route.Filters),
 			listeners:   serializeListeners(route.Listeners),
 			cachePolicy: serializeCachePolicy(route.CachePolicy),
-			backendTLS:  serializeBackendTLS(route.BackendTLS),
 			priority:    route.Priority,
 			ruleIndex:   route.RuleIndex,
 		}
@@ -223,15 +227,6 @@ func serializeCachePolicy(cp *CachePolicy) string {
 		return ""
 	}
 	data, _ := json.Marshal(cp)
-	return string(data)
-}
-
-// serializeBackendTLS converts BackendTLS to string for grouping.
-func serializeBackendTLS(tls *BackendTLS) string {
-	if tls == nil {
-		return ""
-	}
-	data, _ := json.Marshal(tls)
 	return string(data)
 }
 

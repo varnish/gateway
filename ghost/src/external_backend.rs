@@ -201,7 +201,7 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             let p = sob_to_str(bereq.url())?.to_string();
             let headers: Vec<(String, Vec<u8>)> = bereq
                 .into_iter()
-                .filter(|(k, _)| !is_hop_by_hop(k))
+                .filter(|(k, _)| forward_client_header(k))
                 .map(|(k, v)| (k.to_string(), v.as_ref().to_vec()))
                 .collect();
             (p, headers)
@@ -397,6 +397,20 @@ fn is_hop_by_hop(name: &str) -> bool {
     HOP_BY_HOP.iter().any(|h| name.eq_ignore_ascii_case(h))
 }
 
+/// Whether a client (bereq) header should be copied verbatim onto the
+/// upstream reqwest request.
+///
+/// Hop-by-hop headers are dropped per RFC 7230. `Host` is dropped too: it is
+/// NOT hop-by-hop, so without this guard it would be copied here and then a
+/// SECOND `Host` appended by `req_builder.header("host", ...)` — reqwest's
+/// `.header()` appends rather than replaces, so two conflicting `Host:` lines
+/// would go on the wire (client value first). Strict upstreams reject that
+/// (nginx 400; S3/GCS SigV4 signature mismatch). The upstream `Host` is set
+/// exactly once, from `self.upstream_host`.
+fn forward_client_header(name: &str) -> bool {
+    !is_hop_by_hop(name) && !name.eq_ignore_ascii_case("host")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,6 +422,25 @@ mod tests {
         assert!(is_hop_by_hop("Transfer-Encoding"));
         assert!(!is_hop_by_hop("Content-Type"));
         assert!(!is_hop_by_hop("Host"));
+    }
+
+    #[test]
+    fn forward_client_header_drops_host_and_hop_by_hop() {
+        // Host must be dropped so it isn't duplicated with the explicit
+        // upstream Host set later (reqwest `.header()` appends).
+        assert!(!forward_client_header("Host"));
+        assert!(!forward_client_header("host"));
+        assert!(!forward_client_header("HOST"));
+
+        // Hop-by-hop headers are still dropped.
+        assert!(!forward_client_header("Connection"));
+        assert!(!forward_client_header("transfer-encoding"));
+
+        // Ordinary end-to-end headers are forwarded.
+        assert!(forward_client_header("Accept"));
+        assert!(forward_client_header("User-Agent"));
+        assert!(forward_client_header("Authorization"));
+        assert!(forward_client_header("X-Amz-Date"));
     }
 
     #[test]

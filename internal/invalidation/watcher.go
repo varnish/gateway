@@ -13,10 +13,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -25,6 +27,43 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 )
+
+// hostnameRE matches an RFC 1123 hostname (DNS name). It deliberately excludes
+// whitespace, quotes and the '&' character so that a hostname can never break
+// out of the Varnish ban expression it is concatenated into (see M-21 and the
+// BAN handler in internal/vcl/preamble.vcl).
+var hostnameRE = regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+
+// validateInvalidationSpec validates the untrusted hostname and paths from a
+// VarnishCacheInvalidation CR before any request is sent to Varnish.
+//
+// The hostname is set verbatim as the Host header and, via the ban-lurker
+// headers, concatenated into a Varnish ban expression. The paths become the
+// request URL, which for BAN is used as a regex inside the same expression.
+// Since std.ban() takes a single string with no escaping mechanism, strict
+// input validation here is the primary defense against ban-expression
+// injection: a hostname or path containing whitespace, quotes or '&' could
+// otherwise inject additional ban conditions and flush unrelated objects.
+func validateInvalidationSpec(hostname string, paths []string) error {
+	if hostname == "" {
+		return fmt.Errorf("spec.hostname is required")
+	}
+	if len(hostname) > 253 || !hostnameRE.MatchString(hostname) {
+		return fmt.Errorf("spec.hostname %q is not a valid RFC 1123 hostname", hostname)
+	}
+	if len(paths) == 0 {
+		return fmt.Errorf("spec.paths must contain at least one path")
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("spec.paths entry %q must start with '/'", p)
+		}
+		if strings.ContainsAny(p, " \t\r\n\"") {
+			return fmt.Errorf("spec.paths entry %q must not contain whitespace or quotes", p)
+		}
+	}
+	return nil
+}
 
 var varnishCacheInvalidationGVR = schema.GroupVersionResource{
 	Group:    "gateway.varnish-software.com",
@@ -191,10 +230,39 @@ func (w *Watcher) handleInvalidation(ctx context.Context, obj *unstructured.Unst
 		return
 	}
 
+	// M-14: enforce same-namespace authorization. The CR must live in the same
+	// namespace as the target gateway. The only cluster-level authorization for
+	// a VarnishCacheInvalidation is "can create the CR somewhere"; without this
+	// check any author could set spec.gatewayRef.namespace to an unrelated
+	// gateway and purge/ban (or `type: Ban` with `.*` flush) its entire cache.
+	// The chaperone has no controller-runtime client to evaluate a
+	// ReferenceGrant, so cross-namespace refs are rejected outright — matching
+	// how the rest of the operator treats cross-namespace references (a
+	// ReferenceGrant would be the follow-up to relax this).
+	if ns != gwNS {
+		msg := fmt.Sprintf("cross-namespace gatewayRef not permitted: VarnishCacheInvalidation in namespace %q targets gateway in namespace %q (create the invalidation in %q)", ns, gwNS, gwNS)
+		w.logger.Warn("rejecting cross-namespace cache invalidation", "name", name, "namespace", ns, "gatewayNamespace", gwNS)
+		if w.updateStatus(ctx, ns, name, false, msg, nil) {
+			w.markProcessed(uid)
+		}
+		return
+	}
+
 	// Extract spec fields
 	invType, _, _ := unstructured.NestedString(obj.Object, "spec", "type")
 	hostname, _, _ := unstructured.NestedString(obj.Object, "spec", "hostname")
 	paths, _, _ := unstructured.NestedStringSlice(obj.Object, "spec", "paths")
+
+	// M-21: validate untrusted hostname/paths BEFORE issuing any request. An
+	// invalid spec is a terminal Failed result, not a transient error.
+	if err := validateInvalidationSpec(hostname, paths); err != nil {
+		msg := fmt.Sprintf("invalid cache invalidation spec: %v", err)
+		w.logger.Warn("rejecting invalid cache invalidation", "name", name, "namespace", ns, "error", err)
+		if w.updateStatus(ctx, ns, name, false, msg, nil) {
+			w.markProcessed(uid)
+		}
+		return
+	}
 
 	w.logger.Info("processing cache invalidation",
 		"name", name,
@@ -248,13 +316,23 @@ func (w *Watcher) handleInvalidation(ctx context.Context, obj *unstructured.Unst
 		)
 	}
 
-	// Mark as processed locally
+	// Write per-pod result and compute aggregate phase. Mark the invalidation
+	// as processed locally ONLY after the status write succeeds (M-20). If the
+	// status update fails (transient API error, exhausted conflict retries) we
+	// leave it unprocessed so a later watch event or re-list retries it — the
+	// podAlreadyReported guard and the idempotency of purge/ban make
+	// reprocessing safe, and this prevents a CR from being wedged in
+	// Pending/InProgress forever (where operator GC never reaps it).
+	if w.updateStatus(ctx, ns, name, success, message, pathResults) {
+		w.markProcessed(uid)
+	}
+}
+
+// markProcessed records that this pod has finished processing the given UID.
+func (w *Watcher) markProcessed(uid string) {
 	w.mu.Lock()
 	w.processed[uid] = struct{}{}
 	w.mu.Unlock()
-
-	// Write per-pod result and compute aggregate phase
-	w.updateStatus(ctx, ns, name, success, message, pathResults)
 }
 
 // podAlreadyReported checks if this pod already has a result in status.podResults.
@@ -292,8 +370,11 @@ func (w *Watcher) executePurge(ctx context.Context, hostname, path string) error
 		resp.Body.Close()
 	}()
 
-	// Varnish returns 200 on successful purge (both cache hit and miss)
-	if resp.StatusCode != http.StatusOK {
+	// Varnish's return(purge) synthesizes 200 on a cache hit and 404 ("Not in
+	// cache") on a miss. Purge is an idempotent delete: purging a URL that is
+	// not cached still leaves the cache in the desired state (object absent),
+	// so 404 is a success, not a failure (M-19). Any other status is an error.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("PURGE returned HTTP %d", resp.StatusCode)
 	}
 
@@ -330,19 +411,27 @@ func (w *Watcher) executeBan(ctx context.Context, hostname, path string) error {
 // updateStatus appends this pod's result to status.podResults and computes the
 // aggregate phase. Uses optimistic concurrency (resourceVersion) to handle
 // concurrent updates from multiple pods.
-func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, success bool, message string, pathResults []any) {
+//
+// It returns true when the status was durably recorded (either this pod's
+// result was written, or this pod was already recorded), and false on any
+// failure to persist. Callers use the return value to decide whether to mark
+// the invalidation processed (M-20): a false return means "retry later".
+func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, success bool, message string, pathResults []any) bool {
 	if w.dynClient == nil {
+		// No status backend (only happens in tests/standalone). There is
+		// nothing to persist, so treat the work as done to avoid reprocessing.
 		w.logger.Warn("no dynamic client, skipping status update", "name", name)
-		return
+		return true
 	}
 	// Retry loop for conflict resolution (multiple pods updating concurrently)
-	for attempt := 0; attempt < 5; attempt++ {
+	const maxAttempts = 5
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Get the latest version
 		current, err := w.dynClient.Resource(varnishCacheInvalidationGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			w.logger.Error("failed to get VarnishCacheInvalidation for status update",
 				"name", name, "error", err)
-			return
+			return false
 		}
 
 		// Build this pod's result
@@ -362,7 +451,7 @@ func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, succ
 		for _, r := range existingResults {
 			if m, ok := r.(map[string]any); ok {
 				if pn, _, _ := unstructured.NestedString(m, "podName"); pn == w.podName {
-					return // already reported
+					return true // already reported — durably recorded
 				}
 			}
 		}
@@ -383,19 +472,25 @@ func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, succ
 
 		if err := unstructured.SetNestedField(current.Object, status, "status"); err != nil {
 			w.logger.Error("failed to set status fields", "error", err)
-			return
+			return false
 		}
 
 		_, err = w.dynClient.Resource(varnishCacheInvalidationGVR).Namespace(namespace).UpdateStatus(
 			ctx, current, metav1.UpdateOptions{})
 		if err != nil {
-			if strings.Contains(err.Error(), "the object has been modified") {
+			if apierrors.IsConflict(err) {
 				w.logger.Debug("status update conflict, retrying", "attempt", attempt+1)
+				// Bounded backoff before re-reading and retrying.
+				select {
+				case <-ctx.Done():
+					return false
+				case <-time.After(time.Duration(attempt+1) * 50 * time.Millisecond):
+				}
 				continue
 			}
 			w.logger.Error("failed to update VarnishCacheInvalidation status",
 				"name", name, "error", err)
-			return
+			return false
 		}
 
 		w.logger.Info("cache invalidation status updated",
@@ -404,10 +499,11 @@ func (w *Watcher) updateStatus(ctx context.Context, namespace, name string, succ
 			"phase", phase,
 			"podResults", len(existingResults),
 		)
-		return
+		return true
 	}
 
 	w.logger.Error("failed to update status after max retries", "name", name)
+	return false
 }
 
 // computePhase determines the aggregate phase based on podResults and expected pod count.

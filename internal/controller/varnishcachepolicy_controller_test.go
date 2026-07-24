@@ -833,6 +833,137 @@ func TestReconcile_Conflict(t *testing.T) {
 	assertVCPCondition(t, &updated, metav1.ConditionTrue, "Accepted")
 }
 
+// M-12: a Conflicted loser must be re-evaluated (and promoted) when the winning
+// VCP is deleted, rather than staying Conflicted until the informer resync.
+func TestReconcile_ConflictHealedAfterWinnerDeleted(t *testing.T) {
+	scheme := newTestScheme()
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-route", Namespace: "default"},
+	}
+
+	now := metav1.Now()
+	winner := &gatewayparamsv1alpha1.VarnishCachePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "older-vcp",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		},
+		Spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
+			DefaultTTL: durationPtr(60 * time.Second),
+		},
+	}
+	loser := &gatewayparamsv1alpha1.VarnishCachePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "newer-vcp",
+			Namespace:         "default",
+			CreationTimestamp: now,
+		},
+		Spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef: vcpTargetRef("HTTPRoute", "my-route", nil),
+			ForcedTTL: durationPtr(300 * time.Second),
+		},
+	}
+
+	r := newVCPTestReconciler(scheme, route, winner, loser)
+	ctx := context.Background()
+
+	// Establish the conflict: winner accepted, loser conflicted.
+	for _, name := range []string{"older-vcp", "newer-vcp"} {
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}}); err != nil {
+			t.Fatalf("reconcile %s: %v", name, err)
+		}
+	}
+
+	var updated gatewayparamsv1alpha1.VarnishCachePolicy
+	if err := r.Get(ctx, types.NamespacedName{Name: "newer-vcp", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get loser: %v", err)
+	}
+	assertVCPCondition(t, &updated, metav1.ConditionFalse, "Conflicted")
+
+	// Delete the winner and reconcile its (now missing) key. The NotFound path
+	// must re-evaluate siblings so the loser becomes the winner.
+	if err := r.Delete(ctx, winner); err != nil {
+		t.Fatalf("delete winner: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "older-vcp", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile deleted winner: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "newer-vcp", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get loser after deletion: %v", err)
+	}
+	assertVCPCondition(t, &updated, metav1.ConditionTrue, "Accepted")
+}
+
+// M-12: retargeting the winner to a different resource must also promote the
+// previously-Conflicted loser, exercised via the found (non-delete) path.
+func TestReconcile_ConflictHealedAfterWinnerRetargeted(t *testing.T) {
+	scheme := newTestScheme()
+	routeA := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "route-a", Namespace: "default"},
+	}
+	routeB := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "route-b", Namespace: "default"},
+	}
+
+	now := metav1.Now()
+	winner := &gatewayparamsv1alpha1.VarnishCachePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "older-vcp",
+			Namespace:         "default",
+			CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+		},
+		Spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef:  vcpTargetRef("HTTPRoute", "route-a", nil),
+			DefaultTTL: durationPtr(60 * time.Second),
+		},
+	}
+	loser := &gatewayparamsv1alpha1.VarnishCachePolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "newer-vcp",
+			Namespace:         "default",
+			CreationTimestamp: now,
+		},
+		Spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef: vcpTargetRef("HTTPRoute", "route-a", nil),
+			ForcedTTL: durationPtr(300 * time.Second),
+		},
+	}
+
+	r := newVCPTestReconciler(scheme, routeA, routeB, winner, loser)
+	ctx := context.Background()
+
+	for _, name := range []string{"older-vcp", "newer-vcp"} {
+		if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}}); err != nil {
+			t.Fatalf("reconcile %s: %v", name, err)
+		}
+	}
+
+	var updated gatewayparamsv1alpha1.VarnishCachePolicy
+	if err := r.Get(ctx, types.NamespacedName{Name: "newer-vcp", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get loser: %v", err)
+	}
+	assertVCPCondition(t, &updated, metav1.ConditionFalse, "Conflicted")
+
+	// Retarget the winner to route-b; the loser now stands alone on route-a.
+	if err := r.Get(ctx, types.NamespacedName{Name: "older-vcp", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get winner: %v", err)
+	}
+	updated.Spec.TargetRef = vcpTargetRef("HTTPRoute", "route-b", nil)
+	if err := r.Update(ctx, &updated); err != nil {
+		t.Fatalf("retarget winner: %v", err)
+	}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Name: "older-vcp", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile retargeted winner: %v", err)
+	}
+
+	if err := r.Get(ctx, types.NamespacedName{Name: "newer-vcp", Namespace: "default"}, &updated); err != nil {
+		t.Fatalf("get loser after retarget: %v", err)
+	}
+	assertVCPCondition(t, &updated, metav1.ConditionTrue, "Accepted")
+}
+
 func TestReconcile_NoConflict_DifferentTargets(t *testing.T) {
 	scheme := newTestScheme()
 	route1 := &gatewayv1.HTTPRoute{
@@ -1103,6 +1234,104 @@ func TestResolveCachePolicyForRoute(t *testing.T) {
 		cp := ResolveCachePolicyForRoute(context.Background(), c, route, nil, "")
 		if cp == nil {
 			t.Fatal("expected policy, got nil")
+		}
+	})
+}
+
+// M-13: VCPs must only match resources in their own namespace. With same-named
+// Gateways/HTTPRoutes across namespaces and cross-namespace route attachment, a
+// policy intended for one namespace must not leak into another.
+func TestResolveCachePolicyForRoute_CrossNamespace(t *testing.T) {
+	scheme := newTestScheme()
+
+	makeAcceptedVCP := func(name, namespace string, spec gatewayparamsv1alpha1.VarnishCachePolicySpec) *gatewayparamsv1alpha1.VarnishCachePolicy {
+		return &gatewayparamsv1alpha1.VarnishCachePolicy{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              name,
+				Namespace:         namespace,
+				CreationTimestamp: metav1.Now(),
+			},
+			Spec: spec,
+			Status: gatewayparamsv1alpha1.VarnishCachePolicyStatus{
+				Ancestors: []gatewayparamsv1alpha1.VarnishCachePolicyAncestorStatus{
+					{
+						ControllerName: ControllerName,
+						Conditions: []metav1.Condition{
+							{Type: "Accepted", Status: metav1.ConditionTrue},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	// Route lives in team-a; the Gateway it attaches to lives in platform.
+	route := &gatewayv1.HTTPRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "team-a"},
+	}
+	gateway := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "platform"},
+	}
+
+	t.Run("gateway-level VCP in route namespace does not leak to foreign gateway", func(t *testing.T) {
+		// VCP in team-a targeting a Gateway named "gw" — that means team-a/gw,
+		// NOT the platform/gw the route actually attaches to.
+		foreign := makeAcceptedVCP("foreign-gw-vcp", "team-a", gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef:  vcpTargetRef("Gateway", "gw", nil),
+			DefaultTTL: durationPtr(120 * time.Second),
+		})
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(foreign).Build()
+		cp := ResolveCachePolicyForRoute(context.Background(), c, route, gateway, "")
+		if cp != nil {
+			t.Fatal("expected nil: gateway VCP from a different namespace must not apply")
+		}
+	})
+
+	t.Run("gateway-level VCP in gateway namespace applies", func(t *testing.T) {
+		legit := makeAcceptedVCP("gw-vcp", "platform", gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef:  vcpTargetRef("Gateway", "gw", nil),
+			DefaultTTL: durationPtr(90 * time.Second),
+		})
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(legit).Build()
+		cp := ResolveCachePolicyForRoute(context.Background(), c, route, gateway, "")
+		if cp == nil {
+			t.Fatal("expected policy from gateway-namespace VCP")
+		}
+		if cp.DefaultTTLSeconds == nil || *cp.DefaultTTLSeconds != 90 {
+			t.Errorf("DefaultTTLSeconds = %v, want 90", cp.DefaultTTLSeconds)
+		}
+	})
+
+	t.Run("route-level VCP in gateway namespace does not leak to foreign route", func(t *testing.T) {
+		// A route named "gw" also exists conceptually in platform; a VCP there
+		// targeting HTTPRoute "gw" must not apply to team-a/gw.
+		foreign := makeAcceptedVCP("foreign-route-vcp", "platform", gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef:  vcpTargetRef("HTTPRoute", "gw", nil),
+			DefaultTTL: durationPtr(200 * time.Second),
+		})
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(foreign).Build()
+		cp := ResolveCachePolicyForRoute(context.Background(), c, route, gateway, "")
+		if cp != nil {
+			t.Fatal("expected nil: route VCP from a different namespace must not apply")
+		}
+	})
+
+	t.Run("route-level VCP in route namespace applies", func(t *testing.T) {
+		legit := makeAcceptedVCP("route-vcp", "team-a", gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef: vcpTargetRef("HTTPRoute", "gw", nil),
+			ForcedTTL: durationPtr(45 * time.Second),
+		})
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(legit).Build()
+		cp := ResolveCachePolicyForRoute(context.Background(), c, route, gateway, "")
+		if cp == nil {
+			t.Fatal("expected policy from route-namespace VCP")
+		}
+		if cp.ForcedTTLSeconds == nil || *cp.ForcedTTLSeconds != 45 {
+			t.Errorf("ForcedTTLSeconds = %v, want 45", cp.ForcedTTLSeconds)
 		}
 	})
 }

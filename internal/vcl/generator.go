@@ -171,12 +171,16 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 						filters = extractFilters(rule.Filters)
 					}
 
+					// A rule with no matches is semantically identical to a rule with
+					// matches:[{path:{type:PathPrefix,value:"/"}}]. PathPrefix "/" matches
+					// all paths and carries no specificity, so we normalize it to a nil
+					// pathMatch (priority 0) — exactly as the explicit-"/" branch does below.
+					// Assigning a concrete PathPrefix "/" here would inflate the priority to
+					// 10100, making a no-match rule outrank an equivalent explicit "/" rule.
+					var pathMatch *ghost.PathMatch
+
 					// Handle filter-only routes with no backends (e.g., redirects with no matches)
 					if len(rule.BackendRefs) == 0 && filters != nil {
-						pathMatch := &ghost.PathMatch{
-							Type:  ghost.PathMatchPathPrefix,
-							Value: "/",
-						}
 						collectedRoutes = append(collectedRoutes, ghost.Route{
 							Hostname:  hostname,
 							PathMatch: pathMatch,
@@ -198,10 +202,6 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 
 					// If all backends were filtered, create a route with no backend (ghost returns 500)
 					if len(validNoMatchBackends) == 0 && len(rule.BackendRefs) > 0 {
-						pathMatch := &ghost.PathMatch{
-							Type:  ghost.PathMatchPathPrefix,
-							Value: "/",
-						}
 						collectedRoutes = append(collectedRoutes, ghost.Route{
 							Hostname:  hostname,
 							PathMatch: pathMatch,
@@ -241,12 +241,6 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 						weight := 1 // Gateway API default when unspecified
 						if backend.Weight != nil {
 							weight = int(*backend.Weight)
-						}
-
-						// Default route with PathPrefix "/"
-						pathMatch := &ghost.PathMatch{
-							Type:  ghost.PathMatchPathPrefix,
-							Value: "/",
 						}
 
 						collectedRoutes = append(collectedRoutes, ghost.Route{
@@ -399,7 +393,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 								}
 							}
 
-							weight := 100
+							weight := 1 // Gateway API default when unspecified
 							if backend.Weight != nil {
 								weight = int(*backend.Weight)
 							}
@@ -592,6 +586,15 @@ func convertRequestRedirectFilter(f *gatewayv1.HTTPRequestRedirectFilter) *ghost
 	return result
 }
 
+// noSuchListenerSocket is a sentinel socket name that is never bound by Varnish.
+// It is emitted as a route's sole listener when a route's parentRef filter is
+// PRESENT but resolves to no existing listener. Because ghost filters routes by
+// the live local.socket() name and this sentinel can never equal a real socket,
+// the route matches on NO listener — preserving the user's restriction intent.
+// Emitting an empty slice instead would be dropped by omitempty, and ghost treats
+// an absent listeners list as "match all listeners" — the exact opposite.
+const noSuchListenerSocket = "__no_such_listener__"
+
 // socketNameForListener returns the Varnish socket name for a Gateway listener.
 // Format: {proto}-{port}, e.g. "http-80", "https-443"
 func socketNameForListener(listener *gatewayv1.Listener) string {
@@ -661,6 +664,14 @@ func listenersForRoute(route *gatewayv1.HTTPRoute, gateway *gatewayv1.Gateway) [
 
 	if !hasFilter {
 		return nil
+	}
+
+	// A filter is present but resolved to no existing listener (e.g. every
+	// parentRef names a sectionName/port that the gateway does not expose).
+	// The route must match NOTHING rather than everything — emit a sentinel
+	// socket that ghost can never match on.
+	if len(socketSet) == 0 {
+		return []string{noSuchListenerSocket}
 	}
 
 	// If the route covers ALL listeners of the gateway, return nil (no filtering needed)

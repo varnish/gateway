@@ -51,12 +51,21 @@ type VarnishCacheInvalidationSpec struct {
 	Type VarnishCacheInvalidationType `json:"type"`
 
 	// Hostname is the Host header value for the invalidation request.
+	// It must be a valid RFC 1123 hostname. The constraint is also a security
+	// boundary: the hostname is concatenated into a Varnish ban expression, so
+	// disallowing whitespace, quotes and '&' prevents ban-expression injection.
+	// The chaperone re-validates this at runtime (validateInvalidationSpec).
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`
 	Hostname string `json:"hostname"`
 
 	// Paths is the list of URL paths for the invalidation.
 	// For Purge: exact paths of cached objects (e.g., "/api/users/123").
 	// For Ban: regex patterns matching cached URLs (e.g., "/api/.*").
+	// Each path must start with '/' and contain no whitespace or quotes; the
+	// chaperone re-validates this at runtime to prevent ban-expression injection.
 	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:items:Pattern=`^/[^\s"]*$`
 	Paths []string `json:"paths"`
 
 	// TTL is how long to keep this resource after all pods have completed.

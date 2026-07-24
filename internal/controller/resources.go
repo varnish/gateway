@@ -32,7 +32,38 @@ const (
 
 	// Chaperone dashboard port (always enabled, access via port-forward)
 	chaperoneDashboardPort = 9000
+
+	// ghostReloadPort is the loopback-only HTTP listener used for ghost reloads.
+	ghostReloadPort = 1969
+
+	// chaperoneDebugPort is the loopback-only pprof/backend.list debug endpoint
+	// (chaperone DEBUG_ADDR default 127.0.0.1:6060).
+	chaperoneDebugPort = 6060
+
+	// varnishAdminPort is the varnishadm reverse-mode port the chaperone binds.
+	varnishAdminPort = 6082
 )
+
+// reservedContainerPorts are ports the chaperone/data-plane binds internally.
+// A Gateway listener on any of these would collide with an internal bind and
+// crash-loop the pod (the chaperone errgroup cancels everything on a bind
+// failure), so such listeners are rejected via a listener status condition
+// instead of being programmed. The value is a human-readable description used
+// in the rejection message.
+var reservedContainerPorts = map[int32]string{
+	ghostReloadPort:        "ghost reload loopback listener",
+	chaperoneDebugPort:     "chaperone pprof/debug endpoint",
+	varnishAdminPort:       "varnishadm admin port",
+	chaperoneHealthPort:    "chaperone health/metrics endpoint",
+	chaperoneDashboardPort: "chaperone dashboard endpoint",
+}
+
+// isReservedPort reports whether a Gateway listener port collides with an
+// internal data-plane bind and therefore cannot be programmed.
+func isReservedPort(port int32) bool {
+	_, ok := reservedContainerPorts[port]
+	return ok
+}
 
 // listenerSocketName returns the Varnish socket name for a Gateway listener.
 // Format: {proto}-{port}, e.g. "http-80", "https-443"
@@ -397,6 +428,13 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, cf
 			continue
 		}
 		seenPorts[port] = true
+		// Skip listener ports that collide with an internal data-plane bind.
+		// Programming them would crash-loop the pod; the reconciler surfaces a
+		// PortUnavailable listener condition for these instead (see
+		// setListenerStatusesForUpdate).
+		if isReservedPort(port) {
+			continue
+		}
 		proto := "http"
 		if l.Protocol == gatewayv1.HTTPSProtocolType || l.Protocol == gatewayv1.TLSProtocolType {
 			proto = "https"
@@ -411,7 +449,6 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, cf
 	// Build VARNISH_LISTEN value
 	// Always include a loopback-only HTTP listener for ghost reload.
 	// This avoids sending plain HTTP reload requests to HTTPS listeners.
-	const ghostReloadPort = 1969
 	var listenParts []string
 	listenParts = append(listenParts, fmt.Sprintf("ghost-reload=127.0.0.1:%d,http", ghostReloadPort))
 	for _, e := range entries {
@@ -629,6 +666,11 @@ func (r *GatewayReconciler) buildService(gateway *gatewayv1.Gateway, resolved Re
 			continue
 		}
 		seenPorts[port] = true
+		// Reserved ports are never programmed (see buildGatewayContainer), so
+		// don't expose a Service port for them either.
+		if isReservedPort(port) {
+			continue
+		}
 		ports = append(ports, corev1.ServicePort{
 			Name:       listenerSocketName(l),
 			Port:       port,

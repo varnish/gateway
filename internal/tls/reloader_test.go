@@ -2,6 +2,7 @@ package tls
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +14,30 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/varnish/gateway/internal/varnishadm"
 )
+
+// commsErrorVarnishadm wraps MockVarnishadm to force a specific TLS cert
+// operation to fail with a comms-class error (as classified by
+// isCommsError), for testing the M-23 rollback-skip policy. All other
+// methods delegate to the embedded mock.
+type commsErrorVarnishadm struct {
+	*varnishadm.MockVarnishadm
+	failCommit bool
+	failLoad   bool
+}
+
+func (f *commsErrorVarnishadm) TLSCertCommit() (varnishadm.VarnishResponse, error) {
+	if f.failCommit {
+		return varnishadm.VarnishResponse{}, fmt.Errorf("varnishadm communication failed: connection reset")
+	}
+	return f.MockVarnishadm.TLSCertCommit()
+}
+
+func (f *commsErrorVarnishadm) TLSCertLoad(name, certFile, privateKeyFile string) (varnishadm.VarnishResponse, error) {
+	if f.failLoad {
+		return varnishadm.VarnishResponse{}, fmt.Errorf("varnishadm connection lost: EOF")
+	}
+	return f.MockVarnishadm.TLSCertLoad(name, certFile, privateKeyFile)
+}
 
 // TestShouldReload is the deterministic, platform-independent guard for the
 // H-9 fix: fsnotify events on the Kubernetes atomic-writer "..data" symlink
@@ -741,5 +766,95 @@ func TestReloadAllCerts_RemoveAllCerts(t *testing.T) {
 	state := mock.GetTLSState()
 	if len(state) != 0 {
 		t.Errorf("Expected 0 committed certs, got %d", len(state))
+	}
+}
+
+// TestReloadAllCerts_CommitCommsError_SkipsRollback guards M-23: a comms-class
+// error on tls.cert.commit is ambiguous about whether the commit actually
+// landed server-side, so reloadAllCerts must NOT issue tls.cert.rollback in
+// that case (unlike a status-level rejection, where the transaction state is
+// known and rollback is safe). This must match LoadAll's existing policy.
+func TestReloadAllCerts_CommitCommsError_SkipsRollback(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "new.pem"), []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := varnishadm.NewMock(0, "", slog.Default())
+	mock := &commsErrorVarnishadm{MockVarnishadm: base, failCommit: true}
+	r := New(mock, dir, slog.Default())
+
+	err := r.reloadAllCerts()
+	if err == nil {
+		t.Fatal("reloadAllCerts() expected error on commit comms failure, got nil")
+	}
+
+	// tls.cert.commit itself is intercepted by commsErrorVarnishadm before it
+	// reaches the underlying mock's Exec (that's how the comms error is
+	// injected), so it deliberately does not appear in the recorded history.
+	// What matters here is that no rollback follows it.
+	history := base.GetCallHistory()
+	for _, cmd := range history {
+		if cmd == "tls.cert.rollback" {
+			t.Errorf("reloadAllCerts() should NOT roll back after a comms-class commit error; history: %v", history)
+		}
+	}
+}
+
+// TestReloadAllCerts_LoadCommsError_SkipsRollback guards M-23 for the
+// tls.cert.load path: a comms-class error there is likewise ambiguous about
+// server-side state, so no rollback should be issued.
+func TestReloadAllCerts_LoadCommsError_SkipsRollback(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bad.pem"), []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	base := varnishadm.NewMock(0, "", slog.Default())
+	mock := &commsErrorVarnishadm{MockVarnishadm: base, failLoad: true}
+	r := New(mock, dir, slog.Default())
+
+	err := r.reloadAllCerts()
+	if err == nil {
+		t.Fatal("reloadAllCerts() expected error on load comms failure, got nil")
+	}
+
+	history := base.GetCallHistory()
+	for _, cmd := range history {
+		if cmd == "tls.cert.rollback" {
+			t.Errorf("reloadAllCerts() should NOT roll back after a comms-class load error; history: %v", history)
+		}
+	}
+}
+
+// TestReloadAllCerts_CommitStatusError_StillRollsBack is the control case:
+// a status-level rejection (not comms-class) means the transaction is in a
+// known state server-side, so rollback must still happen. This guards
+// against a fix that accidentally suppresses rollback unconditionally.
+func TestReloadAllCerts_CommitStatusError_StillRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "new.pem"), []byte("cert"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := varnishadm.NewMock(0, "", slog.Default())
+	mock.SetResponse("tls.cert.commit", varnishadm.NewVarnishResponse(300, "commit rejected"))
+
+	r := New(mock, dir, slog.Default())
+
+	err := r.reloadAllCerts()
+	if err == nil {
+		t.Fatal("reloadAllCerts() expected error on commit status rejection, got nil")
+	}
+
+	history := mock.GetCallHistory()
+	var foundRollback bool
+	for _, cmd := range history {
+		if cmd == "tls.cert.rollback" {
+			foundRollback = true
+		}
+	}
+	if !foundRollback {
+		t.Errorf("reloadAllCerts() should roll back after a non-comms commit rejection; history: %v", history)
 	}
 }

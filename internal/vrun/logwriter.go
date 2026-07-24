@@ -24,17 +24,24 @@ type logWriter struct {
 	pw *io.PipeWriter
 }
 
-// newLogWriter creates a new log writer for varnishd output.
-// The ready channel is closed when varnishd signals it's ready to receive traffic.
-// The caller must call Close() when done to release the scanner goroutine.
-func newLogWriter(logger *slog.Logger, source string, ready chan<- struct{}) *logWriter {
-	pr, pw := io.Pipe()
+// maxLogLineSize is the maximum token size the scanner will buffer before
+// treating a line as overlong. Raised well above the default varnishd log
+// line length to avoid spurious ErrTooLong, while still bounding memory use.
+const maxLogLineSize = 8 * 1024 * 1024 // 8MB max token size
 
-	var readyOnce sync.Once
+// newLogWriter creates a new log writer for varnishd output.
+// The ready channel is closed (via readyOnce) when varnishd signals it's ready
+// to receive traffic. readyOnce MUST be shared across all logWriters that were
+// handed the same ready channel (e.g. stdout and stderr), otherwise each
+// writer's own sync.Once only dedupes closes within its own stream, and a
+// close from the "other" stream will panic on the already-closed channel.
+// The caller must call Close() when done to release the scanner goroutine.
+func newLogWriter(logger *slog.Logger, source string, ready chan<- struct{}, readyOnce *sync.Once) *logWriter {
+	pr, pw := io.Pipe()
 
 	go func() {
 		scanner := bufio.NewScanner(pr)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024) // 1MB max token size
+		scanner.Buffer(make([]byte, 64*1024), maxLogLineSize)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line == "" {
@@ -51,7 +58,9 @@ func newLogWriter(logger *slog.Logger, source string, ready chan<- struct{}) *lo
 				// Info from child process about starting, treat as debug
 				level = slog.LevelDebug
 
-				// Signal readiness and log milestone
+				// Signal readiness and log milestone. readyOnce is shared across
+				// both the stdout and stderr logWriters so the channel is closed
+				// at most once regardless of which stream the line appears on.
 				readyOnce.Do(func() {
 					close(ready)
 				})
@@ -76,7 +85,14 @@ func newLogWriter(logger *slog.Logger, source string, ready chan<- struct{}) *lo
 			logger.Log(context.Background(), level, line, "source", source)
 		}
 		if err := scanner.Err(); err != nil {
-			logger.Error("log scanner error", "source", source, "error", err)
+			// The scanner gave up (e.g. bufio.ErrTooLong on an overlong line).
+			// io.Pipe is synchronous: if we stop reading here, the next Write
+			// from varnishd blocks forever, and once the OS pipe buffer fills
+			// varnishd itself blocks - stalling the data plane. Keep draining
+			// the pipe (discarding data) so the writer side never blocks, even
+			// though we can no longer log individual lines.
+			logger.Error("log scanner error, draining remaining output without further line logging", "source", source, "error", err)
+			_, _ = io.Copy(io.Discard, pr)
 		}
 	}()
 

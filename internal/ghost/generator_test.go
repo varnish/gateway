@@ -696,9 +696,12 @@ func TestBackendTLSPropagation(t *testing.T) {
 	}
 }
 
-func TestBackendTLSPreventsMerging(t *testing.T) {
-	// Two routes with identical match criteria but different TLS configs
-	// should NOT be merged into one route
+func TestBackendTLSMergesIntoWeightedGroups(t *testing.T) {
+	// M-10: Two backends in the same rule with identical match criteria — one with
+	// a BackendTLSPolicy, one without — must merge into ONE route carrying two
+	// weighted backend groups. Each group keeps its own BackendTLS. BackendTLS must
+	// NOT be part of the merge key, otherwise the weighted split silently collapses
+	// (ghost returns the first matching route) and output order is nondeterministic.
 	routingConfig := &RoutingConfig{
 		Version: 2,
 		VHosts: map[string]VHostRouting{
@@ -709,7 +712,7 @@ func TestBackendTLSPreventsMerging(t *testing.T) {
 						Service:    "tls-service",
 						Namespace:  "default",
 						Port:       8443,
-						Weight:     80,
+						Weight:     90,
 						Priority:   100,
 						BackendTLS: &BackendTLS{Hostname: "internal.example.com"},
 					},
@@ -718,7 +721,7 @@ func TestBackendTLSPreventsMerging(t *testing.T) {
 						Service:   "plain-service",
 						Namespace: "default",
 						Port:      8080,
-						Weight:    20,
+						Weight:    10,
 						Priority:  100,
 					},
 				},
@@ -734,8 +737,40 @@ func TestBackendTLSPreventsMerging(t *testing.T) {
 	config := Generate(routingConfig, endpoints)
 	vhost := config.VHosts["api.example.com"]
 
-	// Routes with different TLS configs must remain separate
-	if len(vhost.Routes) != 2 {
-		t.Fatalf("expected 2 separate routes (TLS prevents merging), got %d", len(vhost.Routes))
+	// Backends with identical match criteria must merge into a single route.
+	if len(vhost.Routes) != 1 {
+		t.Fatalf("expected 1 merged route, got %d", len(vhost.Routes))
+	}
+
+	route := vhost.Routes[0]
+	if len(route.BackendGroups) != 2 {
+		t.Fatalf("expected 2 weighted backend groups, got %d", len(route.BackendGroups))
+	}
+
+	// Verify both weights are preserved and TLS is attached to the correct group.
+	var tlsGroups, plainGroups int
+	weights := map[int]bool{}
+	for _, g := range route.BackendGroups {
+		weights[g.Weight] = true
+		if g.BackendTLS != nil {
+			tlsGroups++
+			if g.BackendTLS.Hostname != "internal.example.com" {
+				t.Errorf("unexpected TLS hostname: %s", g.BackendTLS.Hostname)
+			}
+			if g.Weight != 90 {
+				t.Errorf("TLS group expected weight 90, got %d", g.Weight)
+			}
+		} else {
+			plainGroups++
+			if g.Weight != 10 {
+				t.Errorf("plain group expected weight 10, got %d", g.Weight)
+			}
+		}
+	}
+	if tlsGroups != 1 || plainGroups != 1 {
+		t.Errorf("expected 1 TLS group and 1 plain group, got %d/%d", tlsGroups, plainGroups)
+	}
+	if !weights[90] || !weights[10] {
+		t.Errorf("expected weights {90,10}, got %v", weights)
 	}
 }
