@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
@@ -259,6 +260,58 @@ func TestInfrastructureConfig_SecretOrderDoesNotAffectHash(t *testing.T) {
 // The check is structural (via reflection) because behavioral verification
 // would require enumerating every possible Service-shape field; structural
 // absence of the fields is a stronger, simpler guard.
+// TestInfrastructureConfig_ResourcesAffectHash covers M-2: editing
+// spec.resources must change the infrastructure hash so the Deployment rolls
+// and pods pick up the new requests/limits.
+func TestInfrastructureConfig_ResourcesAffectHash(t *testing.T) {
+	base := InfrastructureConfig{GatewayImage: "img:v1"}
+	baseHash := base.ComputeHash()
+
+	withResources := InfrastructureConfig{
+		GatewayImage: "img:v1",
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+		},
+	}
+	if withResources.ComputeHash() == baseHash {
+		t.Error("ComputeHash() did not change after adding Resources")
+	}
+
+	// Changing a limit must change the hash too.
+	changed := InfrastructureConfig{
+		GatewayImage: "img:v1",
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+		},
+	}
+	if changed.ComputeHash() == withResources.ComputeHash() {
+		t.Error("ComputeHash() did not change after changing resource limits")
+	}
+
+	// Identical Resources must produce an identical hash (stability).
+	dup := InfrastructureConfig{
+		GatewayImage: "img:v1",
+		Resources: &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("250m"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+		},
+	}
+	if dup.ComputeHash() != withResources.ComputeHash() {
+		t.Error("ComputeHash() not stable for identical Resources")
+	}
+}
+
 func TestInfraHash_ServiceConfigDoesNotAffectHash(t *testing.T) {
 	cfg := InfrastructureConfig{}
 	configType := reflect.TypeOf(cfg)

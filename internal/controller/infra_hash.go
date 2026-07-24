@@ -55,6 +55,11 @@ type InfrastructureConfig struct {
 	// HasBackendTLS indicates whether backend TLS (via BackendTLSPolicy) is configured.
 	// Changes to this trigger a pod restart to add/remove the CA cert volume and SSL_CERT_FILE env.
 	HasBackendTLS bool
+
+	// Resources are the container resource requests/limits from
+	// GatewayClassParameters.spec.resources. Editing them must roll the pods so
+	// the new requests/limits actually take effect, so they are part of the hash.
+	Resources *corev1.ResourceRequirements
 }
 
 // ComputeHash returns a deterministic SHA256 hash of the infrastructure configuration
@@ -127,6 +132,16 @@ func (c *InfrastructureConfig) ComputeHash() string {
 	if c.HasBackendTLS {
 		h.Write([]byte("backend-tls"))
 	}
+	h.Write([]byte{0}) // separator
+
+	// Include container resource requests/limits. JSON marshaling of the
+	// corev1 struct is deterministic (struct field order), and resource.Quantity
+	// marshals to its canonical string form.
+	if c.Resources != nil {
+		data, _ := json.Marshal(c.Resources)
+		h.Write(data)
+	}
+	h.Write([]byte{0}) // separator
 
 	return hex.EncodeToString(h.Sum(nil))
 }

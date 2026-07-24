@@ -822,8 +822,31 @@ func (r *HTTPRouteReconciler) attachCachePolicies(ctx context.Context, collected
 	}
 }
 
+// backendTLSKey identifies the scope a BackendTLSPolicy applies to: a Service in a
+// namespace, optionally narrowed to a single Service port (section). An empty
+// section means the policy targets every port of the Service.
+type backendTLSKey struct {
+	namespace string
+	service   string
+	section   string
+}
+
 // attachBackendTLS resolves BackendTLSPolicies for each collected route.
 // It looks up policies targeting the route's backend Service and attaches TLS config.
+//
+// The winning policy for each (Service, port) scope is chosen so the data plane
+// agrees with the status reconciler:
+//   - GEP-713 precedence: among policies contending for the same scope, the oldest
+//     (then alphabetically first) wins — matching policyHasPrecedence / the
+//     Conflicted status. Cache-backed List order is nondeterministic, so we must
+//     not rely on last-write-wins (M-5).
+//   - sectionName scoping: targetRef.SectionName pins a policy to a single Service
+//     port name. Section-scoped policies apply only to routes hitting that port;
+//     section-less policies apply only where no section-scoped policy matches
+//     (mirrors targetRefsConflict) (M-6).
+//   - resolvability: policies whose CA references don't resolve are skipped, so we
+//     never enable backend TLS that can't verify — which would 502 every request
+//     while routing.json claimed the policy was in effect (M-7).
 func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRoutes []ghost.Route) {
 	// Collect unique namespaces from routes
 	namespaces := make(map[string]struct{})
@@ -831,10 +854,10 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 		namespaces[route.Namespace] = struct{}{}
 	}
 
-	// Build lookup: "namespace/serviceName" → BackendTLSPolicy
-	// Only include policies that have valid CA cert configuration (either
-	// wellKnownCACertificates: System or valid caCertificateRefs).
-	policyMap := make(map[string]*gatewayv1.BackendTLSPolicy)
+	// Build lookup: scope → winning BackendTLSPolicy. Only policies with resolvable
+	// CA configuration are considered, and among policies contending for the same
+	// scope the one with GEP-713 precedence wins.
+	policyMap := make(map[backendTLSKey]*gatewayv1.BackendTLSPolicy)
 	for ns := range namespaces {
 		var policyList gatewayv1.BackendTLSPolicyList
 		if err := r.List(ctx, &policyList, client.InNamespace(ns)); err != nil {
@@ -844,14 +867,13 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 		for i := range policyList.Items {
 			policy := &policyList.Items[i]
 
-			// Accept policies with wellKnownCACertificates: System or caCertificateRefs
-			hasWellKnown := policy.Spec.Validation.WellKnownCACertificates != nil &&
-				*policy.Spec.Validation.WellKnownCACertificates == gatewayv1.WellKnownCACertificatesSystem
-			hasCertRefs := len(policy.Spec.Validation.CACertificateRefs) > 0
-
-			if !hasWellKnown && !hasCertRefs {
-				r.Logger.Warn("BackendTLSPolicy has no CA certificate configuration, skipping",
-					"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name))
+			// Skip policies whose CA references cannot be resolved. The status path
+			// reports these as ResolvedRefs=False; enabling backend TLS anyway would
+			// break verification and 502 all traffic to the Service (M-7).
+			if resolved, reason, _ := validateBackendTLSCACerts(ctx, r.Client, policy); !resolved {
+				r.Logger.Warn("BackendTLSPolicy CA references unresolvable, skipping",
+					"policy", fmt.Sprintf("%s/%s", policy.Namespace, policy.Name),
+					"reason", reason)
 				continue
 			}
 
@@ -860,24 +882,83 @@ func (r *HTTPRouteReconciler) attachBackendTLS(ctx context.Context, collectedRou
 				if targetRef.Group != "" || targetRef.Kind != "Service" {
 					continue
 				}
-				key := ns + "/" + string(targetRef.Name)
-				policyMap[key] = policy
+				section := ""
+				if targetRef.SectionName != nil {
+					section = string(*targetRef.SectionName)
+				}
+				key := backendTLSKey{namespace: ns, service: string(targetRef.Name), section: section}
+				// GEP-713 precedence: keep the oldest / alphabetically-first policy
+				// for this scope so the data-plane winner matches the status winner (M-5).
+				if existing, ok := policyMap[key]; !ok || policyHasPrecedence(policy, existing) {
+					policyMap[key] = policy
+				}
 			}
 		}
 	}
 
-	// Attach TLS config to routes whose backends match a policy
+	// Attach TLS config to routes whose backends match a policy. A section-scoped
+	// policy (keyed by the route's Service port name) takes precedence over a
+	// section-less policy for the same Service.
+	svcPortNameCache := make(map[types.NamespacedName]map[int]string)
 	for i := range collectedRoutes {
 		cr := &collectedRoutes[i]
-		key := cr.Namespace + "/" + cr.Service
-		policy, ok := policyMap[key]
-		if !ok {
+
+		section := r.resolveServicePortName(ctx, cr, svcPortNameCache)
+
+		policy := (*gatewayv1.BackendTLSPolicy)(nil)
+		if section != "" {
+			policy = policyMap[backendTLSKey{namespace: cr.Namespace, service: cr.Service, section: section}]
+		}
+		if policy == nil {
+			policy = policyMap[backendTLSKey{namespace: cr.Namespace, service: cr.Service, section: ""}]
+		}
+		if policy == nil {
 			continue
 		}
 		cr.BackendTLS = &ghost.BackendTLS{
 			Hostname: string(policy.Spec.Validation.Hostname),
 		}
 	}
+}
+
+// resolveServicePortName returns the name of the Service port the collected route
+// targets. BackendTLSPolicy targetRef.SectionName is a Service *port name*, so this
+// is what section-scoped policies are matched against. Returns "" when the port is
+// unnamed or the Service cannot be resolved (in which case only section-less
+// policies apply). Results are cached per Service across routes.
+func (r *HTTPRouteReconciler) resolveServicePortName(ctx context.Context, route *ghost.Route, cache map[types.NamespacedName]map[int]string) string {
+	// A named targetPort is resolved upstream (buildServicePortMap) to the Service
+	// port name, which the collected route already carries verbatim.
+	if route.PortName != "" {
+		return route.PortName
+	}
+	if route.Service == "" {
+		return ""
+	}
+
+	nn := types.NamespacedName{Namespace: route.Namespace, Name: route.Service}
+	portToName, ok := cache[nn]
+	if !ok {
+		portToName = make(map[int]string)
+		var svc corev1.Service
+		if err := r.Get(ctx, nn, &svc); err == nil {
+			for _, sp := range svc.Spec.Ports {
+				// Map the resolved target port back to the Service port name. This
+				// mirrors buildServicePortMap: a numeric targetPort resolves to that
+				// port, otherwise the target defaults to the Service port itself.
+				resolved := int(sp.Port)
+				if sp.TargetPort.Type == intstr.Int && sp.TargetPort.IntVal != 0 {
+					resolved = int(sp.TargetPort.IntVal)
+				}
+				// Keep the first name for a given resolved port for determinism.
+				if _, exists := portToName[resolved]; !exists {
+					portToName[resolved] = sp.Name
+				}
+			}
+		}
+		cache[nn] = portToName
+	}
+	return portToName[route.Port]
 }
 
 // attachExternalProxies resolves routes whose backend Service is of type

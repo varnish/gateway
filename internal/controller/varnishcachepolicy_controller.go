@@ -12,9 +12,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -38,18 +40,44 @@ func (r *VarnishCachePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	var vcp gatewayparamsv1alpha1.VarnishCachePolicy
 	if err := r.Get(ctx, req.NamespacedName, &vcp); err != nil {
 		if apierrors.IsNotFound(err) {
+			// The VCP was deleted. Its target is no longer knowable from here,
+			// so re-evaluate every sibling in the namespace: a policy that was
+			// previously Conflicted may now win (the winning policy could have
+			// been the one just deleted). Without this, the loser stays
+			// Conflicted until the next informer resync (~10h).
+			r.reevaluateSiblings(ctx, req.Namespace, "")
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
 	}
 
+	accepted, reason, message, requeueAfter, err := r.computeCondition(ctx, &vcp)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	r.setAccepted(&vcp, accepted, reason, message)
+	if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
+		log.Error("failed to update VCP status", "error", statusErr)
+	}
+
+	// Whenever this VCP changes, re-evaluate its siblings so their
+	// conflict/winner status stays correct (e.g. this policy being created,
+	// retargeted, or newly winning demotes/promotes the others). Skip the VCP
+	// we just handled to avoid redundant work.
+	r.reevaluateSiblings(ctx, vcp.Namespace, vcp.Name)
+
+	log.Debug("VarnishCachePolicy reconciliation complete")
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// computeCondition determines the Accepted condition for a VCP without mutating
+// or persisting it. It returns the accepted flag, condition reason and message,
+// a requeue delay (for transient target-not-found situations), and a non-nil
+// error only for unexpected API failures that warrant a controller retry.
+func (r *VarnishCachePolicyReconciler) computeCondition(ctx context.Context, vcp *gatewayparamsv1alpha1.VarnishCachePolicy) (bool, string, string, time.Duration, error) {
 	// Validate the VCP spec
-	if err := r.validateSpec(&vcp); err != nil {
-		r.setAccepted(&vcp, false, "Invalid", err.Error())
-		if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
-			log.Error("failed to update VCP status", "error", statusErr)
-		}
-		return ctrl.Result{}, nil
+	if err := r.validateSpec(vcp); err != nil {
+		return false, "Invalid", err.Error(), 0, nil
 	}
 
 	// Check target exists
@@ -61,14 +89,11 @@ func (r *VarnishCachePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		var route gatewayv1.HTTPRoute
 		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: vcp.Namespace}, &route); err != nil {
 			if apierrors.IsNotFound(err) {
-				r.setAccepted(&vcp, false, "TargetNotFound",
-					fmt.Sprintf("HTTPRoute %q not found in namespace %q", targetName, vcp.Namespace))
-				if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
-					log.Error("failed to update VCP status", "error", statusErr)
-				}
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+				return false, "TargetNotFound",
+					fmt.Sprintf("HTTPRoute %q not found in namespace %q", targetName, vcp.Namespace),
+					10 * time.Second, nil
 			}
-			return ctrl.Result{}, fmt.Errorf("r.Get(HTTPRoute %s): %w", targetName, err)
+			return false, "", "", 0, fmt.Errorf("r.Get(HTTPRoute %s): %w", targetName, err)
 		}
 
 		// If sectionName is set, validate it matches a named rule
@@ -82,12 +107,8 @@ func (r *VarnishCachePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 				}
 			}
 			if !found {
-				r.setAccepted(&vcp, false, "TargetNotFound",
-					fmt.Sprintf("No rule named %q in HTTPRoute %q", sn, targetName))
-				if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
-					log.Error("failed to update VCP status", "error", statusErr)
-				}
-				return ctrl.Result{}, nil
+				return false, "TargetNotFound",
+					fmt.Sprintf("No rule named %q in HTTPRoute %q", sn, targetName), 0, nil
 			}
 		}
 
@@ -95,42 +116,82 @@ func (r *VarnishCachePolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 		var gw gatewayv1.Gateway
 		if err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: vcp.Namespace}, &gw); err != nil {
 			if apierrors.IsNotFound(err) {
-				r.setAccepted(&vcp, false, "TargetNotFound",
-					fmt.Sprintf("Gateway %q not found in namespace %q", targetName, vcp.Namespace))
-				if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
-					log.Error("failed to update VCP status", "error", statusErr)
-				}
-				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+				return false, "TargetNotFound",
+					fmt.Sprintf("Gateway %q not found in namespace %q", targetName, vcp.Namespace),
+					10 * time.Second, nil
 			}
-			return ctrl.Result{}, fmt.Errorf("r.Get(Gateway %s): %w", targetName, err)
+			return false, "", "", 0, fmt.Errorf("r.Get(Gateway %s): %w", targetName, err)
 		}
 
 	default:
-		r.setAccepted(&vcp, false, "Invalid",
-			fmt.Sprintf("Unsupported target kind %q, must be Gateway or HTTPRoute", targetKind))
-		if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
-			log.Error("failed to update VCP status", "error", statusErr)
-		}
-		return ctrl.Result{}, nil
+		return false, "Invalid",
+			fmt.Sprintf("Unsupported target kind %q, must be Gateway or HTTPRoute", targetKind), 0, nil
 	}
 
 	// Check for conflicts (another VCP targeting the same route)
-	if conflict := r.checkConflict(ctx, &vcp); conflict != "" {
-		r.setAccepted(&vcp, false, "Conflicted", conflict)
-		if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
-			log.Error("failed to update VCP status", "error", statusErr)
+	if conflict := r.checkConflict(ctx, vcp); conflict != "" {
+		return false, "Conflicted", conflict, 0, nil
+	}
+
+	return true, "Accepted", "Policy accepted", 0, nil
+}
+
+// reevaluateSiblings recomputes and persists the Accepted condition for other
+// VCPs in the namespace, updating only those whose condition actually changed.
+// It is called on every reconcile (including deletes) so that a policy which was
+// Conflicted is promoted as soon as the winning policy is deleted or retargeted,
+// rather than waiting for the informer resync. skipName, when non-empty, is the
+// VCP that was just handled by the primary reconcile and is left untouched.
+func (r *VarnishCachePolicyReconciler) reevaluateSiblings(ctx context.Context, namespace, skipName string) {
+	var vcpList gatewayparamsv1alpha1.VarnishCachePolicyList
+	if err := r.List(ctx, &vcpList, client.InNamespace(namespace)); err != nil {
+		r.Logger.Error("failed to list VCPs for sibling re-evaluation", "namespace", namespace, "error", err)
+		return
+	}
+
+	for i := range vcpList.Items {
+		sibling := &vcpList.Items[i]
+		if skipName != "" && sibling.Name == skipName {
+			continue
 		}
-		return ctrl.Result{}, nil
-	}
 
-	// VCP is valid - set Accepted
-	r.setAccepted(&vcp, true, "Accepted", "Policy accepted")
-	if statusErr := r.Status().Update(ctx, &vcp); statusErr != nil {
-		log.Error("failed to update VCP status", "error", statusErr)
-	}
+		accepted, reason, message, _, err := r.computeCondition(ctx, sibling)
+		if err != nil {
+			// Transient API error while evaluating a sibling; skip it. It will
+			// be reconciled on its own or on the next relevant event.
+			continue
+		}
+		if vcpConditionMatches(sibling, accepted, reason, message) {
+			continue
+		}
 
-	log.Debug("VarnishCachePolicy reconciliation complete")
-	return ctrl.Result{}, nil
+		r.setAccepted(sibling, accepted, reason, message)
+		if statusErr := r.Status().Update(ctx, sibling); statusErr != nil {
+			r.Logger.Error("failed to update sibling VCP status", "vcp", sibling.Name, "error", statusErr)
+		}
+	}
+}
+
+// vcpConditionMatches reports whether the VCP's current Accepted condition
+// already equals the given desired values, so an update can be skipped. Avoiding
+// no-op writes keeps reevaluateSiblings from churning status (and, with the
+// GenerationChangedPredicate, from re-triggering reconciles in a loop).
+func vcpConditionMatches(vcp *gatewayparamsv1alpha1.VarnishCachePolicy, accepted bool, reason, message string) bool {
+	want := metav1.ConditionFalse
+	if accepted {
+		want = metav1.ConditionTrue
+	}
+	for _, ancestor := range vcp.Status.Ancestors {
+		for _, cond := range ancestor.Conditions {
+			if cond.Type == "Accepted" {
+				return cond.Status == want &&
+					cond.Reason == reason &&
+					cond.Message == message &&
+					cond.ObservedGeneration == vcp.Generation
+			}
+		}
+	}
+	return false
 }
 
 // validateSpec checks the VCP spec for correctness.
@@ -303,7 +364,11 @@ func (r *VarnishCachePolicyReconciler) findVCPsForGateway(ctx context.Context, o
 func (r *VarnishCachePolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
-		For(&gatewayparamsv1alpha1.VarnishCachePolicy{}).
+		// GenerationChangedPredicate ignores status-only updates. This matters
+		// because reevaluateSiblings writes sibling status; without it, those
+		// writes (and our own status writes) would re-trigger reconciles in a
+		// loop. Spec changes (generation bump), creates, and deletes still fire.
+		For(&gatewayparamsv1alpha1.VarnishCachePolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
 			&gatewayv1.HTTPRoute{},
 			handler.EnqueueRequestsFromMapFunc(r.findVCPsForHTTPRoute),
@@ -346,8 +411,18 @@ func ResolveCachePolicyForRoute(ctx context.Context, c client.Client, route *gat
 		targetKind := string(vcp.Spec.TargetRef.Kind)
 		targetName := string(vcp.Spec.TargetRef.Name)
 
+		// PolicyTargetReference has no namespace field: a VCP always targets a
+		// resource in its own namespace (Reconcile validates the target there).
+		// We list VCPs from both the route's and the gateway's namespaces, so we
+		// must match each VCP against the resource that lives in *its* namespace.
+		// Otherwise a same-named Gateway/HTTPRoute in another namespace (with
+		// cross-namespace route attachment) could silently pull in a foreign
+		// policy.
+		routeMatch := targetKind == "HTTPRoute" && targetName == route.Name && vcp.Namespace == route.Namespace
+		gatewayMatch := targetKind == "Gateway" && gateway != nil && targetName == gateway.Name && vcp.Namespace == gateway.Namespace
+
 		switch {
-		case targetKind == "HTTPRoute" && targetName == route.Name && vcp.Spec.TargetRef.SectionName != nil:
+		case routeMatch && vcp.Spec.TargetRef.SectionName != nil:
 			// Rule-level VCP
 			sn := string(*vcp.Spec.TargetRef.SectionName)
 			if ruleName != "" && sn == ruleName {
@@ -356,13 +431,13 @@ func ResolveCachePolicyForRoute(ctx context.Context, c client.Client, route *gat
 				}
 			}
 
-		case targetKind == "HTTPRoute" && targetName == route.Name && vcp.Spec.TargetRef.SectionName == nil:
+		case routeMatch && vcp.Spec.TargetRef.SectionName == nil:
 			// Route-level VCP
 			if routeVCP == nil || isOlder(vcp, routeVCP) {
 				routeVCP = vcp
 			}
 
-		case targetKind == "Gateway" && gateway != nil && targetName == gateway.Name:
+		case gatewayMatch:
 			// Gateway-level VCP
 			if gatewayVCP == nil || isOlder(vcp, gatewayVCP) {
 				gatewayVCP = vcp

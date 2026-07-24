@@ -241,6 +241,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		ExtraInitContainers:       extraInitContainers,
 		TopologySpreadConstraints: topologySpread,
 		HasBackendTLS:             hasBackendTLS,
+		Resources:                 containerResources,
 	}
 	infraHash := infraConfig.ComputeHash()
 
@@ -365,6 +366,12 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		existingCM := existing.(*corev1.ConfigMap)
 		// Check if main.vcl changed
 		if existingCM.Data["main.vcl"] != desiredCM.Data["main.vcl"] {
+			// A pre-existing ConfigMap (e.g. one a user created by hand before
+			// the Gateway) can have a nil Data map; assigning into a nil map
+			// panics, so materialize it first.
+			if existingCM.Data == nil {
+				existingCM.Data = map[string]string{}
+			}
 			// Update only main.vcl, keep routing.json from existing
 			existingCM.Data["main.vcl"] = desiredCM.Data["main.vcl"]
 			if err := r.Update(ctx, existingCM); err != nil {
@@ -858,30 +865,50 @@ func (r *GatewayReconciler) setListenerStatusesForUpdate(ctx context.Context, up
 			}
 		}
 
-		conditions := []metav1.Condition{
-			{
-				Type:               string(gatewayv1.ListenerConditionAccepted),
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: updated.Generation,
-				LastTransitionTime: acceptedTime,
-				Reason:             string(gatewayv1.ListenerReasonAccepted),
-				Message:            "Listener accepted",
-			},
-			{
-				Type:               string(gatewayv1.ListenerConditionProgrammed),
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: updated.Generation,
-				LastTransitionTime: programmedTime,
-				Reason:             string(gatewayv1.ListenerReasonProgrammed),
-				Message:            "Listener programmed",
-			},
+		acceptedCond := metav1.Condition{
+			Type:               string(gatewayv1.ListenerConditionAccepted),
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: updated.Generation,
+			LastTransitionTime: acceptedTime,
+			Reason:             string(gatewayv1.ListenerReasonAccepted),
+			Message:            "Listener accepted",
 		}
+		programmedCond := metav1.Condition{
+			Type:               string(gatewayv1.ListenerConditionProgrammed),
+			Status:             metav1.ConditionTrue,
+			ObservedGeneration: updated.Generation,
+			LastTransitionTime: programmedTime,
+			Reason:             string(gatewayv1.ListenerReasonProgrammed),
+			Message:            "Listener programmed",
+		}
+
+		// Reject listeners whose port collides with an internal data-plane bind
+		// (ghost reload, varnishadm, health, dashboard, pprof). Programming such
+		// a listener would crash-loop the pod, so we mark it Accepted=False
+		// (PortUnavailable) and never program it (see buildGatewayContainer).
+		if desc, reserved := reservedContainerPorts[int32(listener.Port)]; reserved {
+			msg := fmt.Sprintf("Listener port %d is reserved for internal data-plane use (%s)", listener.Port, desc)
+			acceptedCond.Status = metav1.ConditionFalse
+			acceptedCond.Reason = string(gatewayv1.ListenerReasonPortUnavailable)
+			acceptedCond.Message = msg
+			acceptedCond.LastTransitionTime = metav1.Now()
+			programmedCond.Status = metav1.ConditionFalse
+			programmedCond.Reason = string(gatewayv1.ListenerReasonInvalid)
+			programmedCond.Message = msg
+			programmedCond.LastTransitionTime = metav1.Now()
+		}
+
+		conditions := []metav1.Condition{acceptedCond, programmedCond}
 
 		// Determine supported kinds and validate allowed route kinds
 		supportedKinds, hasInvalidKinds := validateListenerRouteKinds(&listener)
 
-		// Add ResolvedRefs condition for route kind validation
-		if hasInvalidKinds {
+		// Emit exactly one ResolvedRefs condition per listener. ListenerStatus.Conditions
+		// is a +listType=map keyed by Type, so two ResolvedRefs entries would make the
+		// API server reject the status patch and wedge reconcile in a backoff loop.
+		// Precedence: invalid route kinds > HTTPS TLS ref validation > default (resolved).
+		switch {
+		case hasInvalidKinds:
 			conditions = append(conditions, metav1.Condition{
 				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
 				Status:             metav1.ConditionFalse,
@@ -890,17 +917,11 @@ func (r *GatewayReconciler) setListenerStatusesForUpdate(ctx context.Context, up
 				Reason:             string(gatewayv1.ListenerReasonInvalidRouteKinds),
 				Message:            "One or more route kinds are not supported",
 			})
-		}
-
-		// Add ResolvedRefs condition for HTTPS listeners
-		if listener.Protocol == gatewayv1.HTTPSProtocolType {
-			resolvedRefs := r.validateListenerTLSRefs(ctx, updated, &listener)
-			conditions = append(conditions, resolvedRefs)
-		}
-
-		// Add ResolvedRefs: True for non-HTTPS listeners that don't already have it
-		// (e.g., HTTP listeners). The spec requires ResolvedRefs on all listeners.
-		if !hasInvalidKinds && listener.Protocol != gatewayv1.HTTPSProtocolType {
+		case listener.Protocol == gatewayv1.HTTPSProtocolType:
+			conditions = append(conditions, r.validateListenerTLSRefs(ctx, updated, &listener))
+		default:
+			// ResolvedRefs: True for non-HTTPS listeners (e.g. HTTP). The spec
+			// requires ResolvedRefs on all listeners.
 			resolvedRefsTime := metav1.Now()
 			if hasExisting {
 				for _, c := range existing.Conditions {
@@ -1490,6 +1511,39 @@ func (r *GatewayReconciler) gatewayRequestsForClassNames(ctx context.Context, cl
 	return requests, nil
 }
 
+// enqueueGatewaysForGatewayClass returns an EventHandler that enqueues all
+// Gateways whose spec.gatewayClassName matches a changed GatewayClass managed
+// by our controller.
+//
+// Without this watch, a Gateway persisted before its GatewayClass (e.g. a
+// multi-doc manifest applied in one shot, or a later-created GatewayClass /
+// parametersRef) would sit unreconciled: Reconcile early-returns when the class
+// is missing or not ours, the manager has no SyncPeriod, and nothing re-enqueues
+// the Gateway until an unrelated watched object happens to change or the operator
+// restarts.
+func (r *GatewayReconciler) enqueueGatewaysForGatewayClass() handler.EventHandler {
+	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
+		gc, ok := obj.(*gatewayv1.GatewayClass)
+		if !ok {
+			return nil
+		}
+		// Only react to classes we own — matches the Reconcile guard.
+		if string(gc.Spec.ControllerName) != ControllerName {
+			return nil
+		}
+		requests, err := r.gatewayRequestsForClassNames(ctx, map[string]struct{}{gc.Name: {}})
+		if err != nil {
+			r.Logger.Error("failed to list Gateways for GatewayClass change", "gatewayClass", gc.Name, "error", err)
+			return nil
+		}
+		if len(requests) > 0 {
+			r.Logger.Info("GatewayClass changed, enqueuing Gateways for reconciliation",
+				"gatewayClass", gc.Name, "gateways", len(requests))
+		}
+		return requests
+	})
+}
+
 // enqueueGatewaysForParams returns an EventHandler that enqueues all Gateways
 // that use a GatewayClass referencing the changed GatewayClassParameters.
 func (r *GatewayReconciler) enqueueGatewaysForParams() handler.EventHandler {
@@ -1895,6 +1949,10 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&policyv1.PodDisruptionBudget{}).
 		// Note: ClusterRoleBinding is cluster-scoped, so it cannot be owned by namespace-scoped Gateway
 		// We manage its lifecycle manually in reconcileResources without owner references
+		Watches(
+			&gatewayv1.GatewayClass{},
+			r.enqueueGatewaysForGatewayClass(),
+		).
 		Watches(
 			&gatewayv1.HTTPRoute{},
 			r.enqueueGatewaysForHTTPRoute(),

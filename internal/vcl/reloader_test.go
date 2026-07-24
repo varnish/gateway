@@ -412,6 +412,21 @@ func (f *failingVarnishadm) VCLInline(name, vcl string) (varnishadm.VarnishRespo
 	return varnishadm.NewVarnishResponse(varnishadm.ClisSyntax, "VCL compilation failed: syntax error"), nil
 }
 
+// flakyVarnishadm wraps MockVarnishadm so VCLInline can be toggled to fail
+// on demand, letting tests simulate a transient reload failure followed by a
+// successful retry of the same ConfigMap object.
+type flakyVarnishadm struct {
+	*varnishadm.MockVarnishadm
+	fail bool
+}
+
+func (f *flakyVarnishadm) VCLInline(name, vcl string) (varnishadm.VarnishResponse, error) {
+	if f.fail {
+		return varnishadm.NewVarnishResponse(varnishadm.ClisSyntax, "VCL compilation failed: injected failure"), nil
+	}
+	return f.MockVarnishadm.VCLInline(name, vcl)
+}
+
 func TestVCLReloadFailure_NonFatal(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	baseMock := varnishadm.NewMock(6082, "secret", logger)
@@ -447,5 +462,86 @@ func TestVCLReloadFailure_NonFatal(t *testing.T) {
 		// good: reloader survived the failure
 	case <-time.After(500 * time.Millisecond):
 		t.Error("handleConfigMapUpdate blocked after VCL compilation failure")
+	}
+}
+
+// TestHandleConfigMapUpdate_RetriesAfterReloadFailure guards M-22: a
+// transient ReloadInline failure must not strand lastConfigMapRV at the
+// failed delivery's ResourceVersion, because the RV-dedup check runs before
+// the content check — if the RV were recorded regardless of outcome, every
+// subsequent resync/re-delivery of the same object (same RV) would be
+// skipped, leaving Varnish running stale VCL indefinitely with no retry.
+func TestHandleConfigMapUpdate_RetriesAfterReloadFailure(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	base := varnishadm.NewMock(6082, "secret", logger)
+	base.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, "active      auto/warm          - boot"))
+	mock := &flakyVarnishadm{MockVarnishadm: base, fail: true}
+
+	tmpDir := t.TempDir()
+	vclPath := filepath.Join(tmpDir, "main.vcl")
+
+	client := fake.NewSimpleClientset()
+	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-cm",
+			Namespace:       "default",
+			ResourceVersion: "5",
+		},
+		Data: map[string]string{
+			"main.vcl": "vcl 4.1; # v1",
+		},
+	}
+
+	// First delivery: ReloadInline fails (injected compilation error).
+	r.handleConfigMapUpdate(cm)
+
+	r.lastVCLMux.RLock()
+	rvAfterFailure := r.lastConfigMapRV
+	vclAfterFailure := r.lastVCL
+	r.lastVCLMux.RUnlock()
+
+	if rvAfterFailure == cm.ResourceVersion {
+		t.Fatalf("lastConfigMapRV must not advance to %q after a failed reload (would strand the dedup check and block retries)", cm.ResourceVersion)
+	}
+	if vclAfterFailure == cm.Data["main.vcl"] {
+		t.Fatal("lastVCL must not advance to the new content after a failed reload")
+	}
+
+	historyBeforeRetry := len(base.GetCallHistory())
+
+	// Second delivery: the SAME object (identical ResourceVersion "5"), as
+	// would happen on an informer resync. The reload now succeeds. Because
+	// lastConfigMapRV was never advanced above, this must NOT be skipped by
+	// the RV-dedup check - it must retry the reload.
+	mock.fail = false
+	r.handleConfigMapUpdate(cm)
+
+	history := base.GetCallHistory()
+	if len(history) <= historyBeforeRetry {
+		t.Fatalf("expected a retry to issue new varnishadm commands after the earlier failure; history: %v", history)
+	}
+
+	var foundInline bool
+	for _, cmd := range history[historyBeforeRetry:] {
+		if strings.HasPrefix(cmd, "vcl.inline vcl_") {
+			foundInline = true
+		}
+	}
+	if !foundInline {
+		t.Errorf("expected retry to call vcl.inline; history: %v", history)
+	}
+
+	r.lastVCLMux.RLock()
+	rvAfterRetry := r.lastConfigMapRV
+	vclAfterRetry := r.lastVCL
+	r.lastVCLMux.RUnlock()
+
+	if rvAfterRetry != cm.ResourceVersion {
+		t.Errorf("expected lastConfigMapRV to advance to %q after a successful retry, got %q", cm.ResourceVersion, rvAfterRetry)
+	}
+	if vclAfterRetry != cm.Data["main.vcl"] {
+		t.Error("expected lastVCL to be updated after a successful retry")
 	}
 }

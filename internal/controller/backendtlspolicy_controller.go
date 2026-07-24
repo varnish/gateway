@@ -122,6 +122,15 @@ func (r *BackendTLSPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // validateCACertificateRefs checks all CA certificate references in the policy.
 // Returns (resolved, reason, message).
 func (r *BackendTLSPolicyReconciler) validateCACertificateRefs(ctx context.Context, policy *gatewayv1.BackendTLSPolicy) (bool, string, string) {
+	return validateBackendTLSCACerts(ctx, r.Client, policy)
+}
+
+// validateBackendTLSCACerts checks all CA certificate references in the policy and
+// reports whether they resolve to valid PEM data (or the policy uses
+// WellKnownCACertificates: System). It is shared by the BackendTLSPolicy status
+// reconciler and the HTTPRoute data-plane attach path so the two never disagree
+// about which policies are usable. Returns (resolved, reason, message).
+func validateBackendTLSCACerts(ctx context.Context, c client.Client, policy *gatewayv1.BackendTLSPolicy) (bool, string, string) {
 	// WellKnownCACertificates: System is always valid
 	if policy.Spec.Validation.WellKnownCACertificates != nil &&
 		*policy.Spec.Validation.WellKnownCACertificates == gatewayv1.WellKnownCACertificatesSystem {
@@ -142,7 +151,7 @@ func (r *BackendTLSPolicyReconciler) validateCACertificateRefs(ctx context.Conte
 
 		// Check that the ConfigMap exists and contains a ca.crt key
 		var cm corev1.ConfigMap
-		if err := r.Get(ctx, types.NamespacedName{
+		if err := c.Get(ctx, types.NamespacedName{
 			Name:      string(ref.Name),
 			Namespace: policy.Namespace,
 		}, &cm); err != nil {

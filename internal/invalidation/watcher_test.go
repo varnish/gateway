@@ -970,6 +970,255 @@ func TestProcessExisting_ProcessesMatchingGatewayOnly(t *testing.T) {
 	}
 }
 
+// --- M-14: cross-namespace authorization ---
+
+func TestHandleInvalidation_RejectsCrossNamespaceGatewayRef(t *testing.T) {
+	requestReceived := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	// CR lives in "other-ns" but targets a gateway in "default" (our namespace).
+	// Even though the gatewayRef name/namespace match this chaperone's identity,
+	// the CR is not in the gateway's namespace, so it must be rejected.
+	obj := makeVarnishCacheInvalidation("inv-xns", "other-ns", "uid-xns", "purge", "example.com", []string{"/foo"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	w.handleInvalidation(context.Background(), obj)
+
+	if requestReceived {
+		t.Error("expected no HTTP request for cross-namespace gatewayRef, but one was sent")
+	}
+
+	got := getStoredInvalidation(t, dynClient, "other-ns", "inv-xns")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Failed" {
+		t.Fatalf("phase = %v, want Failed", phase)
+	}
+	podResults := requireNestedSlice(t, got.Object, "status", "podResults")
+	if len(podResults) != 1 {
+		t.Fatalf("podResults length = %d, want 1", len(podResults))
+	}
+	result := podResults[0].(map[string]any)
+	if result["success"] != false {
+		t.Errorf("success = %v, want false", result["success"])
+	}
+	msg, _ := result["message"].(string)
+	if !strings.Contains(msg, "cross-namespace") {
+		t.Errorf("message = %q, want it to mention cross-namespace", msg)
+	}
+}
+
+// --- M-21: hostname/path validation ---
+
+func TestValidateInvalidationSpec(t *testing.T) {
+	tests := []struct {
+		name     string
+		hostname string
+		paths    []string
+		wantErr  bool
+	}{
+		{name: "valid host and path", hostname: "api.example.com", paths: []string{"/v1/users"}, wantErr: false},
+		{name: "valid ban regex path", hostname: "example.com", paths: []string{"/api/.*"}, wantErr: false},
+		{name: "empty hostname", hostname: "", paths: []string{"/foo"}, wantErr: true},
+		{name: "hostname with quote", hostname: `x" && obj.status == 200`, paths: []string{"/foo"}, wantErr: true},
+		{name: "hostname with space", hostname: "bad host", paths: []string{"/foo"}, wantErr: true},
+		{name: "hostname with ampersand", hostname: "a&&b", paths: []string{"/foo"}, wantErr: true},
+		{name: "no paths", hostname: "example.com", paths: nil, wantErr: true},
+		{name: "path missing leading slash", hostname: "example.com", paths: []string{"foo"}, wantErr: true},
+		{name: "path with space injection", hostname: "example.com", paths: []string{"/foo && obj.status == 200"}, wantErr: true},
+		{name: "path with quote", hostname: "example.com", paths: []string{`/foo"`}, wantErr: true},
+		{name: "one bad path among good", hostname: "example.com", paths: []string{"/ok", "bad"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateInvalidationSpec(tt.hostname, tt.paths)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateInvalidationSpec(%q, %v) err = %v, wantErr %v", tt.hostname, tt.paths, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestHandleInvalidation_RejectsInvalidHostname(t *testing.T) {
+	requestReceived := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	obj := makeVarnishCacheInvalidation("inv-badhost", "default", "uid-badhost", "ban",
+		`evil" && obj.http.x-cache-url ~ .`, []string{"/foo"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	w.handleInvalidation(context.Background(), obj)
+
+	if requestReceived {
+		t.Error("expected no request for invalid hostname, but one was sent")
+	}
+	got := getStoredInvalidation(t, dynClient, "default", "inv-badhost")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Failed" {
+		t.Fatalf("phase = %v, want Failed", phase)
+	}
+	result := requireNestedSlice(t, got.Object, "status", "podResults")[0].(map[string]any)
+	msg, _ := result["message"].(string)
+	if !strings.Contains(msg, "invalid cache invalidation spec") {
+		t.Errorf("message = %q, want it to mention invalid spec", msg)
+	}
+}
+
+func TestHandleInvalidation_RejectsInvalidPath(t *testing.T) {
+	requestReceived := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestReceived = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	obj := makeVarnishCacheInvalidation("inv-badpath", "default", "uid-badpath", "purge",
+		"example.com", []string{"no-leading-slash"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	w.handleInvalidation(context.Background(), obj)
+
+	if requestReceived {
+		t.Error("expected no request for invalid path, but one was sent")
+	}
+	got := getStoredInvalidation(t, dynClient, "default", "inv-badpath")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Failed" {
+		t.Fatalf("phase = %v, want Failed", phase)
+	}
+}
+
+// --- M-19: PURGE of an uncached URL (404) is a success ---
+
+func TestExecutePurge_NotInCacheIsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Varnish returns 404 "Not in cache" when purging a URL that is not cached.
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	w := newTestWatcher(addr, "my-gw", "default", "pod-0")
+
+	if err := w.executePurge(context.Background(), "example.com", "/never-cached"); err != nil {
+		t.Fatalf("executePurge should treat 404 as success, got error: %v", err)
+	}
+}
+
+func TestHandleInvalidation_PurgeMissReportsSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound) // cache miss
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	obj := makeVarnishCacheInvalidation("inv-miss", "default", "uid-miss", "purge", "example.com",
+		[]string{"/not-cached"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	w.handleInvalidation(context.Background(), obj)
+
+	got := getStoredInvalidation(t, dynClient, "default", "inv-miss")
+	status := requireNestedMap(t, got.Object, "status")
+	if phase := status["phase"]; phase != "Complete" {
+		t.Fatalf("phase = %v, want Complete (404 purge miss is a success)", phase)
+	}
+}
+
+// --- M-20: processed only recorded after a successful status write ---
+
+func TestHandleInvalidation_NotProcessedWhenStatusUpdateFails(t *testing.T) {
+	var requestCount int
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requestCount++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	obj := makeVarnishCacheInvalidation("inv-statusfail", "default", "uid-statusfail", "purge", "example.com",
+		[]string{"/foo"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	dynClient.updateStatusErr = fmt.Errorf("apiserver unavailable")
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	// First call: purge sent, but status write fails -> must NOT be processed.
+	w.handleInvalidation(context.Background(), obj)
+	w.mu.Lock()
+	_, processed := w.processed["uid-statusfail"]
+	w.mu.Unlock()
+	if processed {
+		t.Fatal("invalidation must not be marked processed when the status update fails")
+	}
+
+	// Second call: reprocessing must happen (idempotent purge re-sent).
+	w.handleInvalidation(context.Background(), obj)
+	mu.Lock()
+	count := requestCount
+	mu.Unlock()
+	if count != 2 {
+		t.Fatalf("expected reprocessing to re-send purge, request count = %d, want 2", count)
+	}
+
+	// Once the status write succeeds, it is marked processed and not retried again.
+	dynClient.mu.Lock()
+	dynClient.updateStatusErr = nil
+	dynClient.mu.Unlock()
+	w.handleInvalidation(context.Background(), obj)
+	w.mu.Lock()
+	_, processed = w.processed["uid-statusfail"]
+	w.mu.Unlock()
+	if !processed {
+		t.Fatal("invalidation should be marked processed after a successful status write")
+	}
+}
+
+func TestHandleInvalidation_MarkedProcessedAfterSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	obj := makeVarnishCacheInvalidation("inv-ok-proc", "default", "uid-ok-proc", "purge", "example.com",
+		[]string{"/foo"}, "my-gw", "default")
+	dynClient := newMemoryDynamicClient(obj)
+	w := newTestWatcherWithK8s(addr, "my-gw", "default", "pod-0")
+	w.dynClient = dynClient
+
+	w.handleInvalidation(context.Background(), obj)
+
+	w.mu.Lock()
+	_, processed := w.processed["uid-ok-proc"]
+	w.mu.Unlock()
+	if !processed {
+		t.Fatal("invalidation should be marked processed after successful status write")
+	}
+}
+
 // makeVarnishCacheInvalidation is a helper to build an unstructured VarnishCacheInvalidation object.
 func makeVarnishCacheInvalidation(name, ns, uid, invType, hostname string, paths []string, gwName, gwNS string) *unstructured.Unstructured {
 	// Convert []string to []any for unstructured
@@ -1036,6 +1285,7 @@ type memoryDynamicClient struct {
 	mu                sync.Mutex
 	objects           map[string]*unstructured.Unstructured
 	updateStatusCount int
+	updateStatusErr   error // when set, UpdateStatus fails with this error
 }
 
 var _ dynamic.Interface = (*memoryDynamicClient)(nil)
@@ -1080,9 +1330,12 @@ func (r *memoryDynamicResource) UpdateStatus(ctx context.Context, obj *unstructu
 	if err := r.checkResource(); err != nil {
 		return nil, err
 	}
-	key := objectKey(r.namespace, obj.GetName())
 	r.client.mu.Lock()
 	defer r.client.mu.Unlock()
+	if r.client.updateStatusErr != nil {
+		return nil, r.client.updateStatusErr
+	}
+	key := objectKey(r.namespace, obj.GetName())
 	if _, ok := r.client.objects[key]; !ok {
 		return nil, fmt.Errorf("%s not found", key)
 	}

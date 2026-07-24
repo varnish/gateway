@@ -3491,6 +3491,171 @@ func keys[V any](m map[string]V) []string {
 	return result
 }
 
+// countConditionsOfType returns how many conditions in the slice have the given
+// type. Used to guard against duplicate map-keyed conditions (which make the API
+// server reject a status patch).
+func countConditionsOfType(conditions []metav1.Condition, condType string) int {
+	n := 0
+	for _, c := range conditions {
+		if c.Type == condType {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEnqueueGatewaysForGatewayClass covers M-1: a Gateway persisted before its
+// GatewayClass (or before a later parametersRef) must be reconciled once the
+// GatewayClass appears/changes.
+func TestEnqueueGatewaysForGatewayClass(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	t.Run("changed GatewayClass enqueues matching Gateways", func(t *testing.T) {
+		gw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+			Spec:       gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
+		}
+		other := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default"},
+			Spec:       gatewayv1.GatewaySpec{GatewayClassName: "somethingelse"},
+		}
+		r := newTestReconciler(scheme, gw, other)
+		h := r.enqueueGatewaysForGatewayClass()
+
+		gc := newTestGatewayClass("varnish")
+		requests := extractRequests(t, h, ctx, gc)
+		if len(requests) != 1 {
+			t.Fatalf("expected 1 request, got %d", len(requests))
+		}
+		if requests[0].Name != "gw" {
+			t.Errorf("expected request for 'gw', got %q", requests[0].Name)
+		}
+	})
+
+	t.Run("GatewayClass with foreign controllerName is ignored", func(t *testing.T) {
+		gw := &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default"},
+			Spec:       gatewayv1.GatewaySpec{GatewayClassName: "foreign"},
+		}
+		r := newTestReconciler(scheme, gw)
+		h := r.enqueueGatewaysForGatewayClass()
+
+		gc := &gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "foreign"},
+			Spec:       gatewayv1.GatewayClassSpec{ControllerName: "example.com/other-controller"},
+		}
+		requests := extractRequests(t, h, ctx, gc)
+		if len(requests) != 0 {
+			t.Errorf("expected 0 requests for foreign controllerName, got %d", len(requests))
+		}
+	})
+}
+
+// TestSetListenerStatuses_SingleResolvedRefs covers M-3: an HTTPS listener with an
+// invalid route kind must not emit two ResolvedRefs conditions (duplicate map keys
+// make the status patch fail and wedge reconcile).
+func TestSetListenerStatuses_SingleResolvedRefs(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	tlsMode := gatewayv1.TLSModeTerminate
+	secret := newTestTLSSecret("my-cert", "default")
+	r := newTestReconciler(scheme, secret)
+	original := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{
+					Name: "https", Port: 443, Protocol: gatewayv1.HTTPSProtocolType,
+					TLS: &gatewayv1.ListenerTLSConfig{
+						Mode:            &tlsMode,
+						CertificateRefs: []gatewayv1.SecretObjectReference{{Name: "my-cert"}},
+					},
+					AllowedRoutes: &gatewayv1.AllowedRoutes{
+						Kinds: []gatewayv1.RouteGroupKind{{Kind: "TCPRoute"}},
+					},
+				},
+			},
+		},
+	}
+	updated := original.DeepCopy()
+	r.setListenerStatusesForUpdate(ctx, updated, original)
+
+	if len(updated.Status.Listeners) != 1 {
+		t.Fatalf("expected 1 listener status, got %d", len(updated.Status.Listeners))
+	}
+	conds := updated.Status.Listeners[0].Conditions
+	if got := countConditionsOfType(conds, string(gatewayv1.ListenerConditionResolvedRefs)); got != 1 {
+		t.Fatalf("expected exactly 1 ResolvedRefs condition, got %d", got)
+	}
+	condMap := conditionsToMap(conds)
+	assertConditionFalse(t, condMap, string(gatewayv1.ListenerConditionResolvedRefs))
+	if condMap[string(gatewayv1.ListenerConditionResolvedRefs)].Reason != string(gatewayv1.ListenerReasonInvalidRouteKinds) {
+		t.Errorf("expected InvalidRouteKinds reason, got %q", condMap[string(gatewayv1.ListenerConditionResolvedRefs)].Reason)
+	}
+}
+
+// TestSetListenerStatuses_ReservedPort covers M-11: a listener whose port collides
+// with an internal data-plane bind must be marked Accepted=False (PortUnavailable)
+// instead of being programmed.
+func TestSetListenerStatuses_ReservedPort(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	r := newTestReconciler(scheme)
+	original := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default", Generation: 1},
+		Spec: gatewayv1.GatewaySpec{
+			Listeners: []gatewayv1.Listener{
+				{Name: "bad", Port: 8081, Protocol: gatewayv1.HTTPProtocolType},
+			},
+		},
+	}
+	updated := original.DeepCopy()
+	r.setListenerStatusesForUpdate(ctx, updated, original)
+
+	ls := updated.Status.Listeners[0]
+	condMap := conditionsToMap(ls.Conditions)
+	assertConditionFalse(t, condMap, string(gatewayv1.ListenerConditionAccepted))
+	assertConditionFalse(t, condMap, string(gatewayv1.ListenerConditionProgrammed))
+	if condMap[string(gatewayv1.ListenerConditionAccepted)].Reason != string(gatewayv1.ListenerReasonPortUnavailable) {
+		t.Errorf("expected PortUnavailable reason, got %q", condMap[string(gatewayv1.ListenerConditionAccepted)].Reason)
+	}
+}
+
+// TestReconcileResource_NilConfigMapData covers M-4: writing main.vcl into a
+// pre-existing ConfigMap with a nil Data map must not panic.
+func TestReconcileResource_NilConfigMapData(t *testing.T) {
+	scheme := newTestScheme()
+	ctx := context.Background()
+
+	gw := &gatewayv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw", Namespace: "default", UID: "test-uid"},
+		Spec:       gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
+	}
+	// Pre-existing ConfigMap with no Data (nil map), e.g. `kubectl create configmap gw-vcl`.
+	existingCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-vcl", Namespace: "default"},
+	}
+	r := newTestReconciler(scheme, gw, existingCM)
+
+	desiredCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-vcl", Namespace: "default"},
+		Data:       map[string]string{"main.vcl": "vcl 4.1;"},
+	}
+	if err := r.reconcileResource(ctx, gw, desiredCM); err != nil {
+		t.Fatalf("unexpected error (or panic if Data was nil): %v", err)
+	}
+	var check corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Name: "gw-vcl", Namespace: "default"}, &check); err != nil {
+		t.Fatalf("failed to get configmap: %v", err)
+	}
+	if check.Data["main.vcl"] != "vcl 4.1;" {
+		t.Errorf("expected main.vcl to be written, got %q", check.Data["main.vcl"])
+	}
+}
+
 // conditionsToMap converts a slice of conditions to a map keyed by type.
 func conditionsToMap(conditions []metav1.Condition) map[string]metav1.Condition {
 	m := make(map[string]metav1.Condition)

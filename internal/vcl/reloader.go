@@ -151,13 +151,17 @@ func (r *Reloader) handleConfigMapUpdate(cm *corev1.ConfigMap) {
 
 	r.lastVCLMux.Lock()
 
-	// Deduplicate via ResourceVersion
+	// Deduplicate via ResourceVersion. lastConfigMapRV is only advanced after
+	// a successful reload (see below) — never unconditionally on entry. If it
+	// were recorded here regardless of outcome, a transient ReloadInline
+	// failure would strand it at this RV, and this dedup check would then
+	// SKIP every subsequent resync/re-delivery of the same object (same RV),
+	// leaving Varnish running stale VCL indefinitely with no retry (M-22).
 	if cm.ResourceVersion != "" && cm.ResourceVersion == r.lastConfigMapRV {
 		r.lastVCLMux.Unlock()
 		r.logger.Debug("skipping duplicate ConfigMap update", "resourceVersion", cm.ResourceVersion)
 		return
 	}
-	r.lastConfigMapRV = cm.ResourceVersion
 
 	// Extract main.vcl
 	newVCL, ok := cm.Data["main.vcl"]
@@ -179,10 +183,12 @@ func (r *Reloader) handleConfigMapUpdate(cm *corev1.ConfigMap) {
 	r.logger.Info("main.vcl changed, triggering VCL reload",
 		"resourceVersion", cm.ResourceVersion)
 
-	// Trigger varnishadm reload with inline VCL. Only record the content as
-	// "applied" on success — otherwise the next ConfigMap event with the
-	// same content would be dedup-skipped and Varnish would stay on the old
-	// VCL while we believe the new one is active.
+	// Trigger varnishadm reload with inline VCL. Only record the content and
+	// ResourceVersion as "applied" on success — otherwise the next
+	// ConfigMap event with the same content/RV would be dedup-skipped and
+	// Varnish would stay on the old VCL while we believe the new one is
+	// active. On failure both markers are deliberately left untouched so the
+	// next resync of this same object retries the reload.
 	if err := r.ReloadInline(newVCL); err != nil {
 		r.logger.Error("VCL reload failed - keeping previous VCL", "error", err)
 		dashboard.PublishVCLReloadFail(r.dashBus, err)
@@ -190,6 +196,7 @@ func (r *Reloader) handleConfigMapUpdate(cm *corev1.ConfigMap) {
 	}
 	r.lastVCLMux.Lock()
 	r.lastVCL = newVCL
+	r.lastConfigMapRV = cm.ResourceVersion
 	r.lastVCLMux.Unlock()
 }
 
