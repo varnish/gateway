@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.23.0 - 2026-07-24]
+
 ### Added
 
 - **Operator: Gateway API inventory and status metrics.** The operator now
@@ -21,6 +23,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cache at scrape time, so deleted objects drop out with no stale series. No
   new endpoint or ServiceMonitor is required. The Operator Grafana dashboard
   gains an inventory/status row.
+- **RequestRedirect/ResponseRedirect: 303, 307, and 308 status codes.** The
+  redirect filter now supports 303, 307, and 308 in addition to 301/302, and
+  the ghost redirect backend clamps `status_code` to the allowed set.
+
+### Security
+
+- **Strip client-spoofable internal headers at VCL ingress.** `X-Ghost-*` and
+  `X-Gateway-*` headers are now unset before `router.recv()` and every ghost
+  producer unsets before setting, so clients can no longer forge routing,
+  cache-key, or listener/route metadata.
+- **Bind operational surfaces to loopback.** The chaperone dashboard binds to
+  `127.0.0.1`; pprof/debug moves to a loopback `:6060` server; the
+  varnishadm reverse-mode listener and `-M` target bind to `127.0.0.1`.
+- **Token-gate `/drain`.** The drain endpoint requires a per-Gateway,
+  UID-derived token compared in constant time; CORS wildcard removed and
+  SSE-safe HTTP server timeouts added.
+- **Harden VCL generation.** `vcl.inline` uses an unguessable per-call heredoc
+  delimiter; generated VCL names carry a monotonic counter to avoid
+  same-millisecond collisions.
+
+### Fixed
+
+- **AllowedRoutes namespace policy enforced per listener** (namespace +
+  hostname intersection on the same listener), for both status and the
+  computed socket set. No-intersection and unresolvable `sectionName` no
+  longer masquerade as a catch-all; a parentRef filter that resolves to no
+  listener now matches nothing instead of failing open to all listeners.
+- **parentRef changes prune correctly.** Detaching a route from a Gateway
+  regenerates `routing.json` and prunes stale `status.Parents`; old and new
+  parents are both enqueued.
+- **GatewayClass and infrastructure-hash reconciliation.** A Gateway created
+  before its GatewayClass (or a later `parametersRef`) now reconciles instead
+  of stalling. Container `Resources`, operator `LogLevel`, and varnishd/logging
+  extra args (hashed in user order) are included in the infrastructure hash so
+  those edits trigger a rolling restart.
+- **BackendTLSPolicy selection and scoping.** GEP-713 precedence now matches
+  the Conflicted-status winner; policies are keyed by
+  namespace/service/sectionName so a port-scoped policy no longer applies to
+  all Service ports; policies with unresolvable CA refs are skipped instead of
+  enabling unverifiable backend TLS.
+- **VarnishCachePolicy conflict healing and namespace scoping.** Sibling VCPs
+  are re-evaluated on every reconcile (including deletes) so a Conflicted loser
+  heals when the winner is removed; Gateway/Route-scoped VCPs match only within
+  the target's own namespace.
+- **Reserved listener ports rejected** (1969/6060/6082/8081/9000) with a
+  `PortUnavailable` condition instead of crash-looping the data plane.
+- **Weighted routing correctness.** Default `backendRef` weight is 1 per spec;
+  `backendTLS` is dropped from the ghost merge key so mixed TLS/plaintext
+  backends merge into one route with correct weighted groups; backend-group
+  weights are summed as u64 to avoid overflow.
+- **Chaperone resilience.** varnishadm no longer strands `Exec` callers on
+  connection drop; the drain loop tolerates transient `varnishstat` errors
+  (bounded by a consecutive-error cap + deadline); the varnishlog SSE path
+  checks `scanner.Err()` and kills the child so an over-long line can't block
+  `cmd.Wait()`; TLS reload triggers on the Kubernetes atomic-writer `..data`
+  symlink swap. `EventBus.Unsubscribe` no longer closes subscriber channels
+  (send-on-closed panic).
+- **Cache invalidation.** `VarnishCacheInvalidation` must target a gateway in
+  its own namespace; PURGE `404 "Not in cache"` is treated as success
+  (idempotent); the processed-UID map is evicted on CR delete to stay bounded.
+- **Ghost backend naming.** `sanitize_backend_name` appends a key hash so
+  distinct keys can't collapse to one Varnish backend name; `list_json`
+  reports the actual route count.
+- **Docker/chart packaging.** Dropped a stale `ghost/patches` copy from the
+  chaperone image; normalized the default image tag to the v-prefixed
+  registry form.
+
+### Changed
+
+- Upgraded the `varnish` Rust crate to 0.7.0 and dropped the local patch.
+- Simplified `internal/controller` and enforced `gofmt` in CI.
 
 ## [v0.22.0 - 2026-06-04]
 
