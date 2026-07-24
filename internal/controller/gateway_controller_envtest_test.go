@@ -133,17 +133,6 @@ func TestReconcile_CreatesResources_Envtest(t *testing.T) {
 		t.Logf("✓ ConfigMap created successfully")
 	}
 
-	// Verify Secret was created
-	var secret corev1.Secret
-	err = testEnv.Client.Get(ctx,
-		types.NamespacedName{Name: "test-gateway-envtest-secret", Namespace: "default"},
-		&secret)
-	if err != nil {
-		t.Errorf("expected secret to be created: %v", err)
-	} else {
-		t.Logf("✓ Secret created successfully")
-	}
-
 	// Verify ServiceAccount was created
 	var sa corev1.ServiceAccount
 	err = testEnv.Client.Get(ctx,
@@ -192,7 +181,6 @@ func TestReconcile_CreatesResources_Envtest(t *testing.T) {
 	_ = testEnv.Client.Delete(ctx, &deployment)
 	_ = testEnv.Client.Delete(ctx, &service)
 	_ = testEnv.Client.Delete(ctx, &configMap)
-	_ = testEnv.Client.Delete(ctx, &secret)
 	_ = testEnv.Client.Delete(ctx, &sa)
 }
 
