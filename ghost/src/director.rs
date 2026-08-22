@@ -202,6 +202,8 @@ pub struct RouteEntry {
     pub cache_policy: Option<crate::config::CachePolicy>,
     /// Pre-compiled bypass header rules (extracted from cache_policy at config load time).
     pub bypass_headers: Vec<BypassHeaderCompiled>,
+    /// Effective route timeout in milliseconds, bridged to bereq via X-Ghost-Timeout.
+    pub backend_timeout_ms: Option<u32>,
 }
 
 /// Map of vhost directors for two-tier routing
@@ -348,6 +350,7 @@ pub fn build_vhost_directors(
                 rule_index: route.rule_index,
                 cache_policy: route.cache_policy.clone(),
                 bypass_headers,
+                backend_timeout_ms: route.backend_timeout_ms,
             });
         }
 
@@ -377,6 +380,7 @@ pub fn build_vhost_directors(
                 rule_index: i32::MAX,
                 cache_policy: None,
                 bypass_headers: Vec::new(),
+                backend_timeout_ms: None,
             });
         }
 

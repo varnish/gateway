@@ -774,3 +774,69 @@ func TestBackendTLSMergesIntoWeightedGroups(t *testing.T) {
 		t.Errorf("expected weights {90,10}, got %v", weights)
 	}
 }
+
+func TestGenerateBackendTimeoutPassthrough(t *testing.T) {
+	// Two backendRefs in the same rule (identical match criteria and rule index)
+	// must merge into ONE route with two weighted groups, carrying the timeout.
+	routingConfig := &RoutingConfig{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
+			"api.example.com": {
+				Routes: []Route{
+					{
+						PathMatch:        &PathMatch{Type: PathMatchPathPrefix, Value: "/timed"},
+						Service:          "api-v1",
+						Namespace:        "default",
+						Port:             8080,
+						Weight:           50,
+						Priority:         10300,
+						BackendTimeoutMs: 500,
+					},
+					{
+						PathMatch:        &PathMatch{Type: PathMatchPathPrefix, Value: "/timed"},
+						Service:          "api-v2",
+						Namespace:        "default",
+						Port:             8080,
+						Weight:           50,
+						Priority:         10300,
+						BackendTimeoutMs: 500,
+					},
+					{
+						PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/untimed"},
+						Service:   "api-v1",
+						Namespace: "default",
+						Port:      8080,
+						Weight:    100,
+						Priority:  10300,
+					},
+				},
+			},
+		},
+	}
+
+	endpoints := ServiceEndpoints{
+		"default/api-v1": {{IP: "10.0.0.1", Port: 8080}},
+		"default/api-v2": {{IP: "10.0.0.2", Port: 8080}},
+	}
+
+	config := Generate(routingConfig, endpoints)
+
+	byPath := make(map[string]RouteBackends)
+	for _, r := range config.VHosts["api.example.com"].Routes {
+		byPath[r.PathMatch.Value] = r
+	}
+	if len(byPath) != 2 {
+		t.Fatalf("expected 2 merged routes, got %d", len(byPath))
+	}
+
+	timed := byPath["/timed"]
+	if timed.BackendTimeoutMs != 500 {
+		t.Errorf("/timed: BackendTimeoutMs = %d, want 500", timed.BackendTimeoutMs)
+	}
+	if len(timed.BackendGroups) != 2 {
+		t.Errorf("/timed: expected 2 weighted groups, got %d", len(timed.BackendGroups))
+	}
+	if got := byPath["/untimed"].BackendTimeoutMs; got != 0 {
+		t.Errorf("/untimed: BackendTimeoutMs = %d, want 0", got)
+	}
+}

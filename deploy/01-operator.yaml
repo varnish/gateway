@@ -143,6 +143,12 @@ spec:
           image: ghcr.io/varnish/gateway-operator:latest
           args:
             - --leader-elect=true
+          env:
+            # Without this the operator falls back to its built-in default, which
+            # is a :latest tag the node pulls from ghcr.io — a locally built and
+            # kind-loaded data plane is never used. deploy-update rewrites the tag.
+            - name: GATEWAY_IMAGE
+              value: ghcr.io/varnish/gateway-chaperone:latest
           ports:
             - name: metrics
               containerPort: 8080

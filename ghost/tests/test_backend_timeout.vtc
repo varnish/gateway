@@ -1,0 +1,140 @@
+varnishtest "per-route backendRequest timeout maps to 504"
+
+# Slow backend: holds the connection open well past the route's 500ms timeout.
+# Deliberately never sends a response — writing one after Varnish has already
+# given up and closed the backend connection races with the test harness.
+server s_slow {
+    rxreq
+    delay 2
+} -start
+
+# Fast backend on a route that also carries a timeout: must not be affected.
+server s_fast {
+    rxreq
+    txresp -body "on-time"
+} -start
+
+# Slow backend on a route with NO timeout configured: proves the 504 flip is
+# scoped to timeout routes and does not turn every fetch failure into a 504.
+server s_untimed {
+    rxreq
+    delay 1
+    txresp -body "untimed"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "api.example.com": {
+            "routes": [
+                {
+                    "path_match": {"type": "PathPrefix", "value": "/slow"},
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_slow_addr}", "port": ${s_slow_port}}
+                        ]}
+                    ],
+                    "backend_timeout_ms": 500,
+                    "priority": 10300
+                },
+                {
+                    "path_match": {"type": "PathPrefix", "value": "/fast"},
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_fast_addr}", "port": ${s_fast_port}}
+                        ]}
+                    ],
+                    "backend_timeout_ms": 500,
+                    "priority": 10300
+                },
+                {
+                    "path_match": {"type": "PathPrefix", "value": "/untimed"},
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s_untimed_addr}", "port": ${s_untimed_port}}
+                        ]}
+                    ],
+                    "priority": 10300
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+# Mirrors the generated preamble/postamble: the timeout bridge lives in
+# vcl_backend_fetch and the 503 -> 504 flip in vcl_backend_error.
+# Global first_byte_timeout is raised so the /untimed route is governed by the
+# route config (i.e. no timeout) rather than by a short varnishd default.
+varnish v1 -arg "-p thread_pool_stack=160k" -arg "-p first_byte_timeout=10" -vcl {
+    import ghost from "${vmod}";
+    import std;
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        unset req.http.X-Ghost-Timeout;
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+        set req.backend_hint = router.recv();
+        return (pass);
+    }
+
+    sub vcl_backend_fetch {
+        if (bereq.http.X-Ghost-Timeout) {
+            set bereq.first_byte_timeout = std.duration(bereq.http.X-Ghost-Timeout, 60s);
+            set bereq.between_bytes_timeout = std.duration(bereq.http.X-Ghost-Timeout, 60s);
+        }
+    }
+
+    sub vcl_backend_error {
+        if (bereq.http.X-Ghost-Timeout) {
+            set beresp.status = 504;
+            set beresp.reason = "Gateway Timeout";
+            set beresp.ttl = 0s;
+        }
+    }
+} -start
+
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# Backend exceeds the route timeout -> 504, not 503.
+client c_slow {
+    txreq -url "/slow" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 504
+    expect resp.reason == "Gateway Timeout"
+} -run
+
+# Same timeout, backend responds in time -> untouched.
+client c_fast {
+    txreq -url "/fast" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "on-time"
+} -run
+
+# No timeout on the route -> slow backend still succeeds.
+client c_untimed {
+    txreq -url "/untimed" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "untimed"
+} -run

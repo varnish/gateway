@@ -198,6 +198,8 @@ type Route struct {
 	RuleIndex   int               `json:"rule_index"`             // Original rule ordering for tiebreaking
 	CachePolicy *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
 	BackendTLS  *BackendTLS       `json:"backend_tls,omitempty"`  // TLS config from BackendTLSPolicy
+	// BackendTimeoutMs is the effective rule timeout in ms; 0 means unset.
+	BackendTimeoutMs int `json:"backend_timeout_ms,omitempty"`
 	// ExternalProxy is set when the route's backendRef points to a Service of
 	// type ExternalName. The chaperone passes this through to ghost.json
 	// without performing EndpointSlice lookup.
@@ -230,6 +232,8 @@ type RouteBackends struct {
 	Priority      int               `json:"priority"`
 	RuleIndex     int               `json:"rule_index"`
 	CachePolicy   *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
+	// BackendTimeoutMs mirrors Route.BackendTimeoutMs.
+	BackendTimeoutMs int `json:"backend_timeout_ms,omitempty"`
 }
 
 // VHostConfig represents a virtual host with path-based routing in ghost.json.

@@ -134,6 +134,7 @@ nav:
       - Troubleshooting: operations/troubleshooting.md
   - Reference:
       - HTTPRoute Filters: reference/httproute-filters.md
+      - HTTPRoute Timeouts: reference/httproute-timeouts.md
       - GatewayClassParameters: reference/gatewayclassparameters.md
       - VarnishCachePolicy: reference/varnishcachepolicy.md
       - VarnishCacheInvalidation: reference/varnishcacheinvalidation.md

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **HTTPRoute `timeouts.backendRequest` and `timeouts.request`.** A rule's
+  timeout is carried through routing.json to ghost, which bridges it onto the
+  fetch (`connect_timeout`, `first_byte_timeout`, `between_bytes_timeout`);
+  exceeding it returns 504 instead of Varnish's 503. `request` is applied as an
+  alias for `backendRequest` — when both are set the tighter value wins. `0s`
+  ("disable") falls back to varnishd's global defaults rather than running
+  unbounded. Both conformance features are now declared.
 - **`GatewayPort8080` conformance support (#30).** The multi-listener
   architecture already mapped listener ports straight through to Service and
   container ports, so the feature is now declared in the conformance suite.
@@ -16,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`deploy/01-operator.yaml` now sets `GATEWAY_IMAGE`.** The manifest left it
+  unset, so the operator fell back to its built-in
+  `ghcr.io/varnish/gateway-chaperone:latest`. On a `:latest` tag the node pulls
+  from ghcr.io, so `make deploy`, `make kind-deploy` and
+  `make test-conformance-kind` ran the published data plane instead of a locally
+  built one, and no ghost or VCL change could be verified against them.
+  `make deploy VERSION=vX` now pins the operator and the chaperone to the same
+  version.
 - **Redirect port now derives from the Gateway listener, not the `Host`
   header.** A `RequestRedirect` filter with no `scheme` and no `port` was
   building the `Location` port from the client's `Host` header, so a request

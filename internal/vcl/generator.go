@@ -3,8 +3,10 @@ package vcl
 import (
 	_ "embed"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/varnish/gateway/internal/ghost"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -153,6 +155,11 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 				if rule.Name != nil {
 					ruleName = string(*rule.Name)
 				}
+
+				// Timeouts are per-rule, so every route this rule emits carries the
+				// same value. Stamped once at the bottom of the loop rather than in
+				// each of the five struct literals below.
+				timeoutStart := len(collectedRoutes)
 
 				// Process each match in the rule
 				if len(rule.Matches) == 0 {
@@ -411,6 +418,12 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 						}
 					}
 				}
+				if ms := routeBackendTimeoutMs(rule.Timeouts); ms != 0 {
+					for i := timeoutStart; i < len(collectedRoutes); i++ {
+						collectedRoutes[i].BackendTimeoutMs = ms
+					}
+				}
+
 				ruleIndex++
 			}
 		}
@@ -437,6 +450,56 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 	})
 
 	return collectedRoutes
+}
+
+// routeBackendTimeoutMs converts an HTTPRoute rule's timeouts into milliseconds for
+// routing.json. Returns 0 when no timeout applies, and 0 is serialized as absent.
+//
+// request and backendRequest map onto the same Varnish fetch timeouts, so the
+// tighter of the two wins — the spec requires backendRequest <= request, but a
+// route that violates that must not end up with the looser bound. See
+// docs/reference/httproute-timeouts.md.
+func routeBackendTimeoutMs(t *gatewayv1.HTTPRouteTimeouts) int {
+	if t == nil {
+		return 0
+	}
+	ms := durationMs(t.Request)
+	if be := durationMs(t.BackendRequest); be != 0 && (ms == 0 || be < ms) {
+		ms = be
+	}
+	return ms
+}
+
+// maxTimeoutMs is the largest value ghost can represent: backend_timeout_ms
+// deserializes into a u32, so anything past this fails to parse. Roughly 49.7 days.
+const maxTimeoutMs = math.MaxUint32
+
+// durationMs parses a GEP-2257 duration into milliseconds. Returns 0 when unset,
+// unparseable, or "0s", and saturates at maxTimeoutMs.
+//
+// Gateway API defines "0s" as "disable the timeout". Varnish has no way to uncap
+// a fetch — first_byte_timeout/between_bytes_timeout always apply — so a disabled
+// route is emitted as absent and inherits varnishd's global defaults rather than
+// running unbounded.
+//
+// The GEP-2257 pattern allows up to four 5-digit components, so a CRD-valid
+// duration ("2000h") can exceed ghost's u32. Saturating keeps that route absurd
+// but harmless; letting it through would fail the whole ghost.json parse and
+// freeze routing updates for every route on the gateway, not just this one.
+func durationMs(d *gatewayv1.Duration) int {
+	if d == nil {
+		return 0
+	}
+	// GEP-2257 durations are a subset of time.ParseDuration's grammar.
+	parsed, err := time.ParseDuration(string(*d))
+	if err != nil || parsed <= 0 {
+		return 0
+	}
+	ms := parsed.Milliseconds()
+	if ms > maxTimeoutMs {
+		return maxTimeoutMs
+	}
+	return int(ms)
 }
 
 // filterValidBackends returns backend refs that have a valid Kind/Group and are not blocked.
