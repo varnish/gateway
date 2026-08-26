@@ -1,10 +1,13 @@
+{{- if .Values.createNamespace }}
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ include "varnish-gateway.namespace" . }}
   labels:
     {{- include "varnish-gateway.labels" . | nindent 4 }}
-  {{- with .Values.commonAnnotations }}
   annotations:
+    helm.sh/resource-policy: keep
+    {{- with .Values.commonAnnotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
+{{- end }}

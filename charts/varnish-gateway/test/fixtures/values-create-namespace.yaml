@@ -1,0 +1,7 @@
+# Exercises the opt-in chart-managed Namespace (createNamespace=true),
+# which is gated off by default so `helm install --create-namespace` and
+# pre-existing namespaces don't conflict with a templated Namespace.
+createNamespace: true
+namespace: custom-gateway-ns
+commonAnnotations:
+  team: platform

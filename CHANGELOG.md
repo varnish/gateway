@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Helm chart: the chart-templated Namespace no longer conflicts with
+  `helm install --create-namespace` or gets deleted on uninstall**
+  With Helm(4) server-side apply silently adopted the namespace and a
+  `helm uninstall` then deleted the namespace and everything in it.
+  The Namespace template is now gated behind a new `createNamespace`
+  value (default `false`), so the documented `--create-namespace`
+  flow works on both Helm major versions.
 - **Redirect port now derives from the Gateway listener, not the `Host`
   header.** A `RequestRedirect` filter with no `scheme` and no `port` was
   building the `Location` port from the client's `Host` header, so a request
