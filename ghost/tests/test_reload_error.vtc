@@ -41,10 +41,10 @@ varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
         if (req.url == "/.varnish-ghost/reload") {
             set resp.http.Content-Type = "text/plain";
             if (resp.status == 200) {
-                synthetic("Reload successful");
+                set resp.body = "Reload successful";
             } else {
                 set resp.http.X-Ghost-Error = req.http.X-Ghost-Error;
-                synthetic("Reload failed: " + req.http.X-Ghost-Error);
+                set resp.body = "Reload failed: " + req.http.X-Ghost-Error;
             }
             return (deliver);
         }
