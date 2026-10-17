@@ -5,7 +5,25 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.24.0 - 2026-10-17]
+
+### Changed
+
+- **Bundled Varnish Cache upgraded to 9.1.0** (from 9.0.3). The chaperone
+  image now ships `varnish=9.1.0`, and the ghost VMOD is built against the
+  `varnish` crate 0.8.0 (needed for 9.1 bindings; still supports 9.0). This
+  picks up upstream security fixes VSV00019 (HTTP/2 pseudo-header parsing)
+  and VSV00020 (workspace overflow in `.upper()`/`.lower()`), and stricter
+  HTTP/1 framing checks: backend responses with invalid body framing or
+  conflicting `Content-Length` now fail the fetch. See the upstream
+  [9.1.0 changes](https://github.com/varnish/varnish/blob/main/doc/changes.rst).
+
+  **Upgrade note for user VCL:** Varnish 9.1 removed the `synthetic()` VCL
+  action. User VCL (GatewayClassParameters `userVCL`) that calls it will fail
+  to compile, and the VCL reload is rejected. Replace
+  `synthetic(<string>);` with `set resp.body += <string>;` in `vcl_synth`
+  and `set beresp.body += <string>;` in `vcl_backend_error`. Both forms
+  also work on 9.0, so you can change your VCL before upgrading.
 
 ### Added
 
