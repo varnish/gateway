@@ -5,7 +5,13 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.24.0 - 2026-10-17]
+
+### Changed
+
+- **Bundled Varnish Cache upgraded to 9.1.0** (from 9.0.3). The chaperone
+  image now ships `varnish=9.1.0`, and the ghost VMOD is built against the
+  `varnish` crate 0.8.0 (needed for 9.1 bindings; still supports 9.0).
 
 ### Added
 
