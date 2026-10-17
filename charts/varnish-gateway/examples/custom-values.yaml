@@ -30,7 +30,7 @@ gatewayClass:
         # Custom error handling
         sub vcl_backend_error {
             set beresp.http.Content-Type = "application/json";
-            synthetic({"{"error": "Backend unavailable"}"});
+            set beresp.body = {"{"error": "Backend unavailable" }"};
             return (deliver);
         }
 
