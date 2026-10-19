@@ -10,7 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::{BackendTLS, ExternalProxy};
-use crate::external_backend::{warm_runtime, ExternalBackend, ExternalBody};
+use crate::external_backend::{ExternalBackend, ExternalBody};
 use varnish::vcl::{Backend, BackendRef, Ctx, NativeBackend, NativeBackendBuilder, VclError};
 
 /// Entry stored in the BackendPool. Native backends wrap real Varnish backend
@@ -165,9 +165,6 @@ impl BackendPool {
         if self.backends.contains_key(&key) {
             return Ok(key);
         }
-
-        // Pay tokio startup at reload time, not on the first proxied request.
-        warm_runtime();
 
         let impl_ = ExternalBackend::new(proxy)?;
         let backend_name = format!("ghost_{}", sanitize_backend_name(&key));

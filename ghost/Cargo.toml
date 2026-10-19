@@ -20,10 +20,7 @@ time = { version = "0.3", features = ["formatting", "parsing"] }
 # External proxy backend for Service of type ExternalName.
 # Reqwest's connection pool and DNS resolver hide rotating upstream IPs
 # behind a single synthetic Varnish backend (one VBE per ExternalName).
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
-tokio-stream = "0.1"
-bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 [build-dependencies]
 pkg-config = "0.3.30"
