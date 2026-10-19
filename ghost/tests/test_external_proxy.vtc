@@ -4,8 +4,35 @@ varnishtest "ghost external proxy via reqwest-backed synthetic backend"
 # Don't constrain Host here — reqwest builds it from the upstream URL.
 server s1 {
     rxreq
+    expect req.method == "GET"
     expect req.url == "/media/asset.png"
     txresp -hdr "X-From: upstream" -body "binary-blob"
+
+    rxreq
+    expect req.method == "POST"
+    expect req.http.Content-Type == "application/json"
+    expect req.http.Content-Length == "7"
+    expect req.body == "{\"x\":1}"
+    txresp -status 201 -body "created"
+
+    rxreq
+    expect req.method == "PUT"
+    expect req.body == "replacement"
+    txresp -status 204
+
+    rxreq
+    expect req.method == "DELETE"
+    expect req.http.Content-Length == <undef>
+    expect req.bodylen == 0
+    txresp -status 204
+
+    # chunked client body is buffered and re-sent with a Content-Length
+    rxreq
+    expect req.method == "POST"
+    expect req.http.Transfer-Encoding == <undef>
+    expect req.http.Content-Length == "11"
+    expect req.body == "hello world"
+    txresp -body "ok"
 } -start
 
 # Write ghost.json with an external_proxy group instead of native backends.
@@ -64,34 +91,34 @@ client c1 {
     expect resp.body == "binary-blob"
 } -run
 
-# Body-bearing methods must be rejected locally with 405 — the upstream
-# (server s1) is not started for a second exchange, so any hit on it would
-# fail the test. The 405 must come from the synthetic backend, not s1.
+# Body-bearing methods are forwarded with their body to the upstream.
 client c2 {
     txreq -req POST -url "/media/asset.png" \
         -hdr "Host: preview.example.com" \
         -hdr "Content-Type: application/json" \
         -body "{\"x\":1}"
     rxresp
-    expect resp.status == 405
-    expect resp.http.Allow == "GET, HEAD, OPTIONS"
-    expect resp.http.Cache-Control == "no-store"
-    expect resp.http.Content-Type == "text/plain; charset=utf-8"
-} -run
+    expect resp.status == 201
+    expect resp.body == "created"
 
-client c3 {
     txreq -req PUT -url "/media/asset.png" \
         -hdr "Host: preview.example.com" \
         -body "replacement"
     rxresp
-    expect resp.status == 405
-    expect resp.http.Allow == "GET, HEAD, OPTIONS"
-} -run
+    expect resp.status == 204
 
-client c4 {
     txreq -req DELETE -url "/media/asset.png" \
         -hdr "Host: preview.example.com"
     rxresp
-    expect resp.status == 405
-    expect resp.http.Allow == "GET, HEAD, OPTIONS"
+    expect resp.status == 204
+
+    txreq -req POST -url "/media/asset.png" -nolen \
+        -hdr "Host: preview.example.com" \
+        -hdr "Transfer-Encoding: chunked"
+    chunked "hello "
+    chunked "world"
+    chunkedlen 0
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "ok"
 } -run

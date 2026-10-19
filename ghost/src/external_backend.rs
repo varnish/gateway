@@ -6,26 +6,17 @@
 //! runs its own internal runtime thread, so the Varnish worker simply blocks
 //! on `send()` and on body reads.
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::time::Duration;
 
 use reqwest::blocking::{Client, Response};
 use reqwest::header::HeaderName;
-use varnish::vcl::{Ctx, StrOrBytes, VclBackend, VclError, VclResponse};
+use varnish::vcl::{BodyState, Ctx, StrOrBytes, VclBackend, VclError, VclResponse};
 
 use crate::config::ExternalProxy;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Methods the synthetic backend will forward. Anything else is rejected
-/// with 405 because we cannot stream a request body through the current
-/// VclBackend bridge.
-const ALLOWED_METHODS: &str = "GET, HEAD, OPTIONS";
-
-/// Body returned with the synthetic 405 so curl/log readers see why.
-const METHOD_NOT_ALLOWED_BODY: &[u8] =
-    b"external proxy backend does not forward request bodies; allowed methods: GET, HEAD, OPTIONS\n";
 
 /// Synthetic backend that proxies requests via `reqwest` to a single upstream
 /// hostname. One `ExternalBackend` per unique (hostname, port, tls) tuple —
@@ -77,55 +68,34 @@ impl ExternalBackend {
 
 impl VclBackend<ExternalBody> for ExternalBackend {
     fn get_response(&self, ctx: &mut Ctx<'_>) -> Result<Option<ExternalBody>, VclError> {
-        // Pull the method first so the 405 fast-path skips the header copy.
-        // Each block drops its bereq borrow before we touch ctx mutably.
-        let method_str = {
+        // Copy what we need out of bereq so its borrow ends before
+        // ctx.req_body() needs ctx mutably.
+        let (method_str, path, headers_owned) = {
             let bereq = ctx
                 .http_bereq
                 .as_ref()
                 .ok_or_else(|| VclError::new("external_proxy: missing bereq".to_string()))?;
-            sob_to_str(bereq.method())?.to_string()
-        };
-
-        let method = reqwest::Method::from_bytes(method_str.as_bytes())
-            .map_err(|e| VclError::new(format!("external_proxy: invalid method: {}", e)))?;
-
-        // Bodies on bereq aren't streamed into reqwest yet. Rather than
-        // forwarding a body-bearing method with the body silently dropped —
-        // which can succeed at a forgiving upstream and look like a normal
-        // 2xx to the client — reject it locally with 405 + Allow.
-        if method_implies_body(&method) {
-            ctx.log(
-                varnish::vcl::LogTag::Error,
-                format!(
-                    "external_proxy: rejecting {} with 405; request bodies are not forwarded",
-                    method
-                ),
-            );
-            let beresp = ctx
-                .http_beresp
-                .as_mut()
-                .ok_or_else(|| VclError::new("external_proxy: missing beresp".to_string()))?;
-            beresp.set_status(405);
-            beresp.set_proto("HTTP/1.1")?;
-            beresp.set_header("Allow", ALLOWED_METHODS)?;
-            beresp.set_header("Content-Type", "text/plain; charset=utf-8")?;
-            beresp.set_header("Cache-Control", "no-store")?;
-            return Ok(Some(ExternalBody::from_static(METHOD_NOT_ALLOWED_BODY)));
-        }
-
-        let (path, headers_owned) = {
-            let bereq = ctx
-                .http_bereq
-                .as_ref()
-                .ok_or_else(|| VclError::new("external_proxy: missing bereq".to_string()))?;
+            let m = sob_to_str(bereq.method())?.to_string();
             let p = sob_to_str(bereq.url())?.to_string();
             let headers: Vec<(String, Vec<u8>)> = bereq
                 .into_iter()
                 .filter(|(k, _)| forward_client_header(k))
                 .map(|(k, v)| (k.to_string(), v.as_ref().to_vec()))
                 .collect();
-            (p, headers)
+            (m, p, headers)
+        };
+
+        let method = reqwest::Method::from_bytes(method_str.as_bytes())
+            .map_err(|e| VclError::new(format!("external_proxy: invalid method: {}", e)))?;
+
+        // The request body is buffered: reqwest's blocking body must be
+        // `Send + 'static`, which a reader borrowing `ctx` can't be.
+        let body = if ctx.req_body_state()? != BodyState::None {
+            let mut buf = Vec::new();
+            ctx.req_body(&mut buf)?;
+            Some(buf)
+        } else {
+            None
         };
 
         let url = format!("{}{}", self.base_url, path);
@@ -138,6 +108,9 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             }
         }
         req_builder = req_builder.header("host", &self.upstream_host);
+        if let Some(body) = body {
+            req_builder = req_builder.body(body);
+        }
 
         let resp = req_builder
             .send()
@@ -170,78 +143,30 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             }
         }
 
-        Ok(Some(ExternalBody::streamed(resp, content_length)))
+        Ok(Some(ExternalBody {
+            resp,
+            content_length,
+        }))
     }
 }
 
-/// Response body for a synthetic backend. Either streams the upstream
-/// `reqwest` response (success path) or serves a fixed static buffer
-/// (locally generated responses like the 405 rejection).
+/// Response body for a synthetic backend: the upstream `reqwest` response,
+/// streamed through to Varnish as it is read.
 pub struct ExternalBody {
-    state: BodyState,
-}
-
-enum BodyState {
-    Streamed {
-        resp: Response,
-        content_length: Option<usize>,
-    },
-    Static {
-        data: &'static [u8],
-        cursor: usize,
-    },
-}
-
-impl ExternalBody {
-    fn streamed(resp: Response, content_length: Option<usize>) -> Self {
-        Self {
-            state: BodyState::Streamed {
-                resp,
-                content_length,
-            },
-        }
-    }
-
-    fn from_static(data: &'static [u8]) -> Self {
-        Self {
-            state: BodyState::Static { data, cursor: 0 },
-        }
-    }
+    resp: Response,
+    content_length: Option<usize>,
 }
 
 impl VclResponse for ExternalBody {
-    fn read(&mut self, mut buf: &mut [u8]) -> Result<usize, VclError> {
-        match &mut self.state {
-            BodyState::Streamed { resp, .. } => resp
-                .read(buf)
-                .map_err(|e| VclError::new(format!("external proxy chunk: {}", e))),
-            BodyState::Static { data, cursor } => {
-                let remaining = &data[*cursor..];
-                let n = buf
-                    .write(remaining)
-                    .map_err(|e| VclError::new(format!("external_proxy: body write: {}", e)))?;
-                *cursor += n;
-                Ok(n)
-            }
-        }
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, VclError> {
+        self.resp
+            .read(buf)
+            .map_err(|e| VclError::new(format!("external proxy chunk: {}", e)))
     }
 
     fn len(&self) -> Option<usize> {
-        match &self.state {
-            BodyState::Streamed { content_length, .. } => *content_length,
-            BodyState::Static { data, .. } => Some(data.len()),
-        }
+        self.content_length
     }
-}
-
-fn method_implies_body(method: &reqwest::Method) -> bool {
-    matches!(
-        *method,
-        reqwest::Method::POST
-            | reqwest::Method::PUT
-            | reqwest::Method::PATCH
-            | reqwest::Method::DELETE
-    )
 }
 
 fn sob_to_str<'a>(value: Option<StrOrBytes<'a>>) -> Result<&'a str, VclError> {
@@ -315,36 +240,6 @@ mod tests {
         assert!(forward_client_header("User-Agent"));
         assert!(forward_client_header("Authorization"));
         assert!(forward_client_header("X-Amz-Date"));
-    }
-
-    #[test]
-    fn method_implies_body_matches_body_carrying_verbs() {
-        assert!(method_implies_body(&reqwest::Method::POST));
-        assert!(method_implies_body(&reqwest::Method::PUT));
-        assert!(method_implies_body(&reqwest::Method::PATCH));
-        assert!(method_implies_body(&reqwest::Method::DELETE));
-        assert!(!method_implies_body(&reqwest::Method::GET));
-        assert!(!method_implies_body(&reqwest::Method::HEAD));
-        assert!(!method_implies_body(&reqwest::Method::OPTIONS));
-    }
-
-    #[test]
-    fn static_body_drains_in_chunks() {
-        let mut body = ExternalBody::from_static(b"hello world");
-        assert_eq!(body.len(), Some(11));
-
-        let mut buf = [0u8; 5];
-        let n = <ExternalBody as VclResponse>::read(&mut body, &mut buf).unwrap();
-        assert_eq!(n, 5);
-        assert_eq!(&buf[..n], b"hello");
-
-        let mut buf = [0u8; 32];
-        let n = <ExternalBody as VclResponse>::read(&mut body, &mut buf).unwrap();
-        assert_eq!(n, 6);
-        assert_eq!(&buf[..n], b" world");
-
-        let n = <ExternalBody as VclResponse>::read(&mut body, &mut buf).unwrap();
-        assert_eq!(n, 0);
     }
 
     #[test]
