@@ -125,20 +125,19 @@ many IP addresses the external hostname resolves to. The underlying
 - **Connection pooling**: idle connections are reused across requests.
 - **TLS**: rustls per-connection, validated against the bundled
   `webpki-roots` CA store; SNI is the `externalName`.
-- **Request forwarding**: method and headers are forwarded; the `Host`
-  header is set to the `externalName`. Hop-by-hop headers (RFC 7230 §6.1)
-  are stripped.
+- **Request forwarding**: method, headers and request body are forwarded;
+  the `Host` header is set to the `externalName`. Hop-by-hop headers
+  (RFC 7230 §6.1) are stripped. The request body is buffered in memory
+  and sent with a `Content-Length`, even if the client used chunked
+  encoding.
 - **Response streaming**: chunks are streamed through to the client — ghost
   does not buffer the full response body.
 
 ## Limitations
 
-- **Request bodies are not forwarded.** GET, HEAD, and OPTIONS are
-  forwarded. POST, PUT, PATCH, and DELETE are rejected locally with
-  `405 Method Not Allowed`, an `Allow: GET, HEAD, OPTIONS` header, and
-  `Cache-Control: no-store` — the upstream is not contacted. Ghost also
-  emits an `Error` line in `varnishlog`. The current ExternalName use case
-  is read-only fan-out to object stores and third-party APIs.
+- **Request bodies are buffered.** Ghost reads the whole request body
+  into memory before contacting the upstream, so very large uploads cost
+  memory proportional to their size.
 - **`BackendTLSPolicy` is ignored** for ExternalName Services — custom CA
   pinning and SNI override are not currently supported. TLS is on/off based
   on `appProtocol` only.
