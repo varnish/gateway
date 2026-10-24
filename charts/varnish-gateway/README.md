@@ -20,6 +20,21 @@ helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
   --create-namespace
 ```
 
+### Namespace management
+
+If instead you want the chart to own the namespace (e.g. rendering with
+`helm template | kubectl apply`) set `createNamespace=true`
+
+```bash
+helm install varnish-gateway oci://ghcr.io/varnish/charts/varnish-gateway \
+  --version 0.x.y \
+  --set namespace=varnish-gateway-system \
+  --set createNamespace=true
+```
+
+The chart-created namespace carries `helm.sh/resource-policy: keep`, so
+uninstalling the release leaves the namespace (and anything in it) intact.
+
 ## Configuration
 
 The following table lists the configurable parameters of the Varnish Gateway chart and their default values.
@@ -84,6 +99,7 @@ Requires the prometheus-operator CRDs (`monitoring.coreos.com`) — e.g. from
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `namespace` | Namespace for operator deployment | `varnish-gateway-system` |
+| `createNamespace` | Let the chart create the namespace itself | `false` |
 | `rbac.create` | Create RBAC resources | `true` |
 | `serviceAccount.create` | Create service account | `true` |
 | `commonLabels` | Extra labels added to all resources | `{}` |

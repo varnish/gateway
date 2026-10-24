@@ -5,6 +5,10 @@
 # Namespace where the operator will be installed
 namespace: varnish-gateway-system
 
+# Set true for flows where nothing else creates the namespace
+# example: helm template | kubectl apply
+createNamespace: false
+
 # Operator configuration
 operator:
   # Number of operator replicas

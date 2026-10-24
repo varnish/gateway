@@ -5,6 +5,7 @@
   "additionalProperties": true,
   "properties": {
     "namespace": { "type": "string", "minLength": 1 },
+    "createNamespace": { "type": "boolean" },
     "operator": {
       "type": "object",
       "additionalProperties": true,
