@@ -101,9 +101,33 @@ func TestGenerate_GhostReloadHandler(t *testing.T) {
 		t.Error("expected vcl_recv to return synth(500) on failed reload")
 	}
 
-	// Should NOT have vcl_backend_error (reload handled in vcl_recv)
+	// The preamble runs BEFORE user VCL, so a return here would stop user VCL from
+	// ever running. The 504 flip lives in the postamble instead.
 	if strings.Contains(result, "sub vcl_backend_error {") {
-		t.Error("should not have vcl_backend_error (reload handled in vcl_recv)")
+		t.Error("should not have vcl_backend_error in the preamble (see postamble.vcl)")
+	}
+}
+
+func TestMergePostambleBackendError(t *testing.T) {
+	// The 504 flip must land after user VCL so a user-defined vcl_backend_error
+	// runs first and can take over with its own return.
+	merged := Merge(Generate(), "sub vcl_backend_error { set beresp.http.X-User = \"1\"; }")
+
+	userIdx := strings.Index(merged, `set beresp.http.X-User = "1";`)
+	flipIdx := strings.Index(merged, "set beresp.status = 504;")
+	if userIdx == -1 {
+		t.Fatal("expected user vcl_backend_error in merged VCL")
+	}
+	if flipIdx == -1 {
+		t.Fatal("expected postamble 504 flip in merged VCL")
+	}
+	if flipIdx < userIdx {
+		t.Error("postamble vcl_backend_error must be concatenated after user VCL")
+	}
+
+	// The flip is scoped to routes that actually carry a timeout.
+	if !strings.Contains(merged, "if (bereq.http.X-Ghost-Timeout) {") {
+		t.Error("expected the 504 flip to be guarded on X-Ghost-Timeout")
 	}
 }
 
@@ -136,6 +160,24 @@ func TestGenerate_DefaultGhostConfigPath(t *testing.T) {
 
 	if !strings.Contains(result, DefaultGhostConfigPath) {
 		t.Errorf("expected default ghost config path %q in output", DefaultGhostConfigPath)
+	}
+}
+
+func TestGenerate_RouteTimeoutSetsAllFetchTimeouts(t *testing.T) {
+	result := Generate()
+
+	// All three must move together: leaving connect_timeout at varnishd's 3.5s
+	// global lets an unreachable pod outlive a shorter route timeout.
+	for _, want := range []string{
+		"set bereq.connect_timeout = std.duration(bereq.http.X-Ghost-Timeout, 3.5s);",
+		"set bereq.first_byte_timeout = std.duration(bereq.http.X-Ghost-Timeout, 60s);",
+		"set bereq.between_bytes_timeout = std.duration(bereq.http.X-Ghost-Timeout, 60s);",
+		// A client-supplied X-Ghost-Timeout must never reach the fetch.
+		"unset req.http.X-Ghost-Timeout;",
+	} {
+		if !strings.Contains(result, want) {
+			t.Errorf("expected %q in generated VCL", want)
+		}
 	}
 }
 
@@ -1247,5 +1289,127 @@ func TestNoMatchRuleMatchesExplicitSlashPriority(t *testing.T) {
 	}
 	if noMatchPrio != explicitPrio {
 		t.Errorf("no-match (%d) and explicit-/ (%d) priorities must be equal", noMatchPrio, explicitPrio)
+	}
+}
+
+func TestRouteBackendTimeoutMs(t *testing.T) {
+	tests := []struct {
+		name     string
+		timeouts *gatewayv1.HTTPRouteTimeouts
+		want     int
+	}{
+		{"nil timeouts", nil, 0},
+		{"request only", &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration("5s"))}, 5000},
+		{"request disabled", &gatewayv1.HTTPRouteTimeouts{Request: ptr(gatewayv1.Duration("0s"))}, 0},
+		{"both set, backendRequest tighter", &gatewayv1.HTTPRouteTimeouts{
+			Request:        ptr(gatewayv1.Duration("5s")),
+			BackendRequest: ptr(gatewayv1.Duration("500ms")),
+		}, 500},
+		{"both set, request tighter", &gatewayv1.HTTPRouteTimeouts{
+			Request:        ptr(gatewayv1.Duration("1s")),
+			BackendRequest: ptr(gatewayv1.Duration("30s")),
+		}, 1000},
+		{"request set, backendRequest disabled", &gatewayv1.HTTPRouteTimeouts{
+			Request:        ptr(gatewayv1.Duration("2s")),
+			BackendRequest: ptr(gatewayv1.Duration("0s")),
+		}, 2000},
+		{"sub-second", &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("500ms"))}, 500},
+		{"whole seconds", &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("3s"))}, 3000},
+		{"compound", &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("1m30s"))}, 90000},
+		{"zero disables", &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("0s"))}, 0},
+		{"unparseable", &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("banana"))}, 0},
+		{"negative", &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("-5s"))}, 0},
+		// The GEP-2257 pattern permits durations past ghost's u32 backend_timeout_ms.
+		// 1193h is the last hour that still fits; 1194h saturates instead of
+		// overflowing, which would fail the whole ghost.json parse.
+		{"just under the u32 ceiling", &gatewayv1.HTTPRouteTimeouts{
+			BackendRequest: ptr(gatewayv1.Duration("1193h")),
+		}, 4294800000},
+		{"saturates past the u32 ceiling", &gatewayv1.HTTPRouteTimeouts{
+			BackendRequest: ptr(gatewayv1.Duration("1194h")),
+		}, maxTimeoutMs},
+		{"saturated request still loses to a tighter backendRequest", &gatewayv1.HTTPRouteTimeouts{
+			Request:        ptr(gatewayv1.Duration("99999h")),
+			BackendRequest: ptr(gatewayv1.Duration("500ms")),
+		}, 500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := routeBackendTimeoutMs(tt.timeouts); got != tt.want {
+				t.Errorf("routeBackendTimeoutMs() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCollectHTTPRouteBackends_BackendTimeout(t *testing.T) {
+	prefixType := gatewayv1.PathMatchPathPrefix
+	backendRef := []gatewayv1.HTTPBackendRef{
+		{BackendRef: gatewayv1.BackendRef{BackendObjectReference: gatewayv1.BackendObjectReference{
+			Name: "api-service", Port: ptr(gatewayv1.PortNumber(8080)),
+		}}},
+	}
+
+	routes := []gatewayv1.HTTPRoute{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "route-1", Namespace: "default"},
+			Spec: gatewayv1.HTTPRouteSpec{
+				Hostnames: []gatewayv1.Hostname{"api.example.com"},
+				Rules: []gatewayv1.HTTPRouteRule{
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/timed")}},
+						},
+						BackendRefs: backendRef,
+						Timeouts:    &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("500ms"))},
+					},
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/disabled")}},
+						},
+						BackendRefs: backendRef,
+						Timeouts:    &gatewayv1.HTTPRouteTimeouts{BackendRequest: ptr(gatewayv1.Duration("0s"))},
+					},
+					{
+						Matches: []gatewayv1.HTTPRouteMatch{
+							{Path: &gatewayv1.HTTPPathMatch{Type: &prefixType, Value: ptr("/untimed")}},
+						},
+						BackendRefs: backendRef,
+					},
+				},
+			},
+		},
+	}
+
+	collectedRoutes := CollectHTTPRouteBackends(routes, nil, "default", nil, nil, nil)
+
+	got := make(map[string]int)
+	for _, r := range collectedRoutes {
+		if r.PathMatch == nil {
+			t.Fatalf("expected a path match on every route, got %+v", r)
+		}
+		got[r.PathMatch.Value] = r.BackendTimeoutMs
+	}
+
+	want := map[string]int{"/timed": 500, "/disabled": 0, "/untimed": 0}
+	for path, wantMs := range want {
+		if got[path] != wantMs {
+			t.Errorf("route %s: BackendTimeoutMs = %d, want %d", path, got[path], wantMs)
+		}
+	}
+
+	// 0 must serialize as absent, not as a literal 0 ghost would bridge into bereq.
+	for _, r := range collectedRoutes {
+		if r.PathMatch.Value != "/disabled" {
+			continue
+		}
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("json.Marshal(route): %v", err)
+		}
+		if strings.Contains(string(data), "backend_timeout_ms") {
+			t.Errorf("disabled timeout must be omitted from routing.json, got %s", data)
+		}
 	}
 }
