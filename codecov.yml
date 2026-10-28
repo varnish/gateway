@@ -3,6 +3,13 @@ coverage:
     project:
       default:
         target: auto
+        # A few lines in this repo are only covered when goroutine scheduling
+        # cooperates (disconnect-vs-response races in internal/varnishadm, for
+        # one), so an unqualified "no drop at all" gate fails PRs for reasons
+        # that have nothing to do with their contents. Allow that much drift
+        # here; the patch status below still has no slack, so new code must
+        # come with tests.
+        threshold: 0.1%
     patch:
       default:
         target: auto
