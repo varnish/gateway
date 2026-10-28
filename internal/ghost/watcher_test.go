@@ -538,8 +538,8 @@ func TestWatcherReloadFailureFatal(t *testing.T) {
 	}
 }
 
-// TestWatcherReloadTransientFailure verifies that a transient reload failure is retried
-// and the watcher does NOT exit when the retry succeeds.
+// TestWatcherRunCancelledBeforeVarnishReady verifies that Run returns cleanly when
+// the context is cancelled while still waiting for varnish to become ready.
 func TestWatcherRunCancelledBeforeVarnishReady(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	watcher := NewWatcher(
@@ -566,6 +566,8 @@ func TestWatcherRunCancelledBeforeVarnishReady(t *testing.T) {
 	}
 }
 
+// TestWatcherReloadTransientFailure verifies that a transient reload failure is retried
+// and the watcher does NOT exit when the retry succeeds.
 func TestWatcherReloadTransientFailure(t *testing.T) {
 	var reloadCount int
 

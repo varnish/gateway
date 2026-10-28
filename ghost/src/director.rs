@@ -573,7 +573,7 @@ impl GhostDirector {
         // Clear error on success
         *self.last_error.write() = None;
         self.seen_epoch
-            .store(RELOAD_EPOCH.load(Ordering::Acquire), Ordering::Release);
+            .fetch_max(RELOAD_EPOCH.load(Ordering::Acquire), Ordering::AcqRel);
 
         Ok(())
     }
@@ -583,7 +583,7 @@ impl GhostDirector {
     pub fn reload_and_publish(&self, ctx: &mut Ctx) -> Result<(), String> {
         self.reload(ctx)?;
         let published = RELOAD_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
-        self.seen_epoch.store(published, Ordering::Release);
+        self.seen_epoch.fetch_max(published, Ordering::AcqRel);
         Ok(())
     }
 
@@ -608,8 +608,12 @@ impl GhostDirector {
         // per request would re-read the file on every hit. The next successful
         // reload elsewhere publishes a new epoch and we try again then; the
         // failure itself is in last_error() meanwhile.
+        //
+        // fetch_max, not store: a successful reload() already recorded the
+        // epoch current at its end, which may be newer than `epoch` if another
+        // instance published meanwhile. Don't move seen_epoch backwards.
         let _ = self.reload(ctx);
-        self.seen_epoch.store(epoch, Ordering::Release);
+        self.seen_epoch.fetch_max(epoch, Ordering::AcqRel);
     }
 
     /// Get the last reload error message (if any)
