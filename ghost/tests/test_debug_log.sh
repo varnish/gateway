@@ -54,8 +54,7 @@ import std;
 backend dummy none;
 
 sub vcl_init {
-    ghost.init("$TMPDIR/ghost.json");
-    new router = ghost.ghost_backend();
+    new router = ghost.ghost_backend("$TMPDIR/ghost.json");
 }
 
 sub vcl_recv {

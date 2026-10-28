@@ -11,8 +11,7 @@ acl localhost {
 }
 
 sub vcl_init {
-    ghost.init("%s");
-    new router = ghost.ghost_backend();
+    new router = ghost.ghost_backend("%s");
 }
 
 sub vcl_recv {

@@ -4,7 +4,6 @@
 //! native directors. Configuration is hot-reloaded from `ghost.json` without
 //! restarting Varnish. See `README.md` for architecture details.
 
-use parking_lot::RwLock;
 use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,14 +55,6 @@ const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
 // Run VTC tests
 varnish::run_vtc_tests!("tests/*.vtc");
 
-/// Global state for the ghost VMOD (routing config path only)
-struct GhostState {
-    config_path: PathBuf,
-}
-
-/// Global state storage (config path only, routing is in director instances)
-static STATE: RwLock<Option<Arc<GhostState>>> = RwLock::new(None);
-
 /// The ghost backend - wraps our director
 #[allow(non_camel_case_types)]
 pub struct ghost_backend {
@@ -86,26 +77,6 @@ pub struct ghost_backend {
 mod ghost {
     use super::*;
     use varnish::ffi::VCL_BACKEND;
-
-    /// Initialize ghost with a configuration file path.
-    ///
-    /// Must be called in `vcl_init` before creating any ghost backends.
-    /// The config file is not loaded here — it will be loaded when `ghost_backend` is created.
-    pub fn init(path: &str) -> Result<(), VclError> {
-        let config_path = PathBuf::from(path);
-
-        // Don't load config here - it may not exist yet during startup.
-        // Config will be loaded when ghost_backend is created in vcl_init,
-        // after chaperone has generated the initial ghost.json file.
-        // This avoids race conditions during pod startup.
-
-        let state = GhostState { config_path };
-
-        let mut guard = STATE.write();
-        *guard = Some(Arc::new(state));
-
-        Ok(())
-    }
 
     /// Pre-routing hook for `vcl_recv`. Currently a no-op, reserved for future use.
     #[allow(unused_variables)]
@@ -180,30 +151,27 @@ mod ghost {
     /// Routes requests to upstream servers based on the Host header and loaded
     /// configuration. Performs weighted random backend selection per-vhost.
     impl ghost_backend {
-        /// Create a new ghost backend instance.
+        /// Create a new ghost backend instance reading `config_path`.
         ///
-        /// Must be called after `ghost.init()` has been called. If the config
-        /// file (ghost.json) already exists on disk, routing state is loaded
-        /// immediately. Otherwise the director starts empty and backends will
-        /// be populated on the first `reload()` call from chaperone.
+        /// If the config file (ghost.json) already exists on disk, routing
+        /// state is loaded immediately. Otherwise the director starts empty and
+        /// backends are populated on the first `reload()` from chaperone.
         ///
-        /// # Errors
-        ///
-        /// Returns an error if `ghost.init()` has not been called first.
+        /// The path is per-instance rather than process-global: a VMOD `.so` is
+        /// `dlopen`ed once per process, so several VCLs importing ghost share
+        /// all statics, and a single global config path would be whatever the
+        /// most recently loaded VCL happened to set.
         // varnish-macros 0.7.0 derives the VCL object type name from the
         // constructor's function name, so it must be `ghost_backend` to keep the
-        // `new router = ghost.ghost_backend()` VCL API. That intentionally matches
-        // the type name, which the self_named_constructors lint flags.
+        // `new router = ghost.ghost_backend(...)` VCL API. That intentionally
+        // matches the type name, which the self_named_constructors lint flags.
         #[allow(clippy::self_named_constructors)]
-        pub fn ghost_backend(ctx: &mut Ctx, #[vcl_name] name: &str) -> Result<Self, VclError> {
-            // Get config path from global state
-            let config_path = {
-                let state_guard = STATE.read();
-                let state = state_guard.as_ref().ok_or_else(|| {
-                    VclError::new("ghost.backend: ghost.init() must be called first".to_string())
-                })?;
-                state.config_path.clone()
-            };
+        pub fn ghost_backend(
+            ctx: &mut Ctx,
+            #[vcl_name] name: &str,
+            config_path: &str,
+        ) -> Result<Self, VclError> {
+            let config_path = PathBuf::from(config_path);
 
             // Start with empty routing state
             use std::collections::HashMap;
@@ -265,6 +233,11 @@ mod ghost {
         /// client request (`http_req`). The returned `VCL_BACKEND` pointer is only
         /// valid for the lifetime of the current VCL transaction.
         pub unsafe fn recv(&self, ctx: &mut Ctx) -> VCL_BACKEND {
+            // Pick up a reload that the active VCL's instance handled. No-op
+            // unless this instance lives in a VCL the reload endpoint cannot
+            // reach (a labelled per-route VCL).
+            self.ghost_director.sync(ctx);
+
             // Copy listener to owned String to avoid borrow conflict:
             // local_socket() borrows ctx immutably, http_req.as_mut() needs mutable.
             let listener_owned = local_socket(ctx).map(|s| s.to_string());
@@ -331,8 +304,12 @@ mod ghost {
         /// Reads `ghost.json`, builds new routing state, and atomically swaps it in.
         /// Existing backends are preserved for connection reuse.
         /// Returns `true` on success, `false` on failure (see `last_error()`).
+        ///
+        /// Any ghost instance in another loaded VCL picks the new config up on
+        /// its own next request — this endpoint only ever runs in the active
+        /// VCL, so it cannot reload them directly.
         pub fn reload(&self, ctx: &mut Ctx) -> bool {
-            self.ghost_director.reload(ctx).is_ok()
+            self.ghost_director.reload_and_publish(ctx).is_ok()
         }
 
         /// Get the last reload error message, or empty string if no error.
