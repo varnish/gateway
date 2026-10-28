@@ -3,6 +3,7 @@ package ghost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -539,24 +540,34 @@ func TestWatcherReloadFailureFatal(t *testing.T) {
 
 // TestWatcherReloadTransientFailure verifies that a transient reload failure is retried
 // and the watcher does NOT exit when the retry succeeds.
+func TestWatcherRunCancelledBeforeVarnishReady(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	watcher := NewWatcher(
+		fake.NewSimpleClientset(),
+		filepath.Join(t.TempDir(), "ghost.json"),
+		"127.0.0.1:1",
+		"default",
+		"test-configmap",
+		logger,
+	)
+
+	// Never closed, so ctx.Done() is the only ready case in Run()'s wait on
+	// varnish readiness. Closing it as well would leave the select picking at
+	// random, which is how this path used to be reached — intermittently, and
+	// only as a side effect of another test's teardown.
+	varnishReady := make(chan struct{})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := watcher.Run(ctx, varnishReady)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() = %v, want context.Canceled", err)
+	}
+}
+
 func TestWatcherReloadTransientFailure(t *testing.T) {
-	// Create a fake HTTP server that fails once then succeeds
 	var reloadCount int
-	reloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.varnish-ghost/reload" {
-			reloadCount++
-			if reloadCount <= 2 {
-				// First two reloads fail: initial sync + first attempt from endpoint change
-				// (initial sync is not retried, so we need the endpoint-triggered one to fail once)
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer reloadServer.Close()
 
 	// Create temp directory for ghost.json
 	tmpDir := t.TempDir()
@@ -596,48 +607,12 @@ func TestWatcherReloadTransientFailure(t *testing.T) {
 		},
 	}
 
-	// Create fake Kubernetes client with ConfigMap
-	client := fake.NewSimpleClientset(configMap)
-
-	// Create watcher
-	varnishAddr := strings.TrimPrefix(reloadServer.URL, "http://")
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	watcher := NewWatcher(
-		client,
-		ghostConfigPath,
-		varnishAddr,
-		"default",
-		"test-configmap",
-		logger,
-	)
-
-	// Context long enough for retries
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	// Create varnish ready channel
-	varnishReady := make(chan struct{})
-	close(varnishReady)
-
-	// Start watcher
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- watcher.Run(ctx, varnishReady)
-	}()
-
-	// Wait for initial sync (which will fail the reload, but initial failure is fatal from Run itself)
-	// The initial reload in Run() is NOT retried (it returns error directly).
-	// We need to make initial succeed then subsequent fail-then-succeed.
-	// Actually, reloadCount=1 is the initial sync → fails → Run returns error.
-	// Let me adjust: make the server succeed first, then fail once, then succeed.
-
-	// Cancel and redo with better server logic
-	cancel()
-	<-errCh
-
-	reloadCount = 0
-	reloadServer2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// The initial reload in Run() is not retried — a failure there is returned
+	// directly — so the server has to succeed on the initial sync and fail only
+	// on the reload the EndpointSlice below triggers.
+	reloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/.varnish-ghost/reload" {
 			reloadCount++
 			if reloadCount == 2 {
@@ -651,34 +626,34 @@ func TestWatcherReloadTransientFailure(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
-	defer reloadServer2.Close()
+	defer reloadServer.Close()
 
-	varnishAddr2 := strings.TrimPrefix(reloadServer2.URL, "http://")
-	watcher2 := NewWatcher(
+	varnishAddr := strings.TrimPrefix(reloadServer.URL, "http://")
+	watcher := NewWatcher(
 		fake.NewSimpleClientset(configMap),
 		ghostConfigPath,
-		varnishAddr2,
+		varnishAddr,
 		"default",
 		"test-configmap",
 		logger,
 	)
 
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel2()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 
-	varnishReady2 := make(chan struct{})
-	close(varnishReady2)
+	varnishReady := make(chan struct{})
+	close(varnishReady)
 
-	errCh2 := make(chan error, 1)
+	errCh := make(chan error, 1)
 	go func() {
-		errCh2 <- watcher2.Run(ctx2, varnishReady2)
+		errCh <- watcher.Run(ctx, varnishReady)
 	}()
 
 	// Wait for ready
 	select {
-	case <-watcher2.Ready():
+	case <-watcher.Ready():
 		t.Log("watcher is ready")
-	case err := <-errCh2:
+	case err := <-errCh:
 		t.Fatalf("watcher exited before becoming ready: %v", err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("watcher did not become ready within 3 seconds")
@@ -708,21 +683,21 @@ func TestWatcherReloadTransientFailure(t *testing.T) {
 	}
 
 	// Directly trigger endpoint update on the watcher
-	watcher2.handleEndpointSliceUpdate(ctx2, endpointSlice)
+	watcher.handleEndpointSliceUpdate(ctx, endpointSlice)
 
 	// Wait for retry to complete (500ms backoff + processing)
 	time.Sleep(2 * time.Second)
 
 	// Watcher should still be running (not exited with fatal error)
 	select {
-	case err := <-errCh2:
+	case err := <-errCh:
 		if err != context.DeadlineExceeded && err != context.Canceled {
 			t.Fatalf("watcher exited unexpectedly: %v", err)
 		}
 	default:
 		// Good - watcher is still running
 		t.Log("watcher still running after transient failure recovery - test passed")
-		cancel2()
+		cancel()
 	}
 }
 
