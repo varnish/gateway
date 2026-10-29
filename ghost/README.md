@@ -70,8 +70,7 @@ import ghost;
 backend dummy { .host = "127.0.0.1"; .port = "80"; }
 
 sub vcl_init {
-    ghost.init("/etc/varnish/ghost.json");
-    new router = ghost.ghost_backend();
+    new router = ghost.ghost_backend("/etc/varnish/ghost.json");
 }
 
 sub vcl_recv {

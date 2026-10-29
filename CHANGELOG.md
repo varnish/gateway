@@ -5,6 +5,27 @@ All notable changes to Varnish Gateway are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Ghost no longer keeps the config path in process-global state.** A VMOD
+  `.so` is `dlopen`ed once per process, so every VCL importing ghost shared one
+  `ghost.init()` slot and the most recently loaded VCL won. The path is now a
+  constructor argument and `ghost.init()` is gone: VCL that used to read
+  `ghost.init("<path>"); new router = ghost.ghost_backend();` becomes
+  `new router = ghost.ghost_backend("<path>");`. The generated preamble is
+  updated; only hand-written VCL calling ghost directly is affected.
+
+- **A ghost instance outside the active VCL now picks up reloads.** The
+  `/.varnish-ghost/reload` endpoint runs in `vcl_recv` and therefore only ever
+  reaches the active VCL's router, so any other loaded VCL's router kept
+  serving stale routing. The handling instance now publishes a reload epoch and
+  every other instance reloads on its next request, in its own VCL context
+  (backends have to be built against the VCL that owns them, so this is a pull
+  rather than a push). No effect on the current single-VCL deployment; this is
+  groundwork for per-route VCL.
+
 ## [v0.24.0 - 2026-10-17]
 
 ### Changed

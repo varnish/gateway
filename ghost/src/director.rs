@@ -6,11 +6,12 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use arc_swap::ArcSwap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use regex::Regex;
 use varnish::vcl::{
     Backend, BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector,
@@ -426,6 +427,20 @@ fn collect_referenced_backends_from_directors(
     keys
 }
 
+/// Process-wide reload epoch, bumped once per externally triggered reload.
+///
+/// A VMOD `.so` is `dlopen`ed once per process, so every VCL importing ghost
+/// shares this counter. That matters because the reload endpoint lives in
+/// `vcl_recv` and therefore only ever reaches the *active* VCL's director —
+/// instances living in labelled VCLs would otherwise never see a config change.
+///
+/// The fan-out is a pull, not a push: backends are registered against
+/// `ctx->vcl`, so reloading another VCL's director from here would build its
+/// backends against the wrong VCL and tie their lifetime to the wrong program.
+/// Instead the handling instance publishes a new epoch and every other instance
+/// catches up on its own next request, in its own context.
+static RELOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
+
 /// Ghost director implementation
 pub struct GhostDirector {
     /// Vhost directors (atomic swap for lock-free reads)
@@ -442,6 +457,10 @@ pub struct GhostDirector {
     internal_error_backend: SendSyncBackendRef,
     /// Last reload error message (for debugging)
     last_error: RwLock<Option<String>>,
+    /// Epoch this instance has caught up to. See [`RELOAD_EPOCH`].
+    seen_epoch: AtomicU64,
+    /// Serializes catch-up reloads so concurrent workers reload at most once.
+    sync_lock: Mutex<()>,
 }
 
 /// Bundle returned by [`GhostDirectorBundle::new`].
@@ -490,6 +509,8 @@ impl GhostDirectorBundle {
             redirect_backend: redirect_ref,
             internal_error_backend: internal_error_ref,
             last_error: RwLock::new(None),
+            seen_epoch: AtomicU64::new(RELOAD_EPOCH.load(Ordering::Acquire)),
+            sync_lock: Mutex::new(()),
         };
 
         Ok(GhostDirectorBundle {
@@ -503,7 +524,10 @@ impl GhostDirectorBundle {
 
 impl GhostDirector {
 
-    /// Reload configuration from disk
+    /// Reload configuration from disk into this instance only.
+    ///
+    /// Use [`GhostDirector::reload_and_publish`] for an externally triggered
+    /// reload that other instances in this process must also pick up.
     pub fn reload(&self, ctx: &mut Ctx) -> Result<(), String> {
         // Clone current backend pool for modification
         let current_backends = self.backends.load();
@@ -548,8 +572,48 @@ impl GhostDirector {
 
         // Clear error on success
         *self.last_error.write() = None;
+        self.seen_epoch
+            .fetch_max(RELOAD_EPOCH.load(Ordering::Acquire), Ordering::AcqRel);
 
         Ok(())
+    }
+
+    /// Reload from disk and tell every other ghost instance in this process to
+    /// do the same on its next request. Called by the reload endpoint.
+    pub fn reload_and_publish(&self, ctx: &mut Ctx) -> Result<(), String> {
+        self.reload(ctx)?;
+        let published = RELOAD_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+        self.seen_epoch.fetch_max(published, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Catch up with a reload that another instance handled.
+    ///
+    /// Called on the request path, so the common case is one atomic load and a
+    /// comparison. Only instances in VCLs the reload endpoint never reaches —
+    /// labelled per-route VCLs — do any work here.
+    pub fn sync(&self, ctx: &mut Ctx) {
+        let epoch = RELOAD_EPOCH.load(Ordering::Acquire);
+        if self.seen_epoch.load(Ordering::Acquire) >= epoch {
+            return;
+        }
+
+        let _guard = self.sync_lock.lock();
+        if self.seen_epoch.load(Ordering::Acquire) >= epoch {
+            return;
+        }
+
+        // Record the attempt whether or not it worked. A config this instance
+        // cannot load will not load on the next request either, and retrying
+        // per request would re-read the file on every hit. The next successful
+        // reload elsewhere publishes a new epoch and we try again then; the
+        // failure itself is in last_error() meanwhile.
+        //
+        // fetch_max, not store: a successful reload() already recorded the
+        // epoch current at its end, which may be newer than `epoch` if another
+        // instance published meanwhile. Don't move seen_epoch backwards.
+        let _ = self.reload(ctx);
+        self.seen_epoch.fetch_max(epoch, Ordering::AcqRel);
     }
 
     /// Get the last reload error message (if any)
