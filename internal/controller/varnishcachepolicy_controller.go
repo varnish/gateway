@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -22,6 +25,7 @@ import (
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/ghost"
+	"github.com/varnish/gateway/internal/vcl"
 )
 
 // VarnishCachePolicyReconciler reconciles VarnishCachePolicy objects.
@@ -208,18 +212,29 @@ func (r *VarnishCachePolicyReconciler) validateSpec(vcp *gatewayparamsv1alpha1.V
 		return fmt.Errorf("exactly one of defaultTTL or forcedTTL must be set")
 	}
 
-	// Validate durations are positive
-	if hasDefault && spec.DefaultTTL.Duration <= 0 {
-		return fmt.Errorf("defaultTTL must be positive")
+	// TTLs may be negative (a negative TTL disables caching), but must not
+	// round to zero whole seconds.
+	if hasDefault {
+		if err := validateTTL("defaultTTL", spec.DefaultTTL.Duration); err != nil {
+			return err
+		}
 	}
-	if hasForced && spec.ForcedTTL.Duration <= 0 {
-		return fmt.Errorf("forcedTTL must be positive")
+	if hasForced {
+		if err := validateTTL("forcedTTL", spec.ForcedTTL.Duration); err != nil {
+			return err
+		}
 	}
-	if spec.Grace != nil && spec.Grace.Duration < 0 {
-		return fmt.Errorf("grace must be non-negative")
+	if err := validateStaleWindow("grace", spec.Grace); err != nil {
+		return err
 	}
-	if spec.Keep != nil && spec.Keep.Duration < 0 {
-		return fmt.Errorf("keep must be non-negative")
+	if err := validateStaleWindow("keep", spec.Keep); err != nil {
+		return err
+	}
+
+	for i := range spec.CacheRuleOverrides {
+		if err := validateCacheRuleOverride(&spec.CacheRuleOverrides[i]); err != nil {
+			return fmt.Errorf("cacheRuleOverrides[%d]: %w", i, err)
+		}
 	}
 
 	// Cache key query params: include and exclude are mutually exclusive
@@ -489,20 +504,10 @@ func isOlder(a, b *gatewayparamsv1alpha1.VarnishCachePolicy) bool {
 func specToCachePolicy(spec *gatewayparamsv1alpha1.VarnishCachePolicySpec) *ghost.CachePolicy {
 	cp := &ghost.CachePolicy{}
 
-	if spec.DefaultTTL != nil {
-		seconds := int(math.Round(spec.DefaultTTL.Duration.Seconds()))
-		cp.DefaultTTLSeconds = &seconds
-	}
-	if spec.ForcedTTL != nil {
-		seconds := int(math.Round(spec.ForcedTTL.Duration.Seconds()))
-		cp.ForcedTTLSeconds = &seconds
-	}
-	if spec.Grace != nil {
-		cp.GraceSeconds = int(math.Round(spec.Grace.Duration.Seconds()))
-	}
-	if spec.Keep != nil {
-		cp.KeepSeconds = int(math.Round(spec.Keep.Duration.Seconds()))
-	}
+	cp.DefaultTTLSeconds = durationToSeconds(spec.DefaultTTL)
+	cp.ForcedTTLSeconds = durationToSeconds(spec.ForcedTTL)
+	cp.GraceSeconds = durationToSeconds(spec.Grace)
+	cp.KeepSeconds = durationToSeconds(spec.Keep)
 
 	if spec.CacheKey != nil {
 		ck := &ghost.CacheKeyConfig{}
@@ -537,5 +542,162 @@ func specToCachePolicy(spec *gatewayparamsv1alpha1.VarnishCachePolicySpec) *ghos
 		}
 	}
 
+	for _, o := range spec.CacheRuleOverrides {
+		var method *string
+		if o.Match.Method != nil {
+			m := string(*o.Match.Method)
+			method = &m
+		}
+		cp.Overrides = append(cp.Overrides, ghost.CacheRuleOverride{
+			Match: ghost.CacheRuleMatch{
+				PathMatch:       vcl.ConvertPathMatch(o.Match.Path),
+				Method:          method,
+				RequestHeaders:  vcl.ConvertHeaderMatches(o.Match.RequestHeaders),
+				QueryParams:     vcl.ConvertQueryParamMatches(o.Match.QueryParams),
+				Status:          o.Match.Status,
+				ResponseHeaders: vcl.ConvertHeaderMatches(o.Match.ResponseHeaders),
+			},
+			DefaultTTLSeconds: durationToSeconds(o.DefaultTTL),
+			ForcedTTLSeconds:  durationToSeconds(o.ForcedTTL),
+			GraceSeconds:      durationToSeconds(o.Grace),
+			KeepSeconds:       durationToSeconds(o.Keep),
+		})
+	}
+
 	return cp
+}
+
+// durationToSeconds converts an optional duration to whole seconds (nil stays nil).
+func durationToSeconds(d *metav1.Duration) *int {
+	if d == nil {
+		return nil
+	}
+	s := int(math.Round(d.Duration.Seconds()))
+	return &s
+}
+
+// validateTTL rejects TTLs that round to zero whole seconds.
+func validateTTL(name string, d time.Duration) error {
+	if d == 0 {
+		return fmt.Errorf("%s must not be zero", name)
+	}
+	// Truncate rather than math.Round: math.Round(0.5) == 1 would accept 500ms.
+	if d > -time.Second && d < time.Second {
+		return fmt.Errorf("%s must be at least 1s in magnitude", name)
+	}
+	return nil
+}
+
+// maxStaleWindow caps grace and keep. Ghost stores them as u32 seconds (about
+// 136 years), so a larger value would make ghost.json unparseable and fail
+// every ghost reload on the gateway. TTLs are i64 in ghost and cannot overflow
+// (metav1.Duration tops out around 292 years).
+const maxStaleWindow = 10 * 365 * 24 * time.Hour
+
+// validateStaleWindow checks an optional grace/keep duration: 0 <= d <= maxStaleWindow.
+func validateStaleWindow(name string, d *metav1.Duration) error {
+	if d == nil {
+		return nil
+	}
+	if d.Duration < 0 {
+		return fmt.Errorf("%s must be non-negative", name)
+	}
+	if d.Duration > maxStaleWindow {
+		return fmt.Errorf("%s must be at most %s (10 years)", name, maxStaleWindow)
+	}
+	return nil
+}
+
+// validateCacheRuleOverride checks a single cache rule override.
+func validateCacheRuleOverride(o *gatewayparamsv1alpha1.CacheRuleOverride) error {
+	if o.DefaultTTL == nil && o.ForcedTTL == nil && o.Grace == nil && o.Keep == nil {
+		return fmt.Errorf("must set at least one of defaultTTL, forcedTTL, grace, keep")
+	}
+	if o.DefaultTTL != nil && o.ForcedTTL != nil {
+		return fmt.Errorf("defaultTTL and forcedTTL are mutually exclusive")
+	}
+	if o.DefaultTTL != nil {
+		if err := validateTTL("defaultTTL", o.DefaultTTL.Duration); err != nil {
+			return err
+		}
+	}
+	if o.ForcedTTL != nil {
+		if err := validateTTL("forcedTTL", o.ForcedTTL.Duration); err != nil {
+			return err
+		}
+	}
+	if err := validateStaleWindow("grace", o.Grace); err != nil {
+		return err
+	}
+	if err := validateStaleWindow("keep", o.Keep); err != nil {
+		return err
+	}
+
+	m := &o.Match
+	for _, s := range m.Status {
+		lo, hi, err := parseStatusMatch(s)
+		if err != nil {
+			return fmt.Errorf("status %q: %w", s, err)
+		}
+		if lo > hi {
+			return fmt.Errorf("status %q: range start must be <= end", s)
+		}
+	}
+	if m.Path != nil && m.Path.Type != nil && *m.Path.Type == gatewayv1.PathMatchRegularExpression && m.Path.Value != nil {
+		if _, err := regexp.Compile(*m.Path.Value); err != nil {
+			return fmt.Errorf("invalid path regex %q: %w", *m.Path.Value, err)
+		}
+	}
+	for _, h := range m.RequestHeaders {
+		if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
+			if _, err := regexp.Compile(h.Value); err != nil {
+				return fmt.Errorf("invalid requestHeaders regex %q: %w", h.Value, err)
+			}
+		}
+	}
+	for _, h := range m.ResponseHeaders {
+		if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
+			if _, err := regexp.Compile(h.Value); err != nil {
+				return fmt.Errorf("invalid responseHeaders regex %q: %w", h.Value, err)
+			}
+		}
+	}
+	for _, q := range m.QueryParams {
+		if q.Type != nil && *q.Type == gatewayv1.QueryParamMatchRegularExpression {
+			if _, err := regexp.Compile(q.Value); err != nil {
+				return fmt.Errorf("invalid queryParams regex %q: %w", q.Value, err)
+			}
+		}
+	}
+	return nil
+}
+
+// parseStatusMatch parses "404", "5xx" or "500-503" into an inclusive range.
+func parseStatusMatch(s string) (lo, hi int, err error) {
+	invalid := fmt.Errorf("invalid (want NNN, Nxx or NNN-NNN with status 100-599)")
+	inRange := func(n int) bool { return n >= 100 && n <= 599 }
+	if len(s) == 3 && s[0] >= '1' && s[0] <= '5' && s[1:] == "xx" {
+		d := int(s[0] - '0')
+		return d * 100, d*100 + 99, nil
+	}
+	if a, b, ok := strings.Cut(s, "-"); ok {
+		lo, err1 := parseStatusCode(a)
+		hi, err2 := parseStatusCode(b)
+		if err1 != nil || err2 != nil || !inRange(lo) || !inRange(hi) {
+			return 0, 0, invalid
+		}
+		return lo, hi, nil
+	}
+	n, e := parseStatusCode(s)
+	if e != nil || !inRange(n) {
+		return 0, 0, invalid
+	}
+	return n, n, nil
+}
+
+func parseStatusCode(s string) (int, error) {
+	if len(s) != 3 {
+		return 0, fmt.Errorf("bad length")
+	}
+	return strconv.Atoi(s)
 }

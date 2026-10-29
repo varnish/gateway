@@ -5,6 +5,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 // DeepCopyInto copies the receiver into out.
@@ -565,6 +566,13 @@ func (in *VarnishCachePolicySpec) DeepCopyInto(out *VarnishCachePolicySpec) {
 		*out = new(BypassSpec)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.CacheRuleOverrides != nil {
+		in, out := &in.CacheRuleOverrides, &out.CacheRuleOverrides
+		*out = make([]CacheRuleOverride, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 }
 
 // DeepCopy creates a deep copy of VarnishCachePolicySpec.
@@ -656,4 +664,91 @@ func (in *VarnishCachePolicyList) DeepCopyObject() runtime.Object {
 		return c
 	}
 	return nil
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *CacheRuleOverride) DeepCopyInto(out *CacheRuleOverride) {
+	*out = *in
+	in.Match.DeepCopyInto(&out.Match)
+	if in.DefaultTTL != nil {
+		in, out := &in.DefaultTTL, &out.DefaultTTL
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.ForcedTTL != nil {
+		in, out := &in.ForcedTTL, &out.ForcedTTL
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.Grace != nil {
+		in, out := &in.Grace, &out.Grace
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+	if in.Keep != nil {
+		in, out := &in.Keep, &out.Keep
+		*out = new(metav1.Duration)
+		**out = **in
+	}
+}
+
+// DeepCopy creates a deep copy of CacheRuleOverride.
+func (in *CacheRuleOverride) DeepCopy() *CacheRuleOverride {
+	if in == nil {
+		return nil
+	}
+	out := new(CacheRuleOverride)
+	in.DeepCopyInto(out)
+	return out
+}
+
+// DeepCopyInto copies the receiver into out.
+func (in *CacheRuleMatch) DeepCopyInto(out *CacheRuleMatch) {
+	*out = *in
+	if in.Path != nil {
+		in, out := &in.Path, &out.Path
+		*out = new(gatewayv1.HTTPPathMatch)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.Method != nil {
+		in, out := &in.Method, &out.Method
+		*out = new(gatewayv1.HTTPMethod)
+		**out = **in
+	}
+	if in.RequestHeaders != nil {
+		in, out := &in.RequestHeaders, &out.RequestHeaders
+		*out = make([]gatewayv1.HTTPHeaderMatch, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.QueryParams != nil {
+		in, out := &in.QueryParams, &out.QueryParams
+		*out = make([]gatewayv1.HTTPQueryParamMatch, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.Status != nil {
+		in, out := &in.Status, &out.Status
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
+	if in.ResponseHeaders != nil {
+		in, out := &in.ResponseHeaders, &out.ResponseHeaders
+		*out = make([]gatewayv1.HTTPHeaderMatch, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+}
+
+// DeepCopy creates a deep copy of CacheRuleMatch.
+func (in *CacheRuleMatch) DeepCopy() *CacheRuleMatch {
+	if in == nil {
+		return nil
+	}
+	out := new(CacheRuleMatch)
+	in.DeepCopyInto(out)
+	return out
 }

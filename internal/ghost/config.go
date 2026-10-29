@@ -146,16 +146,42 @@ type CachePolicy struct {
 	ForcedTTLSeconds *int `json:"forced_ttl_seconds,omitempty"`
 
 	// GraceSeconds is how long to serve stale content while revalidating.
-	GraceSeconds int `json:"grace_seconds"`
+	GraceSeconds *int `json:"grace_seconds,omitempty"`
 
 	// KeepSeconds is how long to keep stale objects when backends are sick.
-	KeepSeconds int `json:"keep_seconds"`
+	KeepSeconds *int `json:"keep_seconds,omitempty"`
 
 	// CacheKey customizes the cache key composition.
 	CacheKey *CacheKeyConfig `json:"cache_key,omitempty"`
 
 	// BypassHeaders defines header conditions that trigger cache bypass.
 	BypassHeaders []BypassHeaderConfig `json:"bypass_headers,omitempty"`
+
+	// Overrides are per-request/response conditional TTL/grace/keep overrides,
+	// evaluated in order. The first matching rule wins; fields it leaves unset
+	// fall back to the top-level value (TTL pair as a unit, grace/keep
+	// individually).
+	Overrides []CacheRuleOverride `json:"overrides,omitempty"`
+}
+
+// CacheRuleOverride overrides the policy's TTL/grace/keep when Match applies.
+// Nil fields inherit from the policy.
+type CacheRuleOverride struct {
+	Match             CacheRuleMatch `json:"match"`
+	DefaultTTLSeconds *int           `json:"default_ttl_seconds,omitempty"`
+	ForcedTTLSeconds  *int           `json:"forced_ttl_seconds,omitempty"`
+	GraceSeconds      *int           `json:"grace_seconds,omitempty"`
+	KeepSeconds       *int           `json:"keep_seconds,omitempty"`
+}
+
+// CacheRuleMatch holds the match criteria of a CacheRuleOverride.
+type CacheRuleMatch struct {
+	PathMatch       *PathMatch        `json:"path_match,omitempty"`
+	Method          *string           `json:"method,omitempty"`
+	RequestHeaders  []HeaderMatch     `json:"request_headers,omitempty"`
+	QueryParams     []QueryParamMatch `json:"query_params,omitempty"`
+	Status          []string          `json:"status,omitempty"`
+	ResponseHeaders []HeaderMatch     `json:"response_headers,omitempty"`
 }
 
 // CacheKeyConfig controls cache key composition in ghost.json.

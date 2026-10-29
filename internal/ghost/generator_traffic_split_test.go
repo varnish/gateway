@@ -129,7 +129,7 @@ func TestMergeRoutesByMatchCriteriaDifferentCachePolicy(t *testing.T) {
 			Priority:  1010,
 			CachePolicy: &CachePolicy{
 				DefaultTTLSeconds: &defaultTTL,
-				GraceSeconds:      30,
+				GraceSeconds:      intPtr(30),
 			},
 		},
 		{
@@ -145,7 +145,7 @@ func TestMergeRoutesByMatchCriteriaDifferentCachePolicy(t *testing.T) {
 			Priority:  1010,
 			CachePolicy: &CachePolicy{
 				ForcedTTLSeconds: &forcedTTL,
-				GraceSeconds:     60,
+				GraceSeconds:     intPtr(60),
 			},
 		},
 	}
@@ -192,7 +192,7 @@ func TestMergeRoutesByMatchCriteriaSameCachePolicy(t *testing.T) {
 			Priority:  1010,
 			CachePolicy: &CachePolicy{
 				DefaultTTLSeconds: &ttl,
-				GraceSeconds:      30,
+				GraceSeconds:      intPtr(30),
 			},
 		},
 		{
@@ -208,7 +208,7 @@ func TestMergeRoutesByMatchCriteriaSameCachePolicy(t *testing.T) {
 			Priority:  1010,
 			CachePolicy: &CachePolicy{
 				DefaultTTLSeconds: &ttl,
-				GraceSeconds:      30,
+				GraceSeconds:      intPtr(30),
 			},
 		},
 	}
@@ -286,3 +286,5 @@ func TestMergeRoutesByMatchCriteriaDifferentPaths(t *testing.T) {
 		}
 	}
 }
+
+func intPtr(i int) *int { return &i }

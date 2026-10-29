@@ -254,41 +254,7 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 				} else {
 					// Process each match
 					for _, match := range rule.Matches {
-						var pathMatch *ghost.PathMatch
-
-						// Extract path match if present
-						if match.Path != nil {
-							pathType := ghost.PathMatchPathPrefix // default
-							if match.Path.Type != nil {
-								switch *match.Path.Type {
-								case gatewayv1.PathMatchExact:
-									pathType = ghost.PathMatchExact
-								case gatewayv1.PathMatchPathPrefix:
-									pathType = ghost.PathMatchPathPrefix
-								case gatewayv1.PathMatchRegularExpression:
-									pathType = ghost.PathMatchRegularExpression
-								}
-							}
-
-							pathValue := "/"
-							if match.Path.Value != nil {
-								pathValue = *match.Path.Value
-							}
-
-							// PathPrefix "/" is the K8s API server default when no path is specified.
-							// It matches all paths, so it has no specificity — treat as no path match.
-							// Without this, API-defaulted routes get inflated priorities that break
-							// Gateway API precedence (e.g., method PATCH with implicit PathPrefix /
-							// would outrank an explicit PathPrefix /path5).
-							if pathType == ghost.PathMatchPathPrefix && pathValue == "/" {
-								pathMatch = nil
-							} else {
-								pathMatch = &ghost.PathMatch{
-									Type:  pathType,
-									Value: pathValue,
-								}
-							}
-						}
+						pathMatch := ConvertPathMatch(match.Path)
 
 						// Extract method
 						var method *string
@@ -297,33 +263,8 @@ func CollectHTTPRouteBackends(routes []gatewayv1.HTTPRoute, gateway *gatewayv1.G
 							method = &m
 						}
 
-						// Extract headers
-						var headers []ghost.HeaderMatch
-						for _, h := range match.Headers {
-							matchType := ghost.MatchTypeExact
-							if h.Type != nil && *h.Type == gatewayv1.HeaderMatchRegularExpression {
-								matchType = ghost.MatchTypeRegularExpression
-							}
-							headers = append(headers, ghost.HeaderMatch{
-								Name:  string(h.Name),
-								Value: h.Value,
-								Type:  matchType,
-							})
-						}
-
-						// Extract query params
-						var queryParams []ghost.QueryParamMatch
-						for _, qp := range match.QueryParams {
-							matchType := ghost.MatchTypeExact
-							if qp.Type != nil && *qp.Type == gatewayv1.QueryParamMatchRegularExpression {
-								matchType = ghost.MatchTypeRegularExpression
-							}
-							queryParams = append(queryParams, ghost.QueryParamMatch{
-								Name:  string(qp.Name),
-								Value: qp.Value,
-								Type:  matchType,
-							})
-						}
+						headers := ConvertHeaderMatches(match.Headers)
+						queryParams := ConvertQueryParamMatches(match.QueryParams)
 
 						// Extract filters
 						var filters *ghost.RouteFilters

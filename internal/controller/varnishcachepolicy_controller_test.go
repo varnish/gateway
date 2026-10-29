@@ -138,12 +138,11 @@ func TestValidateSpec(t *testing.T) {
 			wantErr: "exactly one of defaultTTL or forcedTTL must be set",
 		},
 		{
-			name: "negative defaultTTL",
+			name: "negative defaultTTL allowed",
 			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
 				TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
 				DefaultTTL: durationPtr(-1 * time.Second),
 			},
-			wantErr: "defaultTTL must be positive",
 		},
 		{
 			name: "zero defaultTTL",
@@ -151,15 +150,30 @@ func TestValidateSpec(t *testing.T) {
 				TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
 				DefaultTTL: durationPtr(0),
 			},
-			wantErr: "defaultTTL must be positive",
+			wantErr: "defaultTTL must not be zero",
 		},
 		{
-			name: "negative forcedTTL",
+			name: "sub-second defaultTTL",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL: durationPtr(500 * time.Millisecond),
+			},
+			wantErr: "defaultTTL must be at least 1s in magnitude",
+		},
+		{
+			name: "negative forcedTTL allowed",
 			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
 				TargetRef: vcpTargetRef("HTTPRoute", "my-route", nil),
-				ForcedTTL: durationPtr(-5 * time.Second),
+				ForcedTTL: durationPtr(-1 * time.Second),
 			},
-			wantErr: "forcedTTL must be positive",
+		},
+		{
+			name: "zero forcedTTL",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef: vcpTargetRef("HTTPRoute", "my-route", nil),
+				ForcedTTL: durationPtr(0),
+			},
+			wantErr: "forcedTTL must not be zero",
 		},
 		{
 			name: "negative grace",
@@ -180,6 +194,33 @@ func TestValidateSpec(t *testing.T) {
 			wantErr: "keep must be non-negative",
 		},
 		{
+			name: "grace and keep at the 10-year cap",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL: durationPtr(60 * time.Second),
+				Grace:      durationPtr(maxStaleWindow),
+				Keep:       durationPtr(maxStaleWindow),
+			},
+		},
+		{
+			name: "grace above cap",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL: durationPtr(60 * time.Second),
+				Grace:      durationPtr(maxStaleWindow + time.Second),
+			},
+			wantErr: "grace must be at most",
+		},
+		{
+			name: "keep far above u32 seconds",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL: durationPtr(60 * time.Second),
+				Keep:       durationPtr(200 * 365 * 24 * time.Hour),
+			},
+			wantErr: "keep must be at most",
+		},
+		{
 			name: "query params include and exclude both set",
 			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
 				TargetRef:  vcpTargetRef("HTTPRoute", "my-route", nil),
@@ -192,6 +233,140 @@ func TestValidateSpec(t *testing.T) {
 				},
 			},
 			wantErr: "include and exclude are mutually exclusive",
+		},
+		{
+			name: "rule without fields",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{Match: gatewayparamsv1alpha1.CacheRuleMatch{Status: []string{"404"}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: must set at least one of defaultTTL, forcedTTL, grace, keep",
+		},
+		{
+			name: "rule both TTLs",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{DefaultTTL: durationPtr(time.Second), ForcedTTL: durationPtr(time.Second)}},
+			},
+			wantErr: "cacheRuleOverrides[0]: defaultTTL and forcedTTL are mutually exclusive",
+		},
+		{
+			name: "rule zero forcedTTL",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(0)}},
+			},
+			wantErr: "cacheRuleOverrides[0]: forcedTTL must not be zero",
+		},
+		{
+			name: "rule negative grace",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{Grace: durationPtr(-time.Second)}},
+			},
+			wantErr: "cacheRuleOverrides[0]: grace must be non-negative",
+		},
+		{
+			name: "rule negative keep",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{Keep: durationPtr(-time.Second)}},
+			},
+			wantErr: "cacheRuleOverrides[0]: keep must be non-negative",
+		},
+		{
+			name: "rule grace above cap",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{Grace: durationPtr(maxStaleWindow + time.Second)}},
+			},
+			wantErr: "cacheRuleOverrides[0]: grace must be at most",
+		},
+		{
+			name: "rule keep above cap",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{Keep: durationPtr(maxStaleWindow + time.Second)}},
+			},
+			wantErr: "cacheRuleOverrides[0]: keep must be at most",
+		},
+		{
+			name: "rule inverted status range",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(time.Second), Match: gatewayparamsv1alpha1.CacheRuleMatch{Status: []string{"504-500"}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: status \"504-500\": range start must be <= end",
+		},
+		{
+			name: "rule status 600",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(time.Second), Match: gatewayparamsv1alpha1.CacheRuleMatch{Status: []string{"600"}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: status \"600\": invalid",
+		},
+		{
+			name: "rule status 4x",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(time.Second), Match: gatewayparamsv1alpha1.CacheRuleMatch{Status: []string{"4x"}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: status \"4x\": invalid",
+		},
+		{
+			name: "rule bad path regex",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(time.Second), Match: gatewayparamsv1alpha1.CacheRuleMatch{Path: &gatewayv1.HTTPPathMatch{Type: ptrTo(gatewayv1.PathMatchRegularExpression), Value: ptrTo("(")}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: invalid path regex",
+		},
+		{
+			name: "rule bad requestHeaders regex",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(time.Second), Match: gatewayparamsv1alpha1.CacheRuleMatch{RequestHeaders: []gatewayv1.HTTPHeaderMatch{{Type: ptrTo(gatewayv1.HeaderMatchRegularExpression), Name: "X", Value: "("}}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: invalid requestHeaders regex",
+		},
+		{
+			name: "rule bad responseHeaders regex",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(time.Second), Match: gatewayparamsv1alpha1.CacheRuleMatch{ResponseHeaders: []gatewayv1.HTTPHeaderMatch{{Type: ptrTo(gatewayv1.HeaderMatchRegularExpression), Name: "X", Value: "("}}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: invalid responseHeaders regex",
+		},
+		{
+			name: "rule bad queryParams regex",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{ForcedTTL: durationPtr(time.Second), Match: gatewayparamsv1alpha1.CacheRuleMatch{QueryParams: []gatewayv1.HTTPQueryParamMatch{{Type: ptrTo(gatewayv1.QueryParamMatchRegularExpression), Name: "q", Value: "("}}}}},
+			},
+			wantErr: "cacheRuleOverrides[0]: invalid queryParams regex",
+		},
+		{
+			name: "valid rules",
+			spec: gatewayparamsv1alpha1.VarnishCachePolicySpec{
+				TargetRef:          vcpTargetRef("HTTPRoute", "my-route", nil),
+				DefaultTTL:         durationPtr(60 * time.Second),
+				CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{Match: gatewayparamsv1alpha1.CacheRuleMatch{Status: []string{"404"}}, ForcedTTL: durationPtr(time.Second), Grace: durationPtr(0)}, {Match: gatewayparamsv1alpha1.CacheRuleMatch{Status: []string{"5xx"}}, ForcedTTL: durationPtr(-time.Second)}},
+			},
 		},
 		{
 			name: "wrong target group",
@@ -287,11 +462,11 @@ func TestSpecToCachePolicy(t *testing.T) {
 				Keep:       durationPtr(2 * time.Hour),
 			},
 			verify: func(t *testing.T, cp *ghost.CachePolicy) {
-				if cp.GraceSeconds != 30 {
-					t.Errorf("GraceSeconds = %d, want 30", cp.GraceSeconds)
+				if cp.GraceSeconds == nil || *cp.GraceSeconds != 30 {
+					t.Errorf("GraceSeconds = %v, want 30", cp.GraceSeconds)
 				}
-				if cp.KeepSeconds != 7200 {
-					t.Errorf("KeepSeconds = %d, want 7200", cp.KeepSeconds)
+				if cp.KeepSeconds == nil || *cp.KeepSeconds != 7200 {
+					t.Errorf("KeepSeconds = %v, want 7200", cp.KeepSeconds)
 				}
 			},
 		},
@@ -416,6 +591,104 @@ func TestSpecToCachePolicy(t *testing.T) {
 			tt.verify(t, cp)
 		})
 	}
+}
+
+func TestSpecToCachePolicy_GraceKeepAndOverrides(t *testing.T) {
+	ref := vcpTargetRef("HTTPRoute", "r", nil)
+
+	t.Run("explicit zero grace/keep are non-nil", func(t *testing.T) {
+		cp := specToCachePolicy(&gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef: ref, Grace: durationPtr(0), Keep: durationPtr(0),
+		})
+		if cp.GraceSeconds == nil || *cp.GraceSeconds != 0 {
+			t.Errorf("GraceSeconds = %v, want non-nil 0", cp.GraceSeconds)
+		}
+		if cp.KeepSeconds == nil || *cp.KeepSeconds != 0 {
+			t.Errorf("KeepSeconds = %v, want non-nil 0", cp.KeepSeconds)
+		}
+	})
+
+	t.Run("unset grace/keep are nil", func(t *testing.T) {
+		cp := specToCachePolicy(&gatewayparamsv1alpha1.VarnishCachePolicySpec{TargetRef: ref})
+		if cp.GraceSeconds != nil || cp.KeepSeconds != nil {
+			t.Errorf("want nil grace/keep, got %v %v", cp.GraceSeconds, cp.KeepSeconds)
+		}
+		if cp.Overrides != nil {
+			t.Errorf("Overrides = %v, want nil", cp.Overrides)
+		}
+	})
+
+	t.Run("negative forcedTTL", func(t *testing.T) {
+		cp := specToCachePolicy(&gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef: ref, ForcedTTL: durationPtr(-time.Second),
+		})
+		if cp.ForcedTTLSeconds == nil || *cp.ForcedTTLSeconds != -1 {
+			t.Errorf("ForcedTTLSeconds = %v, want -1", cp.ForcedTTLSeconds)
+		}
+	})
+
+	t.Run("override", func(t *testing.T) {
+		pt := gatewayv1.PathMatchPathPrefix
+		pv := "/live/"
+		cp := specToCachePolicy(&gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef: ref,
+			CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{
+				Match: gatewayparamsv1alpha1.CacheRuleMatch{
+					Status: []string{"404"},
+					Path:   &gatewayv1.HTTPPathMatch{Type: &pt, Value: &pv},
+				},
+				ForcedTTL: durationPtr(time.Second),
+				Grace:     durationPtr(0),
+			}},
+		})
+		if len(cp.Overrides) != 1 {
+			t.Fatalf("Overrides len = %d, want 1", len(cp.Overrides))
+		}
+		o := cp.Overrides[0]
+		if len(o.Match.Status) != 1 || o.Match.Status[0] != "404" {
+			t.Errorf("Status = %v", o.Match.Status)
+		}
+		if o.Match.PathMatch == nil || o.Match.PathMatch.Type != ghost.PathMatchPathPrefix || o.Match.PathMatch.Value != "/live/" {
+			t.Errorf("PathMatch = %+v", o.Match.PathMatch)
+		}
+		if o.ForcedTTLSeconds == nil || *o.ForcedTTLSeconds != 1 {
+			t.Errorf("ForcedTTLSeconds = %v", o.ForcedTTLSeconds)
+		}
+		if o.GraceSeconds == nil || *o.GraceSeconds != 0 {
+			t.Errorf("GraceSeconds = %v", o.GraceSeconds)
+		}
+		if o.DefaultTTLSeconds != nil || o.KeepSeconds != nil {
+			t.Errorf("unexpected default/keep set")
+		}
+	})
+
+	t.Run("override headers default to Exact; method and query", func(t *testing.T) {
+		m := gatewayv1.HTTPMethod("GET")
+		cp := specToCachePolicy(&gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef: ref,
+			CacheRuleOverrides: []gatewayparamsv1alpha1.CacheRuleOverride{{
+				Match: gatewayparamsv1alpha1.CacheRuleMatch{
+					Method:          &m,
+					RequestHeaders:  []gatewayv1.HTTPHeaderMatch{{Name: "X-A", Value: "1"}},
+					ResponseHeaders: []gatewayv1.HTTPHeaderMatch{{Name: "X-B", Value: "2"}},
+					QueryParams:     []gatewayv1.HTTPQueryParamMatch{{Name: "q", Value: "v"}},
+				},
+			}},
+		})
+		o := cp.Overrides[0]
+		if o.Match.Method == nil || *o.Match.Method != "GET" {
+			t.Errorf("Method = %v", o.Match.Method)
+		}
+		if len(o.Match.RequestHeaders) != 1 || o.Match.RequestHeaders[0].Type != ghost.MatchTypeExact || o.Match.RequestHeaders[0].Name != "X-A" {
+			t.Errorf("RequestHeaders = %+v", o.Match.RequestHeaders)
+		}
+		if len(o.Match.ResponseHeaders) != 1 || o.Match.ResponseHeaders[0].Type != ghost.MatchTypeExact || o.Match.ResponseHeaders[0].Name != "X-B" {
+			t.Errorf("ResponseHeaders = %+v", o.Match.ResponseHeaders)
+		}
+		if len(o.Match.QueryParams) != 1 || o.Match.QueryParams[0].Type != ghost.MatchTypeExact {
+			t.Errorf("QueryParams = %+v", o.Match.QueryParams)
+		}
+	})
 }
 
 // --- TestIsVCPAccepted ---
@@ -1443,3 +1716,5 @@ func assertVCPCondition(t *testing.T, vcp *gatewayparamsv1alpha1.VarnishCachePol
 		t.Errorf("condition reason = %q, want %q", cond.Reason, reason)
 	}
 }
+
+func ptrTo[T any](v T) *T { return &v }

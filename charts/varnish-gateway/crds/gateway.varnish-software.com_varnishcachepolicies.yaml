@@ -113,28 +113,355 @@ spec:
                         type: array
                     type: object
                 type: object
+              cacheRuleOverrides:
+                description: |-
+                  CacheRuleOverrides adjusts TTL, grace and keep for responses matching
+                  request and/or response criteria. Rules are evaluated in order and the
+                  first match wins; unset fields fall back to the policy-level values.
+                items:
+                  description: |-
+                    CacheRuleOverride overrides caching parameters for matching requests/responses.
+                    At least one of defaultTTL, forcedTTL, grace or keep must be set.
+                    defaultTTL and forcedTTL are mutually exclusive.
+                  properties:
+                    defaultTTL:
+                      description: |-
+                        DefaultTTL is used when the origin does NOT send Cache-Control headers.
+                        Mutually exclusive with ForcedTTL. If neither TTL field is set on this
+                        rule, the top-level defaultTTL/forcedTTL pair applies (as a unit).
+                        A negative value (e.g. -1s) means "do not cache": matching responses
+                        become hit-for-miss. Zero and values under 1s in magnitude are rejected.
+                      type: string
+                    forcedTTL:
+                      description: |-
+                        ForcedTTL overrides origin Cache-Control entirely.
+                        Mutually exclusive with DefaultTTL. If neither TTL field is set on this
+                        rule, the top-level defaultTTL/forcedTTL pair applies (as a unit).
+                        A negative value (e.g. -1s) means "do not cache": matching responses
+                        become hit-for-miss. Zero and values under 1s in magnitude are rejected.
+                      type: string
+                    grace:
+                      description: |-
+                        Grace is how long to serve stale content while revalidating.
+                        If unset, the top-level grace applies. Must be between 0s and 10 years
+                        (87600h). Not applied to hit-for-miss (negative TTL) responses.
+                      type: string
+                    keep:
+                      description: |-
+                        Keep is how long to keep stale objects for serving when backends are sick.
+                        If unset, the top-level keep applies. Must be between 0s and 10 years
+                        (87600h). Not applied to hit-for-miss (negative TTL) responses.
+                      type: string
+                    match:
+                      description: |-
+                        Match selects the requests/responses this rule applies to.
+                        All specified criteria must match. An empty match matches everything.
+                      properties:
+                        method:
+                          description: |-
+                            Method matches the request method. Unlike HTTPRoute method matching, GET and
+                            HEAD match each other: a rule with method GET also matches HEAD requests and
+                            vice versa, because Varnish fetches a HEAD miss as GET and stores one object.
+                          enum:
+                          - GET
+                          - HEAD
+                          - POST
+                          - PUT
+                          - DELETE
+                          - CONNECT
+                          - OPTIONS
+                          - TRACE
+                          - PATCH
+                          type: string
+                        path:
+                          description: Path matches the request path.
+                          properties:
+                            type:
+                              default: PathPrefix
+                              description: |-
+                                Type specifies how to match against the path Value.
+
+                                Support: Core (Exact, PathPrefix)
+
+                                Support: Implementation-specific (RegularExpression)
+                              enum:
+                              - Exact
+                              - PathPrefix
+                              - RegularExpression
+                              type: string
+                            value:
+                              default: /
+                              description: Value of the HTTP path to match against.
+                              maxLength: 1024
+                              type: string
+                          type: object
+                          x-kubernetes-validations:
+                          - message: value must be an absolute path and start with
+                              '/' when type one of ['Exact', 'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? self.value.startsWith(''/'')
+                              : true'
+                          - message: must not contain '//' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''//'')
+                              : true'
+                          - message: must not contain '/./' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''/./'')
+                              : true'
+                          - message: must not contain '/../' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''/../'')
+                              : true'
+                          - message: must not contain '%2f' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''%2f'')
+                              : true'
+                          - message: must not contain '%2F' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''%2F'')
+                              : true'
+                          - message: must not contain '#' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.contains(''#'')
+                              : true'
+                          - message: must not end with '/..' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.endsWith(''/..'')
+                              : true'
+                          - message: must not end with '/.' when type one of ['Exact',
+                              'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? !self.value.endsWith(''/.'')
+                              : true'
+                          - message: type must be one of ['Exact', 'PathPrefix', 'RegularExpression']
+                            rule: self.type in ['Exact','PathPrefix'] || self.type
+                              == 'RegularExpression'
+                          - message: must only contain valid characters (matching
+                              ^(?:[-A-Za-z0-9/._~!$&'()*+,;=:@]|[%][0-9a-fA-F]{2})+$)
+                              for types ['Exact', 'PathPrefix']
+                            rule: '(self.type in [''Exact'',''PathPrefix'']) ? self.value.matches(r"""^(?:[-A-Za-z0-9/._~!$&''()*+,;=:@]|[%][0-9a-fA-F]{2})+$""")
+                              : true'
+                        queryParams:
+                          description: QueryParams matches request query parameters.
+                          items:
+                            description: |-
+                              HTTPQueryParamMatch describes how to select a HTTP route by matching HTTP
+                              query parameters.
+                            properties:
+                              name:
+                                description: |-
+                                  Name is the name of the HTTP query param to be matched. This must be an
+                                  exact string match. (See
+                                  https://tools.ietf.org/html/rfc7230#section-2.7.3).
+
+                                  If multiple entries specify equivalent query param names, only the first
+                                  entry with an equivalent name MUST be considered for a match. Subsequent
+                                  entries with an equivalent query param name MUST be ignored.
+
+                                  If a query param is repeated in an HTTP request, the behavior is
+                                  purposely left undefined, since different data planes have different
+                                  capabilities. However, it is *recommended* that implementations should
+                                  match against the first value of the param if the data plane supports it,
+                                  as this behavior is expected in other load balancing contexts outside of
+                                  the Gateway API.
+
+                                  Users SHOULD NOT route traffic based on repeated query params to guard
+                                  themselves against potential differences in the implementations.
+                                maxLength: 256
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9!#$%&'*+\-.^_\x60|~]+$
+                                type: string
+                              type:
+                                default: Exact
+                                description: |-
+                                  Type specifies how to match against the value of the query parameter.
+
+                                  Support: Extended (Exact)
+
+                                  Support: Implementation-specific (RegularExpression)
+
+                                  Since RegularExpression QueryParamMatchType has Implementation-specific
+                                  conformance, implementations can support POSIX, PCRE or any other
+                                  dialects of regular expressions. Please read the implementation's
+                                  documentation to determine the supported dialect.
+                                enum:
+                                - Exact
+                                - RegularExpression
+                                type: string
+                              value:
+                                description: Value is the value of HTTP query param
+                                  to be matched.
+                                maxLength: 1024
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            - value
+                            type: object
+                          type: array
+                        requestHeaders:
+                          description: RequestHeaders matches request headers.
+                          items:
+                            description: |-
+                              HTTPHeaderMatch describes how to select a HTTP route by matching HTTP request
+                              headers.
+                            properties:
+                              name:
+                                description: |-
+                                  Name is the name of the HTTP Header to be matched. Name matching MUST be
+                                  case-insensitive. (See https://tools.ietf.org/html/rfc7230#section-3.2).
+
+                                  If multiple entries specify equivalent header names, only the first
+                                  entry with an equivalent name MUST be considered for a match. Subsequent
+                                  entries with an equivalent header name MUST be ignored. Due to the
+                                  case-insensitivity of header names, "foo" and "Foo" are considered
+                                  equivalent.
+
+                                  When a header is repeated in an HTTP request, it is
+                                  implementation-specific behavior as to how this is represented.
+                                  Generally, proxies should follow the guidance from the RFC:
+                                  https://www.rfc-editor.org/rfc/rfc7230.html#section-3.2.2 regarding
+                                  processing a repeated header, with special handling for "Set-Cookie".
+                                maxLength: 256
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9!#$%&'*+\-.^_\x60|~]+$
+                                type: string
+                              type:
+                                default: Exact
+                                description: |-
+                                  Type specifies how to match against the value of the header.
+
+                                  Support: Core (Exact)
+
+                                  Support: Implementation-specific (RegularExpression)
+
+                                  Since RegularExpression HeaderMatchType has implementation-specific
+                                  conformance, implementations can support POSIX, PCRE or any other dialects
+                                  of regular expressions. Please read the implementation's documentation to
+                                  determine the supported dialect.
+                                enum:
+                                - Exact
+                                - RegularExpression
+                                type: string
+                              value:
+                                description: |-
+                                  Value is the value of HTTP Header to be matched.
+                                  <gateway:experimental:description>
+                                  Must consist of printable US-ASCII characters, optionally separated
+                                  by single tabs or spaces. See: https://tools.ietf.org/html/rfc7230#section-3.2
+                                  </gateway:experimental:description>
+
+                                  <gateway:experimental:validation:Pattern=`^[!-~]+([\t ]?[!-~]+)*$`>
+                                maxLength: 4096
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            - value
+                            type: object
+                          type: array
+                        responseHeaders:
+                          description: ResponseHeaders matches response headers.
+                          items:
+                            description: |-
+                              HTTPHeaderMatch describes how to select a HTTP route by matching HTTP request
+                              headers.
+                            properties:
+                              name:
+                                description: |-
+                                  Name is the name of the HTTP Header to be matched. Name matching MUST be
+                                  case-insensitive. (See https://tools.ietf.org/html/rfc7230#section-3.2).
+
+                                  If multiple entries specify equivalent header names, only the first
+                                  entry with an equivalent name MUST be considered for a match. Subsequent
+                                  entries with an equivalent header name MUST be ignored. Due to the
+                                  case-insensitivity of header names, "foo" and "Foo" are considered
+                                  equivalent.
+
+                                  When a header is repeated in an HTTP request, it is
+                                  implementation-specific behavior as to how this is represented.
+                                  Generally, proxies should follow the guidance from the RFC:
+                                  https://www.rfc-editor.org/rfc/rfc7230.html#section-3.2.2 regarding
+                                  processing a repeated header, with special handling for "Set-Cookie".
+                                maxLength: 256
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9!#$%&'*+\-.^_\x60|~]+$
+                                type: string
+                              type:
+                                default: Exact
+                                description: |-
+                                  Type specifies how to match against the value of the header.
+
+                                  Support: Core (Exact)
+
+                                  Support: Implementation-specific (RegularExpression)
+
+                                  Since RegularExpression HeaderMatchType has implementation-specific
+                                  conformance, implementations can support POSIX, PCRE or any other dialects
+                                  of regular expressions. Please read the implementation's documentation to
+                                  determine the supported dialect.
+                                enum:
+                                - Exact
+                                - RegularExpression
+                                type: string
+                              value:
+                                description: |-
+                                  Value is the value of HTTP Header to be matched.
+                                  <gateway:experimental:description>
+                                  Must consist of printable US-ASCII characters, optionally separated
+                                  by single tabs or spaces. See: https://tools.ietf.org/html/rfc7230#section-3.2
+                                  </gateway:experimental:description>
+
+                                  <gateway:experimental:validation:Pattern=`^[!-~]+([\t ]?[!-~]+)*$`>
+                                maxLength: 4096
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            - value
+                            type: object
+                          type: array
+                        status:
+                          description: |-
+                            Status matches the response status: an exact code ("404"), a class
+                            ("5xx") or an inclusive range ("500-503"). Any entry matching suffices.
+                          items:
+                            pattern: ^([1-5][0-9]{2}|[1-5]xx|[1-5][0-9]{2}-[1-5][0-9]{2})$
+                            type: string
+                          type: array
+                      type: object
+                  type: object
+                maxItems: 64
+                type: array
               defaultTTL:
                 description: |-
                   DefaultTTL is used when the origin does NOT send Cache-Control headers.
                   Origin Cache-Control takes precedence. Mutually exclusive with ForcedTTL.
+                  A negative value (e.g. -1s) means "do not cache": matching responses
+                  become hit-for-miss. Zero and values under 1s in magnitude are rejected.
                 type: string
               forcedTTL:
                 description: |-
                   ForcedTTL overrides origin Cache-Control entirely.
                   Use when the origin misbehaves or you need operator-level control.
                   Mutually exclusive with DefaultTTL.
+                  A negative value (e.g. -1s) means "do not cache": matching responses
+                  become hit-for-miss. Zero and values under 1s in magnitude are rejected.
                 type: string
               grace:
                 description: |-
                   Grace is how long to serve stale content while asynchronously revalidating.
                   Equivalent to stale-while-revalidate in HTTP semantics.
-                  Default: 0 (disabled)
+                  When unset, Varnish's default_grace (10s) is left untouched; an explicit
+                  0s sets grace to zero. Must be between 0s and 10 years (87600h).
+                  Not applied to hit-for-miss (negative TTL) responses.
                 type: string
               keep:
                 description: |-
                   Keep is how long to keep stale objects for serving when all backends are sick.
                   Equivalent to stale-if-error in HTTP semantics.
-                  Default: 0 (disabled)
+                  When unset, Varnish's default_keep (0s) is left untouched; an explicit
+                  0s sets keep to zero. Must be between 0s and 10 years (87600h).
+                  Not applied to hit-for-miss (negative TTL) responses.
                 type: string
               targetRef:
                 description: |-
