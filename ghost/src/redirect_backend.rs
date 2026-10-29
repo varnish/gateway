@@ -1,3 +1,4 @@
+use crate::cache_policy::{synthetic_token, SYNTHETIC_HEADER};
 use serde::{Deserialize, Serialize};
 use varnish::vcl::{Ctx, LogTag, StrOrBytes, VclBackend, VclError, VclResponse};
 
@@ -66,6 +67,7 @@ impl VclBackend<RedirectBody> for RedirectBackend {
             beresp.set_status(status_code);
             beresp.set_header("Location", &location)?;
             beresp.set_header("Cache-Control", "no-store")?;
+            beresp.set_header(SYNTHETIC_HEADER, synthetic_token())?;
         }
 
         // Remove internal header (mutable borrow)

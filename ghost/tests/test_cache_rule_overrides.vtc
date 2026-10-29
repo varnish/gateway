@@ -1,0 +1,530 @@
+varnishtest "cacheRuleOverrides: per-response cache settings applied in vcl_backend_response"
+
+# Each case uses its own vhost and origin so objects never collide. Client
+# phases that need delays run in the background so delays overlap.
+
+server s_a {
+    rxreq
+    # backend_fetch() moved the directive off bereq: it never reaches the origin
+    expect req.http.X-Ghost-Cache-Policy == <undef>
+    txresp -body "a-body"
+} -start
+
+server s_b {
+    rxreq
+    txresp -status 404 -body "b-404"
+    rxreq
+    txresp -status 200 -body "b-200"
+} -start
+
+server s_c {
+    rxreq
+    txresp -status 503
+    rxreq
+    txresp -status 503
+    rxreq
+    txresp -status 200 -body "c-200"
+} -start
+
+server s_d {
+    rxreq
+    txresp -hdr "Content-Type: video/mp2t" -body "d-1"
+    rxreq
+    txresp -hdr "Content-Type: video/mp2t" -body "d-2"
+} -start
+
+server s_e {
+    rxreq
+    expect req.url == "/internal"
+    txresp -body "e-1"
+    rxreq
+    expect req.url == "/internal"
+    txresp -body "e-2"
+} -start
+
+server s_f {
+    rxreq
+    expect req.http.X-Ghost-Cache-Policy == <undef>
+    txresp -body "f-1"
+    rxreq
+    expect req.http.X-Ghost-Cache-Policy == <undef>
+    txresp -body "f-2"
+} -start
+
+server s_h {
+    rxreq
+    txresp -hdr "Cache-Control: no-store" -body "h-1"
+} -start
+
+server s_i {
+    rxreq
+    txresp -hdr "Cache-Control: private" -body "i-1"
+} -start
+
+server s_j {
+    rxreq
+    expect req.http.X-Ghost-Cache-Policy == <undef>
+    txresp -body "j-1"
+} -start
+
+server s_k {
+    rxreq
+    expect req.http.X-Ghost-Cache-Policy == <undef>
+    txresp -status 503 -body "k-503"
+    # the retry discards the unread 503 body, so Varnish reconnects
+    accept
+    rxreq
+    expect req.http.X-Ghost-Cache-Policy == <undef>
+    txresp -hdr "Cache-Control: max-age=0" -body "k-200"
+} -start
+
+# m: VCL that skips backend_fetch() (no preamble) still applies the policy;
+# backend_response() falls back to reading the directive from bereq.
+# The origin says max-age=0, so only the forced TTL can make the second
+# request a hit.
+server s_m {
+    rxreq
+    expect req.http.X-Ghost-Cache-Policy != <undef>
+    txresp -hdr "Cache-Control: max-age=0" -body "m-1"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF2
+{
+    "version": 2,
+    "vhosts": {
+        "a.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_a_addr}", "port": ${s_a_port}}]}],
+                "priority": 100,
+                "cache_policy": {"default_ttl_seconds": 300}
+            }]
+        },
+        "b.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_b_addr}", "port": ${s_b_port}}]}],
+                "priority": 100,
+                "cache_policy": {
+                    "default_ttl_seconds": 300,
+                    "grace_seconds": 30,
+                    "overrides": [{"match": {"status": ["404"]}, "forced_ttl_seconds": 1, "grace_seconds": 0}]
+                }
+            }]
+        },
+        "c.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_c_addr}", "port": ${s_c_port}}]}],
+                "priority": 100,
+                "cache_policy": {
+                    "default_ttl_seconds": 300,
+                    "overrides": [{"match": {"status": ["5xx"]}, "forced_ttl_seconds": -1}]
+                }
+            }]
+        },
+        "d.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_d_addr}", "port": ${s_d_port}}]}],
+                "priority": 100,
+                "cache_policy": {
+                    "default_ttl_seconds": 300,
+                    "overrides": [{
+                        "match": {"response_headers": [{"name": "content-type", "type": "Exact", "value": "video/mp2t"}]},
+                        "forced_ttl_seconds": 1,
+                        "grace_seconds": 0
+                    }]
+                }
+            }]
+        },
+        "e.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_e_addr}", "port": ${s_e_port}}]}],
+                "priority": 100,
+                "filters": {"url_rewrite": {"path_type": "ReplaceFullPath", "replace_full_path": "/internal"}},
+                "cache_policy": {
+                    "default_ttl_seconds": 300,
+                    "overrides": [{
+                        "match": {"path_match": {"type": "Exact", "value": "/public"}},
+                        "forced_ttl_seconds": -1
+                    }]
+                }
+            }]
+        },
+        "h.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_h_addr}", "port": ${s_h_port}}]}],
+                "priority": 100,
+                "cache_policy": {"forced_ttl_seconds": 300}
+            }]
+        },
+        "i.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_i_addr}", "port": ${s_i_port}}]}],
+                "priority": 100,
+                "cache_policy": {"forced_ttl_seconds": 300}
+            }]
+        },
+        "j.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_j_addr}", "port": ${s_j_port}}]}],
+                "priority": 100,
+                "cache_policy": {"default_ttl_seconds": 300}
+            }]
+        },
+        "k.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_k_addr}", "port": ${s_k_port}}]}],
+                "priority": 100,
+                "cache_policy": {"forced_ttl_seconds": 300}
+            }]
+        },
+        "l.example.com": {
+            "routes": [{
+                "path_match": {"type": "PathPrefix", "value": "/x"},
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_a_addr}", "port": ${s_a_port}}]}],
+                "priority": 100,
+                "cache_policy": {
+                    "forced_ttl_seconds": 300,
+                    "overrides": [{"match": {"status": ["404"]}, "forced_ttl_seconds": 300}]
+                }
+            }]
+        },
+        "m.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_m_addr}", "port": ${s_m_port}}]}],
+                "priority": 100,
+                "cache_policy": {"forced_ttl_seconds": 300}
+            }]
+        },
+        "f.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_f_addr}", "port": ${s_f_port}}]}],
+                "priority": 100
+            }]
+        }
+    }
+}
+EOF2
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+        set req.backend_hint = router.recv();
+        if (req.http.X-Ghost-Pass) {
+            return (pass);
+        }
+    }
+
+    sub vcl_backend_fetch {
+        if (bereq.http.host != "m.example.com") {
+            router.backend_fetch();
+        }
+    }
+
+    sub vcl_backend_response {
+        router.backend_response();
+        if (bereq.http.host == "k.example.com" && beresp.status == 503 &&
+            bereq.retries == 0) {
+            return (retry);
+        }
+    }
+} -start
+
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# (a) base default TTL, origin has no Cache-Control: second request is a hit
+client c_a {
+    txreq -url "/" -hdr "Host: a.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "a-body"
+    txreq -url "/" -hdr "Host: a.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "a-body"
+} -run
+server s_a -wait
+varnish v1 -expect cache_hit >= 1
+
+# (b) 404 forced for 1s with grace 0: after expiry the origin is asked again
+client c_b {
+    txreq -url "/" -hdr "Host: b.example.com"
+    rxresp
+    expect resp.status == 404
+    txreq -url "/" -hdr "Host: b.example.com"
+    rxresp
+    expect resp.status == 404
+    delay 1.5
+    txreq -url "/" -hdr "Host: b.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "b-200"
+} -start
+
+# (c) 5xx forced negative: not cached; recovered 200 is cached afterwards
+client c_c {
+    txreq -url "/" -hdr "Host: c.example.com"
+    rxresp
+    expect resp.status == 503
+    txreq -url "/" -hdr "Host: c.example.com"
+    rxresp
+    expect resp.status == 503
+    txreq -url "/" -hdr "Host: c.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "c-200"
+    txreq -url "/" -hdr "Host: c.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "c-200"
+} -start
+
+# (d) response header rule is case-insensitive on the name
+client c_d {
+    txreq -url "/" -hdr "Host: d.example.com"
+    rxresp
+    expect resp.body == "d-1"
+    delay 1.5
+    txreq -url "/" -hdr "Host: d.example.com"
+    rxresp
+    expect resp.body == "d-2"
+} -start
+
+# (e) request mask is computed before URL rewrite: /public matches the rule
+client c_e {
+    txreq -url "/public" -hdr "Host: e.example.com"
+    rxresp
+    expect resp.body == "e-1"
+    txreq -url "/public" -hdr "Host: e.example.com"
+    rxresp
+    expect resp.body == "e-2"
+} -start
+
+# (f) client-supplied directive never reaches a route without a policy
+client c_f {
+    txreq -url "/" -hdr "Host: f.example.com" -hdr {X-Ghost-Cache-Policy: {"k":1,"m":1}}
+    rxresp
+    expect resp.body == "f-1"
+    txreq -url "/" -hdr "Host: f.example.com" -hdr {X-Ghost-Cache-Policy: {"k":1,"m":1}}
+    rxresp
+    expect resp.body == "f-2"
+} -start
+
+# Result: forcedTTL wins in both cases (one origin fetch, second is a hit).
+# (h) forcedTTL vs origin no-store, (i) vs private: second request is a hit?
+client c_h {
+    txreq -url "/" -hdr "Host: h.example.com"
+    rxresp
+    expect resp.body == "h-1"
+    txreq -url "/" -hdr "Host: h.example.com"
+    rxresp
+    expect resp.body == "h-1"
+} -start
+
+client c_i {
+    txreq -url "/" -hdr "Host: i.example.com"
+    rxresp
+    expect resp.body == "i-1"
+    txreq -url "/" -hdr "Host: i.example.com"
+    rxresp
+    expect resp.body == "i-1"
+} -start
+
+# (j) client-supplied directive on a route WITH a policy is replaced by ghost's:
+# a spoofed unknown key would make the response hit-for-miss (origin hit twice).
+client c_j {
+    txreq -url "/" -hdr "Host: j.example.com" -hdr {X-Ghost-Cache-Policy: {"k":1,"m":0}}
+    rxresp
+    expect resp.body == "j-1"
+    txreq -url "/" -hdr "Host: j.example.com" -hdr {X-Ghost-Cache-Policy: {"k":1,"m":0}}
+    rxresp
+    expect resp.body == "j-1"
+} -start
+
+# (k) the directive survives a backend retry: the retried 200 still gets the
+# forced 300s TTL (origin max-age=0 would otherwise make it uncached).
+client c_k {
+    txreq -url "/" -hdr "Host: k.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "k-200"
+    txreq -url "/" -hdr "Host: k.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "k-200"
+} -start
+
+# (l) ghost-generated 404 (no route matches) on a vhost whose routes have a
+# policy: the internal synthetic marker must not leak to the client.
+client c_l {
+    txreq -url "/nope" -hdr "Host: l.example.com"
+    rxresp
+    expect resp.status == 404
+    expect resp.http.X-Ghost-Synthetic == <undef>
+} -start
+
+# (m) fallback without backend_fetch(): the forced TTL still applies, so the
+# second request is a hit despite the origin's max-age=0
+client c_m {
+    txreq -url "/" -hdr "Host: m.example.com"
+    rxresp
+    expect resp.body == "m-1"
+    txreq -url "/" -hdr "Host: m.example.com"
+    rxresp
+    expect resp.body == "m-1"
+} -start
+
+# (g) reload mid-fetch: the in-flight response is evaluated with the policy
+# that recv selected (2s 404 rule), not the reloaded one (30s).
+# Barriers make the ordering deterministic: the reload happens strictly after
+# recv computed the directive and before the origin answers.
+barrier b_g_req cond 2
+barrier b_g_reloaded cond 2
+
+server s_g {
+    rxreq
+    barrier b_g_req sync
+    barrier b_g_reloaded sync
+    txresp -status 404 -body "g-404"
+    rxreq
+    txresp -status 200 -body "g-200"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost_g.json <<EOF2
+{
+    "version": 2,
+    "vhosts": {
+        "g.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_g_addr}", "port": ${s_g_port}}]}],
+                "priority": 100,
+                "cache_policy": {
+                    "default_ttl_seconds": 300,
+                    "grace_seconds": 0,
+                    "overrides": [{"match": {"status": ["404"]}, "forced_ttl_seconds": 2}]
+                }
+            }]
+        }
+    }
+}
+EOF2
+}
+
+varnish v2 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost_g.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+        set req.backend_hint = router.recv();
+        if (req.http.X-Ghost-Pass) {
+            return (pass);
+        }
+    }
+
+    sub vcl_backend_fetch {
+        router.backend_fetch();
+    }
+
+    sub vcl_backend_response {
+        router.backend_response();
+    }
+} -start
+
+client c_g1 -connect ${v2_sock} {
+    txreq -url "/" -hdr "Host: g.example.com"
+    rxresp
+    expect resp.status == 404
+} -start
+
+# While the origin holds the response, change the override TTL and reload.
+barrier b_g_req sync
+shell {
+    sed -i 's/"forced_ttl_seconds": 2/"forced_ttl_seconds": 30/' ${tmpdir}/ghost_g.json
+    grep -q '"forced_ttl_seconds": 30' ${tmpdir}/ghost_g.json
+}
+
+client c_g_reload -connect ${v2_sock} {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+barrier b_g_reloaded sync
+client c_g1 -wait
+
+# Hit and refetch checks run in a background client so their delays overlap
+# with the other cases (the whole test must fit in the VTC time budget).
+# ~1s after completion (1s margin before the 2s rule expires) the 404 must
+# come from cache (origin not hit). This only holds if the retained rule
+# applied; the unknown-key hit-for-miss fallback would refetch and get the
+# origin's 200. Then ~3s total: past the retained 2s rule (1s margin), far
+# inside the reloaded 30s rule and the 300s default, so a refetch proves the
+# retained rule applied.
+client c_g_tail -connect ${v2_sock} {
+    delay 1.0
+    txreq -url "/" -hdr "Host: g.example.com"
+    rxresp
+    expect resp.status == 404
+    expect resp.body == "g-404"
+
+    delay 2.0
+    txreq -url "/" -hdr "Host: g.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "g-200"
+} -start
+
+client c_b -wait
+client c_m -wait
+client c_j -wait
+client c_k -wait
+client c_l -wait
+client c_h -wait
+client c_i -wait
+client c_c -wait
+client c_d -wait
+client c_e -wait
+client c_f -wait
+server s_b -wait
+server s_c -wait
+server s_d -wait
+server s_e -wait
+server s_f -wait
+server s_j -wait
+server s_k -wait
+server s_m -wait
+client c_g_tail -wait
+server s_g -wait

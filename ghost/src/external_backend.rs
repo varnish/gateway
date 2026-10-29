@@ -8,6 +8,7 @@ use std::io::Write;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+use crate::cache_policy::{synthetic_token, SYNTHETIC_HEADER};
 use bytes::Bytes;
 use reqwest::header::HeaderName;
 use reqwest::Client;
@@ -76,7 +77,9 @@ async fn process_request(client: Client, request: reqwest::Request, resp_tx: Sen
     let mut resp = match client.execute(request).await {
         Ok(r) => r,
         Err(e) => {
-            let _ = resp_tx.send(RespMsg::Err(format!("external proxy: {}", e))).await;
+            let _ = resp_tx
+                .send(RespMsg::Err(format!("external proxy: {}", e)))
+                .await;
             return;
         }
     };
@@ -121,7 +124,9 @@ pub struct ExternalBackend {
 impl ExternalBackend {
     pub fn new(proxy: &ExternalProxy) -> Result<Self, VclError> {
         if proxy.hostname.is_empty() {
-            return Err(VclError::new("external_proxy: hostname is empty".to_string()));
+            return Err(VclError::new(
+                "external_proxy: hostname is empty".to_string(),
+            ));
         }
         if proxy.port == 0 {
             return Err(VclError::new("external_proxy: port is zero".to_string()));
@@ -190,6 +195,7 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             beresp.set_header("Allow", ALLOWED_METHODS)?;
             beresp.set_header("Content-Type", "text/plain; charset=utf-8")?;
             beresp.set_header("Cache-Control", "no-store")?;
+            beresp.set_header(SYNTHETIC_HEADER, synthetic_token())?;
             return Ok(Some(ExternalBody::from_static(METHOD_NOT_ALLOWED_BODY)));
         }
 
@@ -223,7 +229,9 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             .map_err(|e| VclError::new(format!("external_proxy: build request: {}", e)))?;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<RespMsg>(CHUNK_CHANNEL_SIZE);
-        bgt().rt.spawn(process_request(self.client.clone(), request, tx));
+        bgt()
+            .rt
+            .spawn(process_request(self.client.clone(), request, tx));
 
         let headers_frame = match rx.blocking_recv() {
             Some(RespMsg::Headers(f)) => f,
@@ -328,9 +336,9 @@ impl VclResponse for ExternalBody {
                     }
                     let chunk = current.as_ref().unwrap();
                     let remaining = &chunk[*cursor..];
-                    let n = buf.write(remaining).map_err(|e| {
-                        VclError::new(format!("external_proxy: body write: {}", e))
-                    })?;
+                    let n = buf
+                        .write(remaining)
+                        .map_err(|e| VclError::new(format!("external_proxy: body write: {}", e)))?;
                     *cursor += n;
                     total += n;
                     if *cursor >= chunk.len() {

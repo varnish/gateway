@@ -1,0 +1,100 @@
+varnishtest "backend_response() called twice: the second call is a no-op"
+
+# The gateway preamble already calls router.backend_response(); user VCL that
+# calls it again must not apply the policy to ghost-generated responses (the
+# first call already stripped the synthetic marker) nor apply it twice.
+#
+# a.example.com: route with a forced TTL and no backends -> ghost's no-store
+# 500 must stay uncached.
+# b.example.com: real origin with a 503 retried once; the retried 200 still
+# gets the forced TTL (each fetch attempt is handled once).
+
+server s_b {
+    rxreq
+    txresp -status 503 -body "b-503"
+    accept
+    rxreq
+    txresp -hdr "Cache-Control: max-age=0" -body "b-200"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "a.example.com": {
+            "routes": [{
+                "backend_groups": [],
+                "priority": 100,
+                "cache_policy": {"forced_ttl_seconds": 300}
+            }]
+        },
+        "b.example.com": {
+            "routes": [{
+                "backend_groups": [{"weight": 100, "backends": [{"address": "${s_b_addr}", "port": ${s_b_port}}]}],
+                "priority": 100,
+                "cache_policy": {"forced_ttl_seconds": 300}
+            }]
+        }
+    }
+}
+EOF
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        ghost.init("${tmpdir}/ghost.json");
+        new router = ghost.ghost_backend();
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = router.recv();
+    }
+
+    sub vcl_backend_fetch {
+        router.backend_fetch();
+    }
+
+    # preamble
+    sub vcl_backend_response {
+        router.backend_response();
+    }
+
+    # user VCL
+    sub vcl_backend_response {
+        router.backend_response();
+        if (beresp.status == 503 && bereq.retries == 0) {
+            return (retry);
+        }
+    }
+} -start
+
+client c_a {
+    txreq -url "/" -hdr "Host: a.example.com"
+    rxresp
+    expect resp.status == 500
+    expect resp.http.X-Ghost-Synthetic == <undef>
+    txreq -url "/" -hdr "Host: a.example.com"
+    rxresp
+    expect resp.status == 500
+} -run
+
+varnish v1 -expect cache_hit == 0
+
+client c_b {
+    txreq -url "/" -hdr "Host: b.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "b-200"
+    txreq -url "/" -hdr "Host: b.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "b-200"
+} -run
+
+server s_b -wait
+varnish v1 -expect cache_hit == 1

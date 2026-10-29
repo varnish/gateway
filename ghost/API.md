@@ -40,6 +40,7 @@ Deliver hook for response header modification.
 
 Call this in `vcl_deliver` to apply ResponseHeaderModifier filters.
 Reads filter context from response headers (copied from bereq in vcl_backend_response).
+Also removes the internal `X-Ghost-Synthetic` marker.
 
 ## Object `ghost_backend`
 
@@ -83,6 +84,10 @@ Get the VCL backend (director) for use in `vcl_backend_fetch`.
 Returns the ghost director which resolves backends in backend
 context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
 
+Cache policy requires `recv()` in `vcl_recv`: the cache directive is only
+computed there. With `backend()` alone, `backend_response()` applies no
+cache policy (TTL, grace, keep and overrides are silently skipped).
+
 #### Safety
 
 Must be called from VCL context. The returned `VCL_BACKEND` pointer is
@@ -95,6 +100,39 @@ Reload the configuration from disk.
 Reads `ghost.json`, builds new routing state, and atomically swaps it in.
 Existing backends are preserved for connection reuse.
 Returns `true` on success, `false` on failure (see `last_error()`).
+
+### Method `VOID <object>.backend_fetch()`
+
+Capture the cache directive before the backend request leaves.
+
+Call this in `vcl_backend_fetch` (enforced at VCL compile time). Moves the
+directive that `recv()` stored in `X-Ghost-Cache-Policy` off `bereq` into
+backend-task storage, so the internal header never reaches the origin.
+`backend_response()` uses the stored directive, including after a
+`return (retry)`.
+
+The task storage is per VMOD, not per object: call `backend_fetch()` and
+`backend_response()` on the same router, and use only one router per VCL.
+
+### Method `VOID <object>.backend_response()`
+
+Apply cache policy to the backend response.
+
+Call this in `vcl_backend_response` (enforced at VCL compile time). Uses the
+directive captured by `backend_fetch()` (if `backend_fetch()` was not called,
+it is read from `bereq` here instead), evaluates status and response-header
+rules, and sets `beresp.ttl`, `beresp.grace`, `beresp.keep` and hit-for-miss
+accordingly. The directive lives for the whole backend task, so a
+`return (retry)` gets the same policy.
+Ghost-generated responses (marked `X-Ghost-Synthetic` with a per-process
+random token) are left untouched. The header is always removed from
+`beresp`; an origin sending it does not opt out of the policy.
+
+Call it once per response: the gateway preamble already calls it, so user
+VCL must not. A repeated call for the same fetch attempt is a no-op.
+
+The directive is computed by `recv()` in `vcl_recv`; without it (e.g. routing
+only through `backend()`) no cache policy is applied.
 
 ### Method `STRING <object>.last_error()`
 

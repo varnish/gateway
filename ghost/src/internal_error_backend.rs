@@ -3,6 +3,7 @@
 //! This backend generates 500 responses when a request matches a route but
 //! no backends are available (e.g., invalid backendRef in the HTTPRoute).
 
+use crate::cache_policy::{synthetic_token, SYNTHETIC_HEADER};
 use varnish::vcl::{Ctx, VclBackend, VclError, VclResponse};
 
 /// Backend that generates synthetic 500 responses
@@ -17,6 +18,7 @@ impl VclBackend<InternalErrorBody> for InternalErrorBackend {
         beresp.set_status(500);
         beresp.set_header("Content-Type", "text/plain")?;
         beresp.set_header("Cache-Control", "no-store")?;
+        beresp.set_header(SYNTHETIC_HEADER, synthetic_token())?;
 
         Ok(Some(InternalErrorBody::new()))
     }

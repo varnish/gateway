@@ -7,10 +7,10 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use arc_swap::ArcSwap;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use regex::Regex;
 use varnish::vcl::{
     Backend, BackendRef, Buffer, Ctx, HttpHeaders, LogTag, ProbeResult, StrOrBytes, VclDirector,
@@ -18,7 +18,13 @@ use varnish::vcl::{
 };
 
 use crate::backend_pool::BackendPool;
-use crate::config::{BackendGroup, Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
+use crate::cache_policy::{
+    policy_key, select_settings, CacheDirective, CacheSettings, CompiledCachePolicy, PolicyTable,
+    CACHE_KEY_EXTRA_HEADER, CACHE_POLICY_HEADER, POLICY_RETENTION,
+};
+use crate::config::{
+    BackendGroup, Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch,
+};
 use crate::internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
@@ -46,7 +52,7 @@ pub enum PathMatchCompiled {
 
 impl PathMatchCompiled {
     /// Create from config PathMatch
-    fn from_config(pm: &PathMatch) -> Result<Self, String> {
+    pub(crate) fn from_config(pm: &PathMatch) -> Result<Self, String> {
         match pm.match_type {
             PathMatchType::Exact => Ok(PathMatchCompiled::Exact(pm.value.clone())),
             PathMatchType::PathPrefix => Ok(PathMatchCompiled::PathPrefix(pm.value.clone())),
@@ -91,7 +97,7 @@ pub enum HeaderMatchCompiled {
 
 impl HeaderMatchCompiled {
     /// Create from config HeaderMatch
-    fn from_config(hm: &HeaderMatch) -> Result<Self, String> {
+    pub(crate) fn from_config(hm: &HeaderMatch) -> Result<Self, String> {
         let name = hm.name.to_lowercase(); // Case-insensitive per HTTP spec
         match hm.match_type {
             MatchType::Exact => Ok(HeaderMatchCompiled::Exact {
@@ -109,31 +115,34 @@ impl HeaderMatchCompiled {
         }
     }
 
+    /// Lowercased header name this match applies to.
+    pub fn name(&self) -> &str {
+        match self {
+            HeaderMatchCompiled::Exact { name, .. } | HeaderMatchCompiled::Regex { name, .. } => {
+                name
+            }
+        }
+    }
+
+    /// Check a (possibly absent) header value against this match.
+    pub fn matches_value(&self, value: Option<&str>) -> bool {
+        let Some(v) = value else { return false };
+        match self {
+            HeaderMatchCompiled::Exact { value, .. } => v == value,
+            HeaderMatchCompiled::Regex { regex, .. } => regex.is_match(v),
+        }
+    }
+
     /// Check if this header match matches the given request
     /// Works with borrowed data - no allocations
     pub fn matches(&self, bereq: &HttpHeaders) -> bool {
-        let header_value = match bereq.header(match self {
-            HeaderMatchCompiled::Exact { name, .. } => name,
-            HeaderMatchCompiled::Regex { name, .. } => name,
-        }) {
-            Some(v) => v,
-            None => return false,
-        };
-
-        match self {
-            HeaderMatchCompiled::Exact { value, .. } => match header_value {
-                StrOrBytes::Utf8(s) => s == value,
-                StrOrBytes::Bytes(b) => b == value.as_bytes(),
-            },
-            HeaderMatchCompiled::Regex { regex, .. } => match header_value {
-                StrOrBytes::Utf8(s) => regex.is_match(s),
-                StrOrBytes::Bytes(b) => {
-                    // Only allocate if we have non-UTF8 bytes that need regex matching
-                    std::str::from_utf8(b)
-                        .map(|s| regex.is_match(s))
-                        .unwrap_or(false)
-                }
-            },
+        match bereq.header(self.name()) {
+            None => false,
+            Some(StrOrBytes::Utf8(s)) => self.matches_value(Some(s)),
+            // Non-UTF8 bytes can never equal a (UTF-8) value nor match as text.
+            Some(StrOrBytes::Bytes(b)) => std::str::from_utf8(b)
+                .map(|s| self.matches_value(Some(s)))
+                .unwrap_or(false),
         }
     }
 }
@@ -147,7 +156,7 @@ pub enum QueryParamMatchCompiled {
 
 impl QueryParamMatchCompiled {
     /// Create from config QueryParamMatch
-    fn from_config(qpm: &QueryParamMatch) -> Result<Self, String> {
+    pub(crate) fn from_config(qpm: &QueryParamMatch) -> Result<Self, String> {
         match qpm.match_type {
             MatchType::Exact => Ok(QueryParamMatchCompiled::Exact {
                 name: qpm.name.clone(),
@@ -198,8 +207,8 @@ pub struct RouteEntry {
     pub route_name: Option<String>,
     pub priority: i32,
     pub rule_index: i32,
-    /// Cache policy from VarnishCachePolicy. None means pass-through (no caching).
-    pub cache_policy: Option<crate::config::CachePolicy>,
+    /// Compiled cache policy from VarnishCachePolicy. None means pass-through (no caching).
+    pub cache_policy: Option<Arc<CompiledCachePolicy>>,
     /// Pre-compiled bypass header rules (extracted from cache_policy at config load time).
     pub bypass_headers: Vec<BypassHeaderCompiled>,
 }
@@ -259,7 +268,9 @@ pub fn build_vhost_directors(
     ctx: &mut Ctx,
     redirect_backend: BackendRef,
     internal_error_backend: BackendRef,
-) -> Result<VhostDirectorMap, VclError> {
+) -> Result<(VhostDirectorMap, Vec<Arc<CompiledCachePolicy>>), VclError> {
+    // Each distinct policy is compiled once and shared across routes.
+    let mut compiled_policies: HashMap<u64, Arc<CompiledCachePolicy>> = HashMap::new();
     let mut exact = HashMap::new();
     let mut wildcards = Vec::new();
 
@@ -318,10 +329,7 @@ pub fn build_vhost_directors(
                             }),
                             Some(pattern) => {
                                 let re = Regex::new(pattern).map_err(|e| {
-                                    format!(
-                                        "Invalid bypass header regex '{}': {}",
-                                        pattern, e
-                                    )
+                                    format!("Invalid bypass header regex '{}': {}", pattern, e)
                                 })?;
                                 Ok(BypassHeaderCompiled::Regex {
                                     name: bh.name.clone(),
@@ -335,6 +343,23 @@ pub fn build_vhost_directors(
                 None => Vec::new(),
             };
 
+            let cache_policy = match &route.cache_policy {
+                Some(cp) => {
+                    let key = policy_key(cp);
+                    if let Some(existing) = compiled_policies.get(&key) {
+                        Some(Arc::clone(existing))
+                    } else {
+                        let compiled =
+                            Arc::new(CompiledCachePolicy::compile(cp).map_err(|e| {
+                                VclError::new(format!("Invalid cache policy: {}", e))
+                            })?);
+                        compiled_policies.insert(key, Arc::clone(&compiled));
+                        Some(compiled)
+                    }
+                }
+                None => None,
+            };
+
             route_entries.push(RouteEntry {
                 path_match,
                 method: route.method.clone(),
@@ -346,7 +371,7 @@ pub fn build_vhost_directors(
                 route_name: route.route_name.clone(),
                 priority: route.priority,
                 rule_index: route.rule_index,
-                cache_policy: route.cache_policy.clone(),
+                cache_policy,
                 bypass_headers,
             });
         }
@@ -410,7 +435,10 @@ pub fn build_vhost_directors(
     // (e.g., *.bar.example.com before *.example.com)
     wildcards.sort_by_key(|w| std::cmp::Reverse(w.0.len()));
 
-    Ok(VhostDirectorMap { exact, wildcards })
+    Ok((
+        VhostDirectorMap { exact, wildcards },
+        compiled_policies.into_values().collect(),
+    ))
 }
 
 /// Collect all backend keys referenced in vhost directors
@@ -440,8 +468,14 @@ pub struct GhostDirector {
     redirect_backend: SendSyncBackendRef,
     /// Synthetic 500 backend for matched routes with no backends
     internal_error_backend: SendSyncBackendRef,
+    /// Compiled cache policies, keyed by content key (live + recently retired)
+    policies: ArcSwap<PolicyTable>,
     /// Last reload error message (for debugging)
     last_error: RwLock<Option<String>>,
+    /// Serializes reloads: each reload reads the current policy table and backend
+    /// pool and stores successors, so two concurrent reloads could otherwise lose
+    /// each other's live policies (and backends).
+    reload_lock: Mutex<()>,
 }
 
 /// Bundle returned by [`GhostDirectorBundle::new`].
@@ -489,7 +523,9 @@ impl GhostDirectorBundle {
             not_found_backend: not_found_ref,
             redirect_backend: redirect_ref,
             internal_error_backend: internal_error_ref,
+            policies: ArcSwap::new(Arc::new(PolicyTable::empty())),
             last_error: RwLock::new(None),
+            reload_lock: Mutex::new(()),
         };
 
         Ok(GhostDirectorBundle {
@@ -502,9 +538,10 @@ impl GhostDirectorBundle {
 }
 
 impl GhostDirector {
-
     /// Reload configuration from disk
     pub fn reload(&self, ctx: &mut Ctx) -> Result<(), String> {
+        let _reload_guard = self.reload_lock.lock();
+
         // Clone current backend pool for modification
         let current_backends = self.backends.load();
         let mut backend_pool = (**current_backends).clone();
@@ -520,7 +557,7 @@ impl GhostDirector {
         })?;
 
         // Build new vhost directors
-        let new_directors = build_vhost_directors(
+        let (new_directors, live_policies) = build_vhost_directors(
             &config,
             &mut backend_pool,
             ctx,
@@ -542,6 +579,17 @@ impl GhostDirector {
         // Clean up unreferenced backends from the pool
         backend_pool.retain_only(&referenced_keys);
 
+        // Store the policy table BEFORE the vhost map so a recv on the new map
+        // always finds its policy key. Rebuilt on every reload so expired
+        // retired entries are pruned.
+        let new_table = PolicyTable::rebuild(
+            &self.policies.load(),
+            live_policies,
+            Instant::now(),
+            POLICY_RETENTION,
+        );
+        self.policies.store(Arc::new(new_table));
+
         // Atomic swap of vhost_directors and backends
         self.vhost_directors.store(Arc::new(new_directors));
         self.backends.store(Arc::new(backend_pool));
@@ -550,6 +598,16 @@ impl GhostDirector {
         *self.last_error.write() = None;
 
         Ok(())
+    }
+
+    /// Resolve the effective cache settings for a backend response.
+    pub fn cache_settings<'h>(
+        &self,
+        d: &CacheDirective,
+        status: u16,
+        header: impl Fn(&str) -> Option<&'h str>,
+    ) -> CacheSettings {
+        select_settings(&self.policies.load(), d, status, header)
     }
 
     /// Get the last reload error message (if any)
@@ -566,6 +624,11 @@ impl GhostDirector {
         http: &mut HttpHeaders,
         listener: Option<&str>,
     ) -> vhost_director::RouteRequestResult {
+        // A client-supplied directive must never survive, whichever path routing
+        // takes below (no host, no vhost, redirect, ...). Ghost sets its own only
+        // when caching applies.
+        http.unset_header(CACHE_POLICY_HEADER);
+
         let host = match get_host_header(http) {
             Some(h) => h,
             None => return vhost_director::RouteRequestResult::default(),
@@ -574,10 +637,12 @@ impl GhostDirector {
         let directors = self.vhost_directors.load();
         let vhost = match match_hostname(&directors, &host) {
             Some(dir) => dir,
-            None => return vhost_director::RouteRequestResult {
-                backend: Some(self.not_found_backend.0.clone()),
-                ..Default::default()
-            },
+            None => {
+                return vhost_director::RouteRequestResult {
+                    backend: Some(self.not_found_backend.0.clone()),
+                    ..Default::default()
+                }
+            }
         };
 
         let mut result = vhost.route_request(http, listener);
@@ -627,10 +692,22 @@ impl GhostDirector {
     }
 }
 
+/// Remove request-side bridging headers that `route_request` sets when it runs
+/// on `bereq` from a director `resolve()`. That happens after
+/// `vcl_backend_fetch` (so after `router.backend_fetch()` captured the
+/// directive), right before the request is sent: anything left here reaches
+/// the origin. Neither header has a use at that point (the cache key is
+/// already computed, the directive already captured).
+pub(crate) fn strip_backend_context_headers(bereq: &mut HttpHeaders) {
+    bereq.unset_header(CACHE_POLICY_HEADER);
+    bereq.unset_header(CACHE_KEY_EXTRA_HEADER);
+}
+
 impl VclDirector for GhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         let bereq = ctx.http_bereq.as_mut()?;
         let result = self.route_request(bereq, None);
+        strip_backend_context_headers(bereq);
         for (tag, msg) in result.log_msgs {
             ctx.log(tag, &msg);
         }

@@ -66,7 +66,7 @@ pub struct BackendGroup {
 }
 
 /// Mirrors Gateway API's HTTPPathMatch types for URL routing decisions.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "PascalCase")]
 pub enum PathMatchType {
     Exact,
@@ -75,7 +75,7 @@ pub enum PathMatchType {
 }
 
 /// URL path condition that must match for a route to be selected.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Hash, PartialEq, Eq)]
 pub struct PathMatch {
     #[serde(rename = "type")]
     pub match_type: PathMatchType,
@@ -83,7 +83,7 @@ pub struct PathMatch {
 }
 
 /// Match type for headers and query parameters.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "PascalCase")]
 pub enum MatchType {
     Exact,
@@ -91,7 +91,7 @@ pub enum MatchType {
 }
 
 /// Header matching rule.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Hash, PartialEq, Eq)]
 pub struct HeaderMatch {
     pub name: String,
     pub value: String,
@@ -100,7 +100,7 @@ pub struct HeaderMatch {
 }
 
 /// Query parameter matching rule.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Hash, PartialEq, Eq)]
 pub struct QueryParamMatch {
     pub name: String,
     pub value: String,
@@ -159,7 +159,7 @@ pub struct RequestRedirectFilter {
 }
 
 /// Cache key configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Hash, PartialEq, Eq)]
 pub struct CacheKeyConfig {
     #[serde(default)]
     pub headers: Vec<String>,
@@ -170,26 +170,94 @@ pub struct CacheKeyConfig {
 }
 
 /// Header-based cache bypass rule
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Hash, PartialEq, Eq)]
 pub struct BypassHeaderConfig {
     pub name: String,
     #[serde(default)]
     pub value_regex: Option<String>,
 }
 
+/// Maximum number of per-rule overrides allowed in one cache policy.
+pub const MAX_CACHE_OVERRIDES: usize = 64;
+
 /// Cache policy for a route, derived from VarnishCachePolicy.
 /// Routes without a cache_policy operate in pass-through mode (no caching).
-#[derive(Debug, Clone, Deserialize)]
+///
+/// TTLs may be negative (meaning "do not cache"). `grace_seconds` and
+/// `keep_seconds` are `None` when unset, which differs from an explicit `Some(0)`.
+#[derive(Debug, Clone, Deserialize, Hash, PartialEq, Eq)]
 pub struct CachePolicy {
-    pub default_ttl_seconds: Option<u32>,
-    pub forced_ttl_seconds: Option<u32>,
-    #[serde(default)]
-    pub grace_seconds: u32,
-    #[serde(default)]
-    pub keep_seconds: u32,
+    pub default_ttl_seconds: Option<i64>,
+    pub forced_ttl_seconds: Option<i64>,
+    pub grace_seconds: Option<u32>,
+    pub keep_seconds: Option<u32>,
     pub cache_key: Option<CacheKeyConfig>,
     #[serde(default)]
     pub bypass_headers: Vec<BypassHeaderConfig>,
+    #[serde(default)]
+    pub overrides: Vec<CacheRuleOverride>,
+}
+
+/// Per-rule cache override: when `match_` matches, its set fields replace the policy's.
+#[derive(Debug, Clone, Deserialize, Hash, PartialEq, Eq)]
+pub struct CacheRuleOverride {
+    #[serde(default, rename = "match")]
+    pub match_: CacheRuleMatch,
+    pub default_ttl_seconds: Option<i64>,
+    pub forced_ttl_seconds: Option<i64>,
+    pub grace_seconds: Option<u32>,
+    pub keep_seconds: Option<u32>,
+}
+
+/// Match conditions of a cache override. All set conditions must match.
+#[derive(Debug, Clone, Default, Deserialize, Hash, PartialEq, Eq)]
+pub struct CacheRuleMatch {
+    pub path_match: Option<PathMatch>,
+    /// HEAD and GET are equivalent here (Varnish fetches a HEAD miss as GET).
+    pub method: Option<String>,
+    #[serde(default)]
+    pub request_headers: Vec<HeaderMatch>,
+    #[serde(default)]
+    pub query_params: Vec<QueryParamMatch>,
+    /// Status patterns: "404", "4xx" or "500-504".
+    #[serde(default)]
+    pub status: Vec<String>,
+    #[serde(default)]
+    pub response_headers: Vec<HeaderMatch>,
+}
+
+/// Parse a status pattern ("404", "4xx", "500-504") into an inclusive range.
+pub fn parse_status_match(s: &str) -> Result<(u16, u16), String> {
+    let bad = || format!("invalid status match '{}'", s);
+    let code = |t: &str| -> Result<u16, String> {
+        if t.len() != 3 || !t.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad());
+        }
+        let n: u16 = t.parse().map_err(|_| bad())?;
+        if (100..=599).contains(&n) {
+            Ok(n)
+        } else {
+            Err(bad())
+        }
+    };
+    if let Some(class) = s.strip_suffix("xx") {
+        return match class.as_bytes() {
+            [d @ b'1'..=b'5'] => {
+                let base = u16::from(d - b'0') * 100;
+                Ok((base, base + 99))
+            }
+            _ => Err(bad()),
+        };
+    }
+    if let Some((lo, hi)) = s.split_once('-') {
+        let (lo, hi) = (code(lo)?, code(hi)?);
+        if lo > hi {
+            return Err(bad());
+        }
+        return Ok((lo, hi));
+    }
+    let n = code(s)?;
+    Ok((n, n))
 }
 
 /// Route filters container
@@ -316,16 +384,64 @@ fn validate(config: &Config) -> Result<(), String> {
                 let qp_ctx = format!("{} query_param {}", route_ctx, j);
                 validate_query_param_match(qp, &qp_ctx)?;
             }
+
+            if let Some(ref policy) = route.cache_policy {
+                validate_cache_policy(policy, &route_ctx)?;
+            }
         }
 
         for (g, group) in vhost.default_backends.iter().enumerate() {
-            validate_backend_group(
-                &format!("{} default_backends group {}", hostname, g),
-                group,
-            )?;
+            validate_backend_group(&format!("{} default_backends group {}", hostname, g), group)?;
         }
     }
 
+    Ok(())
+}
+
+/// Validate a route's cache policy and its per-rule overrides.
+fn validate_cache_policy(policy: &CachePolicy, route_ctx: &str) -> Result<(), String> {
+    if policy.default_ttl_seconds.is_some() && policy.forced_ttl_seconds.is_some() {
+        return Err(format!(
+            "{}: cache_policy cannot set both default_ttl_seconds and forced_ttl_seconds",
+            route_ctx
+        ));
+    }
+    if policy.overrides.len() > MAX_CACHE_OVERRIDES {
+        return Err(format!(
+            "{}: too many cache overrides ({}, max {})",
+            route_ctx,
+            policy.overrides.len(),
+            MAX_CACHE_OVERRIDES
+        ));
+    }
+    for (i, o) in policy.overrides.iter().enumerate() {
+        let ctx = format!("{} override {}", route_ctx, i);
+        if o.default_ttl_seconds.is_some() && o.forced_ttl_seconds.is_some() {
+            return Err(format!(
+                "{}: cannot set both default_ttl_seconds and forced_ttl_seconds",
+                ctx
+            ));
+        }
+        let m = &o.match_;
+        if let Some(ref pm) = m.path_match {
+            validate_path_match(pm, &ctx)?;
+        }
+        if let Some(ref method) = m.method {
+            validate_method(method, &ctx)?;
+        }
+        for (j, h) in m.request_headers.iter().enumerate() {
+            validate_header_match(h, &format!("{} request_header {}", ctx, j))?;
+        }
+        for (j, qp) in m.query_params.iter().enumerate() {
+            validate_query_param_match(qp, &format!("{} query_param {}", ctx, j))?;
+        }
+        for (j, h) in m.response_headers.iter().enumerate() {
+            validate_header_match(h, &format!("{} response_header {}", ctx, j))?;
+        }
+        for st in &m.status {
+            parse_status_match(st).map_err(|e| format!("{}: {}", ctx, e))?;
+        }
+    }
     Ok(())
 }
 
@@ -374,7 +490,10 @@ fn validate_backend_group(context: &str, group: &BackendGroup) -> Result<(), Str
             ));
         }
         if ep.hostname.is_empty() {
-            return Err(format!("{}: external_proxy.hostname cannot be empty", context));
+            return Err(format!(
+                "{}: external_proxy.hostname cannot be empty",
+                context
+            ));
         }
         if ep.port == 0 {
             return Err(format!("{}: external_proxy.port cannot be 0", context));
@@ -803,7 +922,10 @@ mod tests {
 
         let config = load(file.path()).unwrap();
         let group = &config.vhosts["media.example.com"].routes[0].backend_groups[0];
-        let ep = group.external_proxy.as_ref().expect("expected external_proxy");
+        let ep = group
+            .external_proxy
+            .as_ref()
+            .expect("expected external_proxy");
         assert_eq!(ep.hostname, "web2026-assets.s3.nl-ams.scw.cloud");
         assert_eq!(ep.port, 443);
         assert!(ep.tls);
@@ -860,7 +982,11 @@ mod tests {
             }"#,
         );
         let err = load(file.path()).expect_err("expected validation error");
-        assert!(err.contains("hostname cannot be empty"), "unexpected error: {}", err);
+        assert!(
+            err.contains("hostname cannot be empty"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -892,5 +1018,114 @@ mod tests {
         let config = load(file.path()).unwrap();
         let group = &config.vhosts["api.example.com"].routes[0].backend_groups[0];
         assert!(group.backend_tls.is_none());
+    }
+
+    fn route_with_policy(policy: &str) -> String {
+        format!(
+            r#"{{"version": 2, "vhosts": {{"a.example.com": {{"routes": [{{
+                "backend_groups": [{{"weight": 100, "backends": [{{"address": "10.0.0.1", "port": 80}}]}}],
+                "priority": 1,
+                "cache_policy": {}
+            }}]}}}}}}"#,
+            policy
+        )
+    }
+
+    fn load_policy(policy: &str) -> Result<Config, String> {
+        let file = write_config(&route_with_policy(policy));
+        load(file.path())
+    }
+
+    #[test]
+    fn test_cache_policy_overrides_parsing() {
+        let config = load_policy(
+            r#"{
+            "default_ttl_seconds": -1,
+            "grace_seconds": 30,
+            "overrides": [{
+                "match": {
+                    "path_match": {"type": "PathPrefix", "value": "/api"},
+                    "method": "GET",
+                    "request_headers": [{"name": "X-A", "value": "b", "type": "Exact"}],
+                    "query_params": [{"name": "q", "value": "x.*", "type": "RegularExpression"}],
+                    "status": ["404", "5xx"],
+                    "response_headers": [{"name": "X-R", "value": "v", "type": "Exact"}]
+                },
+                "forced_ttl_seconds": -5,
+                "grace_seconds": 0,
+                "keep_seconds": 10
+            }]
+        }"#,
+        )
+        .unwrap();
+        let cp = config.vhosts["a.example.com"].routes[0]
+            .cache_policy
+            .as_ref()
+            .unwrap();
+        assert_eq!(cp.default_ttl_seconds, Some(-1));
+        assert_eq!(cp.overrides.len(), 1);
+        let o = &cp.overrides[0];
+        assert_eq!(o.forced_ttl_seconds, Some(-5));
+        assert_eq!(o.default_ttl_seconds, None);
+        assert_eq!(o.grace_seconds, Some(0));
+        assert_eq!(o.keep_seconds, Some(10));
+        let m = &o.match_;
+        assert_eq!(m.path_match.as_ref().unwrap().value, "/api");
+        assert_eq!(m.method.as_deref(), Some("GET"));
+        assert_eq!(m.request_headers.len(), 1);
+        assert_eq!(m.query_params[0].match_type, MatchType::RegularExpression);
+        assert_eq!(m.status, vec!["404", "5xx"]);
+        assert_eq!(m.response_headers[0].name, "X-R");
+    }
+
+    #[test]
+    fn test_cache_policy_grace_zero_vs_absent() {
+        let config = load_policy(r#"{"grace_seconds": 0}"#).unwrap();
+        let cp = config.vhosts["a.example.com"].routes[0]
+            .cache_policy
+            .as_ref()
+            .unwrap();
+        assert_eq!(cp.grace_seconds, Some(0));
+        assert_eq!(cp.keep_seconds, None);
+    }
+
+    #[test]
+    fn test_parse_status_match() {
+        assert_eq!(parse_status_match("404"), Ok((404, 404)));
+        assert_eq!(parse_status_match("4xx"), Ok((400, 499)));
+        assert_eq!(parse_status_match("500-504"), Ok((500, 504)));
+        for bad in ["600", "4x", "504-500", "099"] {
+            assert!(parse_status_match(bad).is_err(), "{} should fail", bad);
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_too_many_overrides() {
+        let rules = vec![r#"{"default_ttl_seconds": 1}"#; MAX_CACHE_OVERRIDES + 1].join(",");
+        let err = load_policy(&format!(r#"{{"overrides": [{}]}}"#, rules)).unwrap_err();
+        assert!(err.contains("overrides"), "{}", err);
+        let rules = vec![r#"{"default_ttl_seconds": 1}"#; MAX_CACHE_OVERRIDES].join(",");
+        assert!(load_policy(&format!(r#"{{"overrides": [{}]}}"#, rules)).is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_override_both_ttls() {
+        let err =
+            load_policy(r#"{"overrides": [{"default_ttl_seconds": 1, "forced_ttl_seconds": 2}]}"#)
+                .unwrap_err();
+        assert!(err.contains("override 0"), "{}", err);
+    }
+
+    #[test]
+    fn test_validate_rejects_top_level_both_ttls() {
+        let err =
+            load_policy(r#"{"default_ttl_seconds": 1, "forced_ttl_seconds": 2}"#).unwrap_err();
+        assert!(err.contains("ttl"), "{}", err);
+    }
+
+    #[test]
+    fn test_validate_rejects_bad_override_status() {
+        let err = load_policy(r#"{"overrides": [{"match": {"status": ["600"]}}]}"#).unwrap_err();
+        assert!(err.contains("override 0"), "{}", err);
     }
 }

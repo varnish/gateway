@@ -9,13 +9,57 @@ use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use varnish::ffi::{vrt_ctx, VCL_STRING};
+use varnish::ffi::{vrt_ctx, vtim_dur, VCL_BOOL, VCL_DURATION, VCL_INT, VCL_STRING};
 use varnish::vcl::{Ctx, Director, StrOrBytes, VclError};
 
 // VRT_r_local_socket is declared in vrt_obj.h but not included in varnish-rs bindings.
 // It returns the name of the Varnish listener socket (e.g., "http-80") for the current request.
 unsafe extern "C" {
     fn VRT_r_local_socket(ctx: *const vrt_ctx) -> VCL_STRING;
+}
+
+// beresp setters are declared in vrt_obj.h but not included in varnish-rs bindings.
+unsafe extern "C" {
+    fn VRT_l_beresp_ttl(ctx: *const vrt_ctx, d: VCL_DURATION);
+    fn VRT_l_beresp_grace(ctx: *const vrt_ctx, d: VCL_DURATION);
+    fn VRT_l_beresp_keep(ctx: *const vrt_ctx, d: VCL_DURATION);
+    fn VRT_l_beresp_uncacheable(ctx: *const vrt_ctx, b: VCL_BOOL);
+    fn VRT_r_bereq_retries(ctx: *const vrt_ctx) -> VCL_INT;
+}
+
+/// Backend-task storage shared by `backend_fetch()` and `backend_response()`.
+#[derive(Default)]
+pub struct BackendTask {
+    /// Directive captured from `X-Ghost-Cache-Policy`.
+    directive: Option<CacheDirective>,
+    /// `bereq.retries` of the fetch attempt `backend_response()` already handled.
+    /// A later call for the same attempt is a no-op; a retry gets a fresh attempt.
+    handled_attempt: Option<i64>,
+}
+
+/// Seconds → `VCL_DURATION` (clamped at 0; never panics, unlike `Duration::from_secs_f64`).
+fn duration_from_secs(s: f64) -> VCL_DURATION {
+    VCL_DURATION(vtim_dur(s.max(0.0)))
+}
+
+/// Move the `X-Ghost-Cache-Policy` directive from bereq into backend-task storage.
+///
+/// When the header is present it replaces the stored directive (an unparseable value
+/// clears it, so no policy is applied) and is removed from bereq. When it is absent
+/// (already captured, or a retry) the stored directive is kept.
+fn capture_directive(ctx: &mut Ctx, task: &mut Option<Box<BackendTask>>) {
+    let Some(bereq) = ctx.http_bereq.as_mut() else {
+        return;
+    };
+    let Some(value) = bereq.header(CACHE_POLICY_HEADER) else {
+        return;
+    };
+    let parsed: Option<CacheDirective> = match value {
+        StrOrBytes::Utf8(s) => serde_json::from_str(s).ok(),
+        StrOrBytes::Bytes(b) => serde_json::from_slice(b).ok(),
+    };
+    task.get_or_insert_with(Default::default).directive = parsed;
+    bereq.unset_header(CACHE_POLICY_HEADER);
 }
 
 /// Get the local socket name from the Varnish context.
@@ -32,6 +76,7 @@ fn local_socket<'a>(ctx: &'a Ctx<'a>) -> Option<&'a str> {
 }
 
 mod backend_pool;
+mod cache_policy;
 mod config;
 mod director;
 mod external_backend;
@@ -44,6 +89,10 @@ mod sync_wrapper;
 mod vhost_director;
 
 use backend_pool::BackendPool;
+use cache_policy::{
+    plan_beresp, synthetic_token, CacheDirective, TtlAction, CACHE_POLICY_HEADER,
+    HIT_FOR_MISS_SECONDS, SYNTHETIC_HEADER,
+};
 use config::ResponseHeaderFilter;
 use director::{GhostDirector, GhostDirectorBundle, SharedGhostDirector};
 use internal_error_backend::{InternalErrorBackend, InternalErrorBody};
@@ -118,12 +167,17 @@ mod ghost {
     ///
     /// Call this in `vcl_deliver` to apply ResponseHeaderModifier filters.
     /// Reads filter context from response headers (copied from bereq in vcl_backend_response).
+    /// Also removes the internal `X-Ghost-Synthetic` marker.
     pub fn deliver(ctx: &mut Ctx) {
         // Get mutable response for both reading and modifying
         let resp = match ctx.http_resp.as_mut() {
             Some(r) => r,
             None => return,
         };
+
+        // backend_response() already strips the synthetic marker; strip it here too
+        // so ghost's token never reaches clients if custom VCL omits that call.
+        resp.unset_header(SYNTHETIC_HEADER);
 
         // Read filter context from response header
         let filter_json = match resp.header(FILTER_CONTEXT_HEADER) {
@@ -318,6 +372,10 @@ mod ghost {
         /// Returns the ghost director which resolves backends in backend
         /// context. For listener-aware routing, use `recv()` in `vcl_recv` instead.
         ///
+        /// Cache policy requires `recv()` in `vcl_recv`: the cache directive is only
+        /// computed there. With `backend()` alone, `backend_response()` applies no
+        /// cache policy (TTL, grace, keep and overrides are silently skipped).
+        ///
         /// # Safety
         ///
         /// Must be called from VCL context. The returned `VCL_BACKEND` pointer is
@@ -333,6 +391,126 @@ mod ghost {
         /// Returns `true` on success, `false` on failure (see `last_error()`).
         pub fn reload(&self, ctx: &mut Ctx) -> bool {
             self.ghost_director.reload(ctx).is_ok()
+        }
+
+        /// Capture the cache directive before the backend request leaves.
+        ///
+        /// Call this in `vcl_backend_fetch` (enforced at VCL compile time). Moves the
+        /// directive that `recv()` stored in `X-Ghost-Cache-Policy` off `bereq` into
+        /// backend-task storage, so the internal header never reaches the origin.
+        /// `backend_response()` uses the stored directive, including after a
+        /// `return (retry)`.
+        ///
+        /// The task storage is per VMOD, not per object: call `backend_fetch()` and
+        /// `backend_response()` on the same router, and use only one router per VCL.
+        #[restrict(vcl_backend_fetch)]
+        pub fn backend_fetch(
+            &self,
+            ctx: &mut Ctx,
+            #[shared_per_task] task: &mut Option<Box<BackendTask>>,
+        ) {
+            capture_directive(ctx, task);
+        }
+
+        /// Apply cache policy to the backend response.
+        ///
+        /// Call this in `vcl_backend_response` (enforced at VCL compile time). Uses the
+        /// directive captured by `backend_fetch()` (if `backend_fetch()` was not called,
+        /// it is read from `bereq` here instead), evaluates status and response-header
+        /// rules, and sets `beresp.ttl`, `beresp.grace`, `beresp.keep` and hit-for-miss
+        /// accordingly. The directive lives for the whole backend task, so a
+        /// `return (retry)` gets the same policy.
+        /// Ghost-generated responses (marked `X-Ghost-Synthetic` with a per-process
+        /// random token) are left untouched. The header is always removed from
+        /// `beresp`; an origin sending it does not opt out of the policy.
+        ///
+        /// Call it once per response: the gateway preamble already calls it, so user
+        /// VCL must not. A repeated call for the same fetch attempt is a no-op.
+        ///
+        /// The directive is computed by `recv()` in `vcl_recv`; without it (e.g. routing
+        /// only through `backend()`) no cache policy is applied.
+        #[restrict(vcl_backend_response)]
+        pub fn backend_response(
+            &self,
+            ctx: &mut Ctx,
+            #[shared_per_task] task: &mut Option<Box<BackendTask>>,
+        ) {
+            // Fallback for VCL that does not call backend_fetch(): the header is
+            // still on bereq. No-op when backend_fetch() already took it.
+            capture_directive(ctx, task);
+
+            // SAFETY: `ctx.raw` is the live vrt_ctx of a vcl_backend_response call
+            // (enforced by `restrict`), so ctx->bo is set.
+            let attempt = unsafe { VRT_r_bereq_retries(&*ctx.raw) }.0;
+            let task = task.get_or_insert_with(Default::default);
+            if task.handled_attempt == Some(attempt) {
+                return;
+            }
+            task.handled_attempt = Some(attempt);
+
+            let Some(beresp) = ctx.http_beresp.as_mut() else {
+                return;
+            };
+
+            // Always strip the marker; only ghost's own token (not a value an origin
+            // sent) marks a ghost-generated response, which gets no policy.
+            let synthetic = matches!(
+                beresp.header(SYNTHETIC_HEADER),
+                Some(StrOrBytes::Utf8(v)) if v == synthetic_token()
+            );
+            beresp.unset_header(SYNTHETIC_HEADER);
+            if synthetic {
+                return;
+            }
+
+            let Some(directive) = task.directive.as_ref() else {
+                return;
+            };
+
+            let status: u16 = match beresp.status() {
+                Some(StrOrBytes::Utf8(s)) => s.parse().unwrap_or(0),
+                Some(StrOrBytes::Bytes(b)) => std::str::from_utf8(b)
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                None => 0,
+            };
+            let settings = self
+                .ghost_director
+                .cache_settings(directive, status, |n| match beresp.header(n) {
+                    Some(StrOrBytes::Utf8(s)) => Some(s),
+                    Some(StrOrBytes::Bytes(b)) => std::str::from_utf8(b).ok(),
+                    None => None,
+                });
+            let has_cc = beresp.header("Cache-Control").is_some();
+            let plan = plan_beresp(&settings, has_cc);
+
+            if plan.strip {
+                beresp.unset_header("Set-Cookie");
+                beresp.unset_header("Cache-Control");
+                beresp.unset_header("Expires");
+            }
+
+            // SAFETY: `ctx.raw` is the live vrt_ctx of this VCL call. The
+            // `restrict(vcl_backend_response)` attribute guarantees a backend fetch
+            // context (ctx->bo and its fetch objcore are set), which is what the
+            // VRT_l_beresp_* setters require. The argument types are
+            // repr(transparent) wrappers of the C typedefs (double / unsigned).
+            let raw: *const vrt_ctx = &*ctx.raw;
+            match plan.ttl {
+                TtlAction::Leave => {}
+                TtlAction::Set(s) => unsafe { VRT_l_beresp_ttl(raw, duration_from_secs(s)) },
+                TtlAction::HitForMiss => unsafe {
+                    VRT_l_beresp_ttl(raw, duration_from_secs(HIT_FOR_MISS_SECONDS));
+                    VRT_l_beresp_uncacheable(raw, true.into());
+                },
+            }
+            if let Some(g) = plan.grace {
+                unsafe { VRT_l_beresp_grace(raw, duration_from_secs(f64::from(g))) };
+            }
+            if let Some(k) = plan.keep {
+                unsafe { VRT_l_beresp_keep(raw, duration_from_secs(f64::from(k))) };
+            }
         }
 
         /// Get the last reload error message, or empty string if no error.

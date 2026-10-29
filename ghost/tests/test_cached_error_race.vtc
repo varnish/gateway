@@ -14,6 +14,7 @@ varnishtest "cached 500 blocks recovery after ghost reload with backends"
 # Real backend server
 server s1 {
     rxreq
+    expect req.http.X-Ghost-Cache-Policy == <undef>
     txresp -body "real-backend-response"
 } -start
 
@@ -27,7 +28,8 @@ shell {
             "routes": [
                 {
                     "backend_groups": [],
-                    "priority": 100
+                    "priority": 100,
+                    "cache_policy": {"forced_ttl_seconds": 300}
                 }
             ]
         }
@@ -56,6 +58,14 @@ varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
         }
         set req.backend_hint = router.recv();
     }
+
+    sub vcl_backend_fetch {
+        router.backend_fetch();
+    }
+
+    sub vcl_backend_response {
+        router.backend_response();
+    }
 } -start
 
 # Load config with empty backends
@@ -71,6 +81,7 @@ client c1 {
     txreq -url "/" -hdr "Host: app.example.com"
     rxresp
     expect resp.status == 500
+    expect resp.http.X-Ghost-Synthetic == <undef>
 } -run
 
 # Phase 2: Update config with real backends (simulates EndpointSlice discovery completing)
@@ -87,7 +98,8 @@ shell {
                             {"address": "${s1_addr}", "port": ${s1_port}}
                         ]}
                     ],
-                    "priority": 100
+                    "priority": 100,
+                    "cache_policy": {"forced_ttl_seconds": 300}
                 }
             ]
         }

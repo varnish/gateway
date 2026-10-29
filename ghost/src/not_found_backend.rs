@@ -4,6 +4,7 @@
 //! match any configured vhost. It uses the synthetic backend pattern to avoid
 //! conflicts with user VCL error handlers.
 
+use crate::cache_policy::{synthetic_token, SYNTHETIC_HEADER};
 use varnish::vcl::{Ctx, VclBackend, VclError, VclResponse};
 
 /// Backend that generates synthetic 404 responses
@@ -18,6 +19,7 @@ impl VclBackend<NotFoundBody> for NotFoundBackend {
         beresp.set_status(404);
         beresp.set_header("Content-Type", "text/plain")?;
         beresp.set_header("Cache-Control", "no-store")?;
+        beresp.set_header(SYNTHETIC_HEADER, synthetic_token())?;
 
         Ok(Some(NotFoundBody::new()))
     }

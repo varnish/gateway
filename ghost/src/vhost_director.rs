@@ -12,6 +12,9 @@ use varnish::vcl::{
 };
 
 use crate::backend_pool::BackendPool;
+use crate::cache_policy::{
+    CacheDirective, CompiledCachePolicy, CACHE_KEY_EXTRA_HEADER, CACHE_POLICY_HEADER,
+};
 use crate::config::RouteFilters;
 use crate::director::{
     strip_port, BypassHeaderCompiled, PathMatchCompiled, RouteEntry, WeightedBackendGroup,
@@ -30,7 +33,9 @@ pub struct RouteMatchResult<'a> {
     pub filters: Option<Arc<RouteFilters>>,
     pub matched_path: Option<&'a PathMatchCompiled>,
     pub route_name: Option<&'a str>,
-    pub cache_policy: Option<&'a crate::config::CachePolicy>,
+    pub cache_policy: Option<&'a Arc<CompiledCachePolicy>>,
+    /// Request-side override mask, computed before any filter mutates the request.
+    pub request_mask: u64,
     pub bypass_headers: &'a [crate::director::BypassHeaderCompiled],
 }
 
@@ -266,7 +271,7 @@ impl VhostDirector {
         };
 
         // Match routes (already sorted by priority)
-        let match_result = match match_routes(
+        let mut match_result = match match_routes(
             &self.routes,
             &path_owned,
             &method_owned,
@@ -282,6 +287,19 @@ impl VhostDirector {
                 }
             }
         };
+        // Compute the request mask now: filters below may mutate the request.
+        if let Some(cp) = match_result.cache_policy {
+            match_result.request_mask = cp.request_mask(
+                &path_owned,
+                &method_owned,
+                query_string_owned.as_deref(),
+                |n| match http.header(n) {
+                    Some(StrOrBytes::Utf8(s)) => Some(s),
+                    Some(StrOrBytes::Bytes(b)) => std::str::from_utf8(b).ok(),
+                    None => None,
+                },
+            );
+        }
         let backend_groups = match_result.backend_groups;
         let matched_filters = match_result.filters.as_ref();
         let route_name = match_result.route_name.map(|s| s.to_string());
@@ -431,6 +449,7 @@ impl VclDirector for VhostDirector {
     fn resolve(&self, ctx: &mut Ctx) -> Option<BackendRef> {
         let bereq = ctx.http_bereq.as_mut()?;
         let result = self.route_request(bereq, None);
+        crate::director::strip_backend_context_headers(bereq);
         for (tag, msg) in result.log_msgs {
             ctx.log(tag, &msg);
         }
@@ -520,6 +539,7 @@ fn match_routes<'a>(
             matched_path: route.path_match.as_ref(),
             route_name: route.route_name.as_deref(),
             cache_policy: route.cache_policy.as_ref(),
+            request_mask: 0,
             bypass_headers: &route.bypass_headers,
         });
     }
@@ -529,11 +549,9 @@ fn match_routes<'a>(
 
 /// Apply cache policy to the request. Returns whether to pass (bypass cache).
 ///
-/// Sets bereq-bridging headers for values that need to reach vcl_backend_response:
-/// - `X-Ghost-Default-TTL: <N>s` → set beresp.ttl when origin has no Cache-Control
-/// - `X-Ghost-Forced-TTL: <N>s` → override beresp.ttl unconditionally
-/// - `X-Ghost-Grace: <N>s` → set beresp.grace
-/// - `X-Ghost-Keep: <N>s` → set beresp.keep
+/// Always removes any client-supplied `X-Ghost-Cache-Policy` first. When caching
+/// applies, sets it to the JSON `CacheDirective` (policy key + request mask) so
+/// `vcl_backend_response` can pick the final settings. Also sets:
 /// - `X-Ghost-Cache-Key-Extra: <data>` → additional hash_data() input
 ///
 /// Returns `true` when the request should bypass the cache entirely (no policy,
@@ -543,6 +561,9 @@ fn apply_cache_policy_headers(
     match_result: &RouteMatchResult,
     query_string: &Option<String>,
 ) -> bool {
+    // Client-spoofed values must never survive.
+    http.unset_header(CACHE_POLICY_HEADER);
+
     let cache_policy = match match_result.cache_policy {
         Some(cp) => cp,
         None => {
@@ -576,26 +597,12 @@ fn apply_cache_policy_headers(
         }
     }
 
-    // Set TTL headers (bridge to vcl_backend_response via bereq).
-    // Must unset first since set_header() appends a header slot.
-    if let Some(ttl) = cache_policy.default_ttl_seconds {
-        http.unset_header("X-Ghost-Default-TTL");
-        let _ = http.set_header("X-Ghost-Default-TTL", &format!("{}s", ttl));
-    }
-    if let Some(ttl) = cache_policy.forced_ttl_seconds {
-        http.unset_header("X-Ghost-Forced-TTL");
-        let _ = http.set_header("X-Ghost-Forced-TTL", &format!("{}s", ttl));
-    }
-
-    // Set grace and keep (bridge to vcl_backend_response via bereq).
-    // Must unset first since set_header() appends a header slot.
-    if cache_policy.grace_seconds > 0 {
-        http.unset_header("X-Ghost-Grace");
-        let _ = http.set_header("X-Ghost-Grace", &format!("{}s", cache_policy.grace_seconds));
-    }
-    if cache_policy.keep_seconds > 0 {
-        http.unset_header("X-Ghost-Keep");
-        let _ = http.set_header("X-Ghost-Keep", &format!("{}s", cache_policy.keep_seconds));
+    let directive = CacheDirective {
+        k: cache_policy.key,
+        m: match_result.request_mask,
+    };
+    if let Ok(json) = serde_json::to_string(&directive) {
+        let _ = http.set_header(CACHE_POLICY_HEADER, &json);
     }
 
     // Cache key customization
@@ -629,8 +636,8 @@ fn apply_cache_policy_headers(
 
         if !extra_parts.is_empty() {
             // Must unset first since set_header() appends a header slot.
-            http.unset_header("X-Ghost-Cache-Key-Extra");
-            let _ = http.set_header("X-Ghost-Cache-Key-Extra", &extra_parts.join("|"));
+            http.unset_header(CACHE_KEY_EXTRA_HEADER);
+            let _ = http.set_header(CACHE_KEY_EXTRA_HEADER, &extra_parts.join("|"));
         }
     }
 
@@ -1310,6 +1317,7 @@ mod tests {
             matched_path: Some(&path_match),
             route_name: Some("default/my-route"),
             cache_policy: None,
+            request_mask: 0,
             bypass_headers: &[],
         };
 
