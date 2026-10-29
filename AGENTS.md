@@ -331,7 +331,7 @@ github.com/perbu/vclparser        # optional: VCL syntax validation
 VCL allows multiple definitions of the same subroutine - they get concatenated at compile time. We use this
 to avoid parsing user VCL:
 
-1. Generated VCL includes: ghost import, `vcl_init` (router creation), `vcl_recv` (ghost.recv), `vcl_backend_fetch` (router.backend)
+1. Generated VCL (`internal/vcl/preamble.vcl`) includes: `vcl_init` (router creation), `vcl_recv` (strips internal headers, handles reload/PURGE/BAN, routes via `router.recv()`), `vcl_hash` (cache-key extra data), `vcl_synth` (surfaces reload errors, no `return`), `vcl_backend_fetch` (strips `X-Ghost-Pass` from bereq), `vcl_pipe` (strips internal `X-Ghost-*` headers from bereq, no `return`), `vcl_backend_response` (ban-lurker headers, cache policy TTL/grace/keep) and `vcl_deliver` (`ghost.deliver()`). A postamble `vcl_recv` (after user VCL) applies the deferred `X-Ghost-Pass`. There is no `router.backend` call; routing is done in `vcl_recv`
 2. User VCL is appended after the generated VCL
 3. If user defines the same subroutines, their code runs *after* the gateway code
 

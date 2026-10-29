@@ -70,6 +70,56 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	}
 }
 
+func TestGenerate_VclPipeStripsInternalHeaders(t *testing.T) {
+	result := Generate()
+	body := subBody(t, result, "vcl_pipe")
+	for _, h := range []string{
+		"X-Ghost-Pass", "X-Ghost-Forced-TTL", "X-Ghost-Default-TTL", "X-Ghost-Grace",
+		"X-Ghost-Keep", "X-Ghost-Cache-Key-Extra", "X-Ghost-Filter-Context",
+		"X-Ghost-Redirect-Config", "X-Ghost-Error",
+	} {
+		if !strings.Contains(body, "unset bereq.http."+h+";") {
+			t.Errorf("vcl_pipe should unset bereq.http.%s", h)
+		}
+	}
+	if strings.Contains(body, "return (") || strings.Contains(body, "return(") {
+		t.Error("preamble vcl_pipe must not contain a return statement (user VCL must still run)")
+	}
+}
+
+func TestGenerate_ForcedTTLOnlyStripsWhenCacheable(t *testing.T) {
+	result := Generate()
+	body := subBody(t, result, "vcl_backend_response")
+	idx := strings.Index(body, "if (bereq.http.X-Ghost-Forced-TTL) {")
+	if idx < 0 {
+		t.Fatal("expected forced TTL block")
+	}
+	block := body[idx:]
+	guard := strings.Index(block, "if (!bereq.uncacheable && !beresp.uncacheable) {")
+	strip := strings.Index(block, "unset beresp.http.Set-Cookie;")
+	if guard < 0 || strip < 0 || guard > strip {
+		t.Error("Set-Cookie stripping must be guarded by an uncacheable check")
+	}
+	if strings.Count(body, "unset beresp.http.Set-Cookie;") != 1 {
+		t.Error("expected exactly one guarded Set-Cookie strip")
+	}
+}
+
+// subBody returns the text of the first "sub <name> {" block up to the next
+// top-level closing brace.
+func subBody(t *testing.T, vcl, name string) string {
+	t.Helper()
+	start := strings.Index(vcl, "sub "+name+" {")
+	if start < 0 {
+		t.Fatalf("sub %s not found", name)
+	}
+	end := strings.Index(vcl[start:], "\n}\n")
+	if end < 0 {
+		t.Fatalf("end of sub %s not found", name)
+	}
+	return vcl[start : start+end]
+}
+
 func TestGenerate_GhostReloadHandler(t *testing.T) {
 	result := Generate()
 
