@@ -18,6 +18,17 @@ The Gateway API CRDs (`Gateway`, `HTTPRoute`, etc.) are upstream and upgraded se
 - **CRD changes are called out in release notes.** When the CRD schema changes, the release notes include an explicit "CRD changes" section and a `kubectl apply` snippet. CRDs are strictly additive within a minor version.
 - **Gateway API version.** Each release is tested against a specific Gateway API version (currently v1.5.0). Newer Gateway API releases usually work but are not guaranteed; older releases may be missing types the operator consumes.
 
+## Custom images
+
+If a GatewayClass pins an image through `GatewayClassParameters.spec.image` (typically for [custom VMODs](custom-vmods.md)), the operator still rewrites `main.vcl` for every Gateway of that class as soon as it is upgraded. The new VCL needs the new ghost VMOD, so a pinned image built from the old release cannot load it. Any pod restart then produces a pod that never becomes ready.
+
+Order matters, and the operator and the pinned image must move together:
+
+1. Build the new custom image against the new release.
+2. Upgrade the operator and update the pinned tag in `GatewayClassParameters.spec.image` in the same change.
+
+If either side lags, the pods break. A pinned image still on the old VMOD with an upgraded operator cannot load the new `main.vcl`, so any pod restart gives a pod that never becomes ready. A pinned image moved to the new VMOD while the operator is still old gives the new VMOD with the old `main.vcl`: no VarnishCachePolicy TTL, grace or keep is applied, and the internal `X-Ghost-Cache-Policy` header reaches origins.
+
 ## Upgrade with Helm
 
 Helm does not touch CRDs on `helm upgrade` — this is a deliberate [Helm design choice](https://helm.sh/docs/chart_best_practices/custom_resource_definitions/) to avoid destroying custom resource data. If the release notes indicate CRD changes, apply them manually first:
@@ -76,6 +87,8 @@ Varnish pods are stateless with respect to the cache — a restart drops the pod
 Single-replica Gateways will see a brief connection interruption during restart (typically a few seconds for varnishd to start and pass health checks). If you cannot tolerate that, scale up before upgrading.
 
 ## Rollback
+
+**Roll back the operator and the gateway image together, whether you use Helm or kubectl.** If the operator goes back to the previous version while new gateway pods are still running, the old `main.vcl` compiles on the new VMOD but applies no VarnishCachePolicy TTL, grace or keep: the new ghost no longer emits the headers the old VCL reads. The internal `X-Ghost-Cache-Policy` header also reaches origins. This lasts until the pods are rolled back too, and it is permanent if `GatewayClassParameters.spec.image` pins the new image, because the infra-hash never changes. Change the pinned image back as part of the rollback.
 
 ### Helm
 

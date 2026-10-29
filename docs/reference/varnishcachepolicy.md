@@ -25,8 +25,8 @@ spec:
   defaultTTL: 5m
   # forcedTTL: 1h
 
-  grace: 30s                 # serve stale while revalidating (default: 0)
-  keep: 24h                  # serve stale when backend is down (default: 0)
+  grace: 30s                 # serve stale while revalidating (unset: Varnish default_grace, 10s)
+  keep: 24h                  # serve stale when backend is down (unset: Varnish default_keep, 0s)
 
   cacheKey:
     headers:
@@ -53,14 +53,19 @@ spec:
 | `targetRef.sectionName` | string | — | Name of a specific rule within the targeted HTTPRoute |
 | `defaultTTL` | Duration | required* | TTL when origin sends no Cache-Control. Origin headers take precedence |
 | `forcedTTL` | Duration | required* | Forced TTL, ignores origin Cache-Control entirely |
-| `grace` | Duration | `0` | Serve stale while revalidating (equivalent to `stale-while-revalidate`) |
-| `keep` | Duration | `0` | Serve stale when backend is down (equivalent to `stale-if-error`) |
+| `grace` | Duration | unset | Serve stale while revalidating (equivalent to `stale-while-revalidate`). Unset leaves Varnish's `default_grace` (10s); `0s` disables grace. Max 10 years (`87600h`) |
+| `keep` | Duration | unset | Keep stale objects for revalidation or backend failure. Unset leaves Varnish's `default_keep` (0s); `0s` disables keep. Max 10 years (`87600h`) |
+| `cacheRuleOverrides` | []CacheRuleOverride | `[]` | Per-response TTL/grace/keep overrides, first match wins (max 64). See [cacheRuleOverrides](#cacheruleoverrides) |
 | `cacheKey.headers` | []string | `[]` | Request headers to include in cache key |
 | `cacheKey.queryParameters.include` | []string | all | Allowlist of query params in cache key |
 | `cacheKey.queryParameters.exclude` | []string | none | Denylist of query params from cache key |
 | `bypass.headers` | []HeaderCondition | `[]` | Headers that trigger cache bypass |
 
 *Exactly one of `defaultTTL` or `forcedTTL` must be set.
+
+A TTL may be negative (for example `-1s`), which means "do not cache"; see [Negative TTL](#negative-ttl). Zero and sub-second values are rejected.
+
+Ghost-generated responses (for example the 404 for an unknown vhost, redirects, or the 500 returned when a route has no backends) are never cached by policy: no TTL, grace or keep from the VCP is applied to them.
 
 ## Hierarchy and Inheritance
 
@@ -98,7 +103,7 @@ Used when the origin doesn't send Cache-Control headers. Origin headers always t
 
 ### forcedTTL — Operator wins
 
-Overrides origin Cache-Control headers (except `no-store`/`private`, see below).
+Overrides origin Cache-Control headers, including `no-store` and `private`.
 Use when you know better than the origin.
 
 | Origin sends | Result |
@@ -106,12 +111,127 @@ Use when you know better than the origin.
 | No Cache-Control | TTL = `forcedTTL` value |
 | `Cache-Control: max-age=60` | TTL = `forcedTTL` value (ignored) |
 | `Set-Cookie` present | TTL = `forcedTTL` value (header stripped) |
+| `Cache-Control: no-store` | TTL = `forcedTTL` value (header stripped) |
+| `Cache-Control: private` | TTL = `forcedTTL` value (header stripped) |
 
-**Cannot override**: `Cache-Control: no-store` and `Cache-Control: private` both
-cause Varnish to mark the response uncacheable before `vcl_backend_response` runs.
-This is a Varnish runtime limitation — `beresp.uncacheable` is write-once-to-true
-and cannot be reverted. In these cases the response is not cached regardless of
-`forcedTTL`.
+A positive `forcedTTL` removes `Cache-Control`, `Set-Cookie` and `Expires`
+from the stored response before Varnish's built-in `vcl_backend_response`
+runs, so `no-store` and `private` do not make the response uncacheable
+(verified in `ghost/tests/test_cache_rule_overrides.vtc`).
+
+## cacheRuleOverrides
+
+The top-level fields apply to every response on the targeted route. `cacheRuleOverrides` changes TTL, grace and keep for specific responses, selected by request and response properties such as status code or response headers. Typical uses are caching a 404 for a second instead of the route default, or never caching 5xx responses.
+
+```yaml
+spec:
+  targetRef: {...}
+  defaultTTL: 5m
+  grace: 30s
+  keep: 24h
+  cacheRuleOverrides:
+    - match:
+        status: ["404"]
+        path: {type: PathPrefix, value: /live/}
+      forcedTTL: 1s
+      grace: 0s
+    - match:
+        status: ["5xx"]
+      forcedTTL: -1s
+    - match:
+        responseHeaders:
+          - {name: Content-Type, type: RegularExpression, value: "^image/"}
+      defaultTTL: 1h
+```
+
+Caveat: a negative TTL creates a 120s hit-for-miss object. When a background fetch during grace returns an error that matches such a rule, that hit-for-miss object shadows the stale graced object, and clients get the error instead of stale content. To keep serving stale content on backend errors, abandon the background fetch in user VCL instead:
+
+```vcl
+sub vcl_backend_response {
+    if (bereq.is_bgfetch && beresp.status >= 500) {
+        return (abandon);
+    }
+}
+```
+
+### Rule fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `match` | object | Conditions, all ANDed. An empty or omitted `match` matches every response |
+| `match.path` | HTTPPathMatch | `Exact`, `PathPrefix` or `RegularExpression`, as in `HTTPRouteMatch.path` |
+| `match.method` | HTTPMethod | As in `HTTPRouteMatch.method`, except `GET` and `HEAD` match each other |
+| `match.requestHeaders` | []HTTPHeaderMatch | `Exact` or `RegularExpression`, as in `HTTPRouteMatch.headers` |
+| `match.queryParams` | []HTTPQueryParamMatch | As in `HTTPRouteMatch.queryParams` |
+| `match.status` | []string | Response status. The condition holds if any entry matches |
+| `match.responseHeaders` | []HTTPHeaderMatch | Like `requestHeaders`, evaluated against the backend response |
+| `defaultTTL` | Duration | TTL used when the origin sent no Cache-Control. Mutually exclusive with `forcedTTL` |
+| `forcedTTL` | Duration | TTL that overrides origin caching headers. Mutually exclusive with `defaultTTL` |
+| `grace` | Duration | Grace for matching responses. Between `0s` and 10 years (`87600h`) |
+| `keep` | Duration | Keep for matching responses. Between `0s` and 10 years (`87600h`) |
+
+A rule must set at least one of `defaultTTL`, `forcedTTL`, `grace` or `keep`. A VCP may have at most 64 rules.
+
+Status entries are one of:
+
+- an exact code: `"404"`
+- a class: `"4xx"` (400-499)
+- an inclusive range: `"500-504"`
+
+### Evaluation
+
+- Rules are evaluated in order and the **first matching rule wins**. Later rules are not consulted.
+- If no rule matches, the top-level fields apply as if there were no overrides.
+- Fields the matching rule leaves unset fall back to the top-level values. The TTL falls back **as a unit**: if the rule sets either `defaultTTL` or `forcedTTL`, it replaces the top-level TTL entirely (whichever kind that was); if it sets neither, the top-level `defaultTTL` or `forcedTTL` applies. `grace` and `keep` fall back individually.
+- Request-side conditions (`path`, `method`, `requestHeaders`, `queryParams`) are evaluated in `vcl_recv`, on the request that misses the cache, before HTTPRoute filters such as `URLRewrite` or `RequestHeaderModifier` are applied. On `return(restart)` they are re-evaluated against the current request. They are not part of the cache key: the resulting TTL belongs to the cached object and applies to every later client that hits it. For example, a rule matching `requestHeaders: [{name: X-Preview, value: "1"}]` with `forcedTTL: 1s` gives a 1-second TTL to the object fetched by the first request that carried `X-Preview: 1`, and all other clients get that short-lived object too. To vary caching per client, add the header to `cacheKey.headers` or use `bypass`.
+- `HEAD` and `GET` are both matched as `GET`, because Varnish fetches a `HEAD` miss as a `GET`.
+- When a header appears more than once, `requestHeaders` and `responseHeaders` match against the first occurrence only, the same as Varnish's `req.http` and `beresp.http`.
+- Overrides are evaluated when the backend response arrives, so `status` and `responseHeaders` are available. A VCP version in use by an in-flight request stays available for 5 minutes after a config reload changes or removes it, so a request is always judged by the policy it started with. If a fetch outlives that, the response is not cached.
+
+### Negative TTL
+
+A negative `defaultTTL` or `forcedTTL`, in a rule or at the top level, means "do not cache". The response is marked uncacheable with a 120s hit-for-miss entry, so concurrent requests are not queued behind each other and a later cacheable response for the same object (for example a 200 once the content exists) is cached normally. The magnitude of the negative value is ignored. The policy's `grace` and `keep` (rule or top level) are not applied to these hit-for-miss entries; they keep Varnish's defaults, as with Varnish's built-in hit-for-miss.
+
+- `forcedTTL: -1s` never caches matching responses.
+- `defaultTTL: -1s` does not cache matching responses only when the origin sent no Cache-Control, the same condition under which a positive `defaultTTL` applies.
+
+Zero is rejected, as is any TTL with a magnitude under one second.
+
+### Positive forcedTTL and origin headers
+
+When a positive `forcedTTL` applies, ghost removes `Set-Cookie`, `Cache-Control` and `Expires` from the stored response, so the TTL is not undone downstream.  This includes origin `no-store` and `private`, which a positive `forcedTTL` overrides.
+
+### Grace and keep with short TTLs
+
+Grace is not reset by a rule that sets only a TTL. A rule with `forcedTTL: 1s` inherits the top-level `grace`, so with `grace: 30s` the 1-second object can be served stale for 30 more seconds, defeating the purpose of the short TTL. Set `grace: 0s` (and `keep: 0s` if needed) in the rule to prevent this.
+
+Unset and `0s` differ. Leaving `grace` or `keep` unset at every level leaves Varnish's defaults in place (`default_grace` 10s, `default_keep` 0s). An explicit `0s` sets the value to zero. Existing VCPs with an explicit `grace: 0s` or `keep: 0s` therefore now get 0s instead of the 10s grace they silently received before.
+
+### Example: live video
+
+Live streams publish chunks at predictable URLs. A request for the next chunk often arrives before the origin has it, and the origin answers 404. The chunk appears a second or two later. The route should cache chunks for a long time but cache the 404 only briefly, with no stale serving:
+
+```yaml
+apiVersion: gateway.varnish-software.com/v1alpha1
+kind: VarnishCachePolicy
+metadata:
+  name: live-video
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: live
+  defaultTTL: 1h
+  grace: 30s
+  cacheRuleOverrides:
+    - match:
+        status: ["404"]
+      forcedTTL: 1s
+      grace: 0s
+      keep: 0s
+```
+
+Without `grace: 0s` the 404 would be served stale for up to 30s, long after the chunk exists.
 
 ## Status and Conditions
 

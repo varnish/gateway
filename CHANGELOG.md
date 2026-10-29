@@ -9,10 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`cacheRuleOverrides` on `VarnishCachePolicy`.** Per-response TTL, grace
+  and keep overrides selected by path, method, request headers, query
+  parameters, response status (`404`, `4xx`, `500-504`) and response
+  headers. First matching rule wins; unset fields fall back to the
+  top-level values. A negative `defaultTTL`/`forcedTTL` means "do not
+  cache". See the VarnishCachePolicy reference.
+
 - **`GatewayPort8080` conformance support (#30).** The multi-listener
   architecture already mapped listener ports straight through to Service and
   container ports, so the feature is now declared in the conformance suite.
   This also enables the `HTTPRouteRedirectPortAndScheme` tests.
+
+### Changed
+
+- **Explicit `grace: 0s` / `keep: 0s` now means zero.** Previously an
+  explicit zero was treated as unset and Varnish's `default_grace` (10s)
+  still applied. Unset still leaves the Varnish defaults. VCPs with an
+  explicit `grace: 0s` will no longer serve stale for 10s.
+- **A top-level `forcedTTL` no longer applies to ghost-generated
+  responses** (e.g. the "no backends" 500). Those responses carry
+  `Cache-Control: no-store` and were being cached past recovery.
+- **`grace` and `keep` are capped at 10 years** (top level and in rules).
+  Larger values used to be accepted by the operator but broke every ghost
+  reload on the gateway.
+- **Sub-second `defaultTTL`/`forcedTTL` values are now rejected.** Any TTL
+  with a magnitude under 1s (for example `500ms`) used to be accepted and
+  rounded to whole seconds (`200ms` became 0). It now fails validation. After
+  the operator upgrade, a VarnishCachePolicy using such a value is no longer
+  Accepted and its routes stop caching. Change those values to 1s or more
+  before upgrading.
+- **Internal `X-Ghost-*` cache headers no longer reach origins.** The
+  per-request cache directive is now taken off the backend request in
+  `vcl_backend_fetch` (new `router.backend_fetch()` in the generated VCL)
+  instead of after the response arrived.
+
+### Removed
+
+- **Ghost no longer sets the `X-Ghost-Default-TTL`, `X-Ghost-Forced-TTL`,
+  `X-Ghost-Grace` and `X-Ghost-Keep` request headers.** User VCL that reads
+  them must change: the cache policy values are now applied to `beresp` by
+  `router.backend_response()`, so read `beresp.ttl`, `beresp.grace` and
+  `beresp.keep` in your `vcl_backend_response` instead. The four headers are
+  still stripped from client requests in this release.
+
+### CRD changes
+
+The `VarnishCachePolicy` CRD gains `spec.cacheRuleOverrides` and has updated
+field descriptions (including `defaultTTL`/`forcedTTL`, which may now be
+negative). Helm does not upgrade CRDs, so apply them before `helm upgrade`:
+
+```bash
+helm pull oci://ghcr.io/varnish/charts/varnish-gateway --version vX.Y.Z --untar
+kubectl apply -f varnish-gateway/crds/
+```
+
+Installs from `deploy/` get the CRDs from `kubectl apply -f deploy/`. Without
+the CRD update, clients that do not use strict field validation have
+`cacheRuleOverrides` pruned silently by the API server: the policy is
+accepted and the overrides never take effect.
+
+### Upgrade notes
+
+During a rolling upgrade to this release, old and new components briefly
+coexist:
+
+- New pods reading a `routing.json` written by the old operator see
+  `grace_seconds: 0` / `keep_seconds: 0` on every policy (the old operator
+  always emitted them), so VCPs that left grace/keep unset get zero grace/keep
+  until the new operator rewrites `routing.json` (normally seconds after it
+  starts).
+- Old pods cannot parse a `routing.json` containing a negative top-level
+  `defaultTTL`/`forcedTTL`. The old chaperone retries the failed reload for
+  about 3.5s and then exits. The restarted pod cannot load the new
+  `main.vcl` (it calls `router.backend_fetch()`, which the old VMOD lacks),
+  so it never becomes ready. Every old pod hits this at the same time, so
+  they all go down and stay down until replaced by new pods. Do not set a
+  negative top-level TTL until the rollout has finished. Negative TTLs in
+  `cacheRuleOverrides` alone do not trigger this: the old chaperone drops
+  `overrides`.
+- Old pods refuse the new generated VCL (`router.backend_fetch()` is unknown
+  to the old ghost). The hot reload is rejected, so running pods keep serving
+  with their current VCL, but an old pod that restarts mid-rollout will not
+  start Varnish until it is replaced by a new one.
+- Roll the operator back together with the gateway image, and rebuild any
+  custom gateway image (`GatewayClassParameters.spec.image`) before upgrading
+  the operator. See [Upgrades](docs/operations/upgrades.md).
 
 ### Fixed
 
