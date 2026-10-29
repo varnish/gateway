@@ -1249,3 +1249,36 @@ func TestNoMatchRuleMatchesExplicitSlashPriority(t *testing.T) {
 		t.Errorf("no-match (%d) and explicit-/ (%d) priorities must be equal", noMatchPrio, explicitPrio)
 	}
 }
+
+func TestPreambleCallsBackendResponse(t *testing.T) {
+	result := Generate()
+
+	if !strings.Contains(result, "router.backend_response();") {
+		t.Error("preamble should call router.backend_response();")
+	}
+	for _, h := range []string{"X-Ghost-Forced-TTL", "X-Ghost-Default-TTL", "X-Ghost-Grace", "X-Ghost-Keep"} {
+		if !strings.Contains(result, "unset req.http."+h+";") {
+			t.Errorf("vcl_recv should still strip removed header %s", h)
+		}
+	}
+	if !strings.Contains(result, "unset req.http.X-Ghost-Cache-Policy;") {
+		t.Error("vcl_recv should strip client-supplied X-Ghost-Cache-Policy")
+	}
+}
+
+func TestPreambleCapturesDirectiveInBackendFetch(t *testing.T) {
+	result := Generate()
+
+	start := strings.Index(result, "sub vcl_backend_fetch {")
+	if start < 0 {
+		t.Fatal("preamble should define vcl_backend_fetch")
+	}
+	end := strings.Index(result[start:], "\n}")
+	if end < 0 {
+		t.Fatal("unterminated vcl_backend_fetch")
+	}
+	body := result[start : start+end]
+	if !strings.Contains(body, "router.backend_fetch();") {
+		t.Error("vcl_backend_fetch should call router.backend_fetch() so X-Ghost-Cache-Policy never reaches the origin")
+	}
+}

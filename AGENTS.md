@@ -309,8 +309,13 @@ VCL subroutine boundaries (e.g., `vcl_recv` → `vcl_backend_response`).
 
 **Use headers only for cross-subroutine bridging** (values set in `vcl_recv` that must
 reach `vcl_backend_response` via `bereq`):
-- `X-Ghost-Default-TTL` / `X-Ghost-Forced-TTL` — TTL control
-- `X-Ghost-Grace` / `X-Ghost-Keep` — stale serving parameters
+- `X-Ghost-Cache-Policy` — JSON directive carrying the policy content key (`k`) and the
+  request rule mask (`m`). `router.backend_fetch()` (called in `vcl_backend_fetch`) moves
+  it off `bereq` into backend-task storage (PRIV_TASK, survives retries) so it never
+  reaches the origin. `router.backend_response()` (called in `vcl_backend_response`)
+  looks up the compiled policy by key (retained across reloads) and resolves
+  TTL/grace/keep/uncacheable from it plus the response status/headers; it also strips
+  the `X-Ghost-Synthetic` marker
 - `X-Ghost-Cache-Key-Extra` — additional hash data
 
 **Default cache behavior**: Without a VarnishCachePolicy, ghost sets `pass` on all
@@ -331,7 +336,7 @@ github.com/perbu/vclparser        # optional: VCL syntax validation
 VCL allows multiple definitions of the same subroutine - they get concatenated at compile time. We use this
 to avoid parsing user VCL:
 
-1. Generated VCL includes: ghost import, `vcl_init` (ghost.init, router creation), `vcl_recv` (ghost.recv), `vcl_backend_fetch` (router.backend)
+1. Generated VCL includes: ghost import, `vcl_init` (`ghost.init`, router creation), `vcl_recv` (`router.recv()`, plus reload/PURGE/BAN handling), `vcl_hash` (extra cache key data), `vcl_synth` (reload error header), `vcl_backend_fetch` (`router.backend_fetch()`), `vcl_backend_response` (`router.backend_response()`), `vcl_deliver` (`ghost.deliver()`)
 2. User VCL is appended after the generated VCL
 3. If user defines the same subroutines, their code runs *after* the gateway code
 

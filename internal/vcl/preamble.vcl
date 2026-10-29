@@ -24,14 +24,17 @@ sub vcl_recv {
     # the very first thing, before any routing or ghost producer runs. VCL has
     # no wildcard unset, so every name is enumerated explicitly.
     unset req.http.X-Ghost-Pass;
-    unset req.http.X-Ghost-Forced-TTL;
-    unset req.http.X-Ghost-Default-TTL;
-    unset req.http.X-Ghost-Grace;
-    unset req.http.X-Ghost-Keep;
+    unset req.http.X-Ghost-Cache-Policy;
     unset req.http.X-Ghost-Cache-Key-Extra;
     unset req.http.X-Ghost-Filter-Context;
     unset req.http.X-Ghost-Redirect-Config;
     unset req.http.X-Ghost-Error;
+    # Removed headers, still stripped for one release: user VCL written against
+    # the old contract may still read them. Ghost no longer sets them.
+    unset req.http.X-Ghost-Forced-TTL;
+    unset req.http.X-Ghost-Default-TTL;
+    unset req.http.X-Ghost-Grace;
+    unset req.http.X-Ghost-Keep;
     unset req.http.X-Gateway-Listener;
     unset req.http.X-Gateway-Route;
 
@@ -103,10 +106,11 @@ sub vcl_synth {
 
 sub vcl_backend_fetch {
     # Clean up internal headers before sending to backend.
-    # Cache policy headers (X-Ghost-*-TTL, Grace, Keep) are kept on bereq
-    # because vcl_backend_response needs to read them. They are cleaned up
-    # at the end of vcl_backend_response instead.
+    # router.backend_fetch() moves X-Ghost-Cache-Policy off bereq into
+    # backend-task storage (kept across retries) so it never reaches the
+    # origin; router.backend_response() reads it from there.
     unset bereq.http.X-Ghost-Pass;
+    router.backend_fetch();
 }
 
 sub vcl_backend_response {
@@ -120,37 +124,9 @@ sub vcl_backend_response {
         set beresp.http.X-Ghost-Filter-Context = bereq.http.X-Ghost-Filter-Context;
     }
 
-    # Apply cache policy: forced TTL overrides everything.
-    # Note: this only affects responses Varnish considers cacheable.
-    # beresp.uncacheable is write-once-to-true, so we cannot force-cache
-    # responses that Varnish has already marked uncacheable.
-    if (bereq.http.X-Ghost-Forced-TTL) {
-        set beresp.ttl = std.duration(bereq.http.X-Ghost-Forced-TTL, 0s);
-        unset beresp.http.Set-Cookie;
-        unset beresp.http.Cache-Control;
-        unset beresp.http.Expires;
-    }
-    # Apply cache policy: default TTL when origin has no Cache-Control
-    else if (bereq.http.X-Ghost-Default-TTL) {
-        if (!beresp.http.Cache-Control) {
-            set beresp.ttl = std.duration(bereq.http.X-Ghost-Default-TTL, 0s);
-        }
-    }
-
-    # Apply grace and keep from cache policy
-    if (bereq.http.X-Ghost-Grace) {
-        set beresp.grace = std.duration(bereq.http.X-Ghost-Grace, 0s);
-    }
-    if (bereq.http.X-Ghost-Keep) {
-        set beresp.keep = std.duration(bereq.http.X-Ghost-Keep, 0s);
-    }
-
-    # Clean up internal cache policy headers so they don't leak to the backend
-    # on retries or show up in beresp. Must happen after the TTL logic above.
-    unset bereq.http.X-Ghost-Default-TTL;
-    unset bereq.http.X-Ghost-Forced-TTL;
-    unset bereq.http.X-Ghost-Grace;
-    unset bereq.http.X-Ghost-Keep;
+    # Apply cache policy (TTL, grace, keep, uncacheable) from the directive
+    # captured by router.backend_fetch(), and strip internal markers.
+    router.backend_response();
 }
 
 sub vcl_deliver {
