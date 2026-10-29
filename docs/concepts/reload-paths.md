@@ -151,6 +151,28 @@ failures heal on the next update; persistent failures (e.g., a VCL
 syntax error introduced by user VCL) keep the gateway serving the last
 good configuration until the user corrects the input.
 
+On the ghost path, ghost compiles each route on its own, so one bad route
+cannot fail the whole reload. The operator does not validate regexes, and the
+API server accepts some patterns that the Rust `regex` crate rejects (for
+example `\Q...\E`, backreferences such as `\1`, nested classes such as
+`[[a-z]`, or `\w` repetitions that exceed Rust's compiled-size limit).
+Ghost handles a pattern it cannot compile as follows:
+
+- **Path, header or query parameter regex**: ghost drops the route. Requests
+  fall through to the remaining routes of the vhost, or get a 404. This is
+  the Gateway API's "drop invalid rules" behavior.
+- **VarnishCachePolicy bypass `valueRegex`**: the route keeps routing, but
+  ghost ignores its cache policy, so every request on that route is passed
+  instead of cached.
+
+Each degraded route is logged as an `Error` VSL record and on varnishd's
+stderr, which ends up in the chaperone log.
+
+If the ghost reload itself fails, chaperone retries in the background with
+backoff (500ms, 1s, 2s). Each attempt uses the newest routing config. If the
+routing config changes during the retries, the retry budget starts over. When
+the retries run out, chaperone exits and the pod restarts.
+
 A rolling restart that produces an unschedulable or crashing pod is
 handled by the Deployment's rolling update strategy in the usual way
 — the previous ReplicaSet stays up while the new one fails to make

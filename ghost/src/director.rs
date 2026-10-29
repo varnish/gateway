@@ -19,7 +19,10 @@ use varnish::vcl::{
 };
 
 use crate::backend_pool::BackendPool;
-use crate::config::{BackendGroup, Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
+use crate::config::{
+    BackendGroup, CachePolicy, Config, HeaderMatch, MatchType, PathMatch, PathMatchType,
+    QueryParamMatch, Route,
+};
 use crate::internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
@@ -35,6 +38,24 @@ pub struct WeightedBackendGroup {
     pub weight: u32,
     /// Backend pool keys ("address:port") within this group
     pub backends: Vec<String>,
+}
+
+/// Compile a regex, returning a single-line error that names the pattern.
+///
+/// The `regex` crate renders syntax errors over several lines (pattern, caret,
+/// description). Only the final description line is kept, since the pattern
+/// is already quoted, so the message fits on one VSL / log line.
+fn compile_regex(pattern: &str) -> Result<Regex, String> {
+    Regex::new(pattern).map_err(|e| {
+        let msg = e.to_string();
+        let summary = msg
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .unwrap_or("")
+            .to_string();
+        format!("invalid regex '{}': {}", pattern, summary)
+    })
 }
 
 /// Compiled path match for efficient matching
@@ -56,8 +77,7 @@ impl PathMatchCompiled {
                 // Note: In debug mode, regex compilation from Varnish worker threads
                 // causes a crash due to threading/TLS conflicts. This only affects
                 // debug builds; release builds work correctly.
-                let re = Regex::new(&pm.value)
-                    .map_err(|e| format!("Invalid regex pattern '{}': {}", pm.value, e))?;
+                let re = compile_regex(&pm.value)?;
                 Ok(PathMatchCompiled::Regex(Arc::new(re)))
             }
         }
@@ -100,8 +120,7 @@ impl HeaderMatchCompiled {
                 value: hm.value.clone(),
             }),
             MatchType::RegularExpression => {
-                let re = Regex::new(&hm.value)
-                    .map_err(|e| format!("Invalid regex '{}': {}", hm.value, e))?;
+                let re = compile_regex(&hm.value)?;
                 Ok(HeaderMatchCompiled::Regex {
                     name,
                     regex: Arc::new(re),
@@ -155,8 +174,7 @@ impl QueryParamMatchCompiled {
                 value: qpm.value.clone(),
             }),
             MatchType::RegularExpression => {
-                let re = Regex::new(&qpm.value)
-                    .map_err(|e| format!("Invalid regex '{}': {}", qpm.value, e))?;
+                let re = compile_regex(&qpm.value)?;
                 Ok(QueryParamMatchCompiled::Regex {
                     name: qpm.name.clone(),
                     regex: Arc::new(re),
@@ -250,10 +268,149 @@ fn resolve_backend_group(
     })
 }
 
+/// Match conditions and cache settings compiled from one config route.
+#[derive(Debug)]
+struct CompiledRoute {
+    path_match: Option<PathMatchCompiled>,
+    headers: Vec<HeaderMatchCompiled>,
+    query_params: Vec<QueryParamMatchCompiled>,
+    /// `None` when the route has no cache policy, or when its policy had to be
+    /// dropped because a bypass rule could not be compiled.
+    cache_policy: Option<CachePolicy>,
+    bypass_headers: Vec<BypassHeaderCompiled>,
+}
+
+/// Pre-compile a cache policy's bypass header rules (avoids per-request compilation).
+fn compile_bypass_headers(cp: &CachePolicy) -> Result<Vec<BypassHeaderCompiled>, String> {
+    cp.bypass_headers
+        .iter()
+        .map(|bh| match &bh.value_regex {
+            None => Ok(BypassHeaderCompiled::Present {
+                name: bh.name.clone(),
+            }),
+            Some(pattern) => {
+                let re = compile_regex(pattern)
+                    .map_err(|e| format!("invalid bypass header '{}': {}", bh.name, e))?;
+                Ok(BypassHeaderCompiled::Regex {
+                    name: bh.name.clone(),
+                    regex: Arc::new(re),
+                })
+            }
+        })
+        .collect()
+}
+
+/// Compile the regexes of one route.
+///
+/// Each route is compiled on its own so that a single pattern the `regex`
+/// crate rejects (the operator validates with Go `regexp` semantics, which
+/// differ) degrades only that route instead of failing the whole reload and
+/// taking every vhost down with it. The degradation depends on what failed:
+///
+/// - **Match condition** (path, header or query param regex): returns `Err`
+///   and the caller drops the route. Without the condition we cannot tell
+///   which requests the route was meant to catch, so serving it at all would
+///   either hijack traffic or guess. Dropping an invalid rule is what the
+///   Gateway API prescribes for partially invalid routes; requests fall
+///   through to the remaining routes of the vhost, or 404.
+/// - **Cache policy bypass rule**: the route keeps routing, but its cache
+///   policy is discarded so every request on it is passed (not cached).
+///   Bypass rules exist to keep requests (e.g. authenticated ones) out of the
+///   cache; when one can't be evaluated, caching nothing is the safe default
+///   and matches ghost's behavior for routes without a policy. The second
+///   tuple element carries the reason.
+fn compile_route(route: &Route) -> Result<(CompiledRoute, Option<String>), String> {
+    let path_match = route
+        .path_match
+        .as_ref()
+        .map(PathMatchCompiled::from_config)
+        .transpose()
+        .map_err(|e| format!("invalid path match: {}", e))?;
+
+    let headers = route
+        .headers
+        .iter()
+        .map(HeaderMatchCompiled::from_config)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("invalid header match: {}", e))?;
+
+    let query_params = route
+        .query_params
+        .iter()
+        .map(QueryParamMatchCompiled::from_config)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("invalid query param match: {}", e))?;
+
+    let (cache_policy, bypass_headers, warning) = match &route.cache_policy {
+        None => (None, Vec::new(), None),
+        Some(cp) => match compile_bypass_headers(cp) {
+            Ok(bypass) => (Some(cp.clone()), bypass, None),
+            Err(e) => (None, Vec::new(), Some(e)),
+        },
+    };
+
+    Ok((
+        CompiledRoute {
+            path_match,
+            headers,
+            query_params,
+            cache_policy,
+            bypass_headers,
+        },
+        warning,
+    ))
+}
+
+/// Compile every route of a vhost independently.
+///
+/// Returns the routes that survived compilation (paired with their config
+/// entry) and one message per degraded route. See [`compile_route`] for how
+/// each kind of failure degrades.
+fn compile_vhost_routes<'a>(
+    hostname: &str,
+    routes: &'a [Route],
+) -> (Vec<(&'a Route, CompiledRoute)>, Vec<String>) {
+    let mut kept = Vec::with_capacity(routes.len());
+    let mut problems = Vec::new();
+
+    for (i, route) in routes.iter().enumerate() {
+        let label = match &route.route_name {
+            Some(name) => format!("vhost {} route {} ({})", hostname, i, name),
+            None => format!("vhost {} route {}", hostname, i),
+        };
+        match compile_route(route) {
+            Ok((compiled, None)) => kept.push((route, compiled)),
+            Ok((compiled, Some(warning))) => {
+                problems.push(format!(
+                    "ghost: {}: {}; cache policy ignored, requests on this route are passed",
+                    label, warning
+                ));
+                kept.push((route, compiled));
+            }
+            Err(e) => problems.push(format!("ghost: {}: {}; route dropped", label, e)),
+        }
+    }
+
+    (kept, problems)
+}
+
+/// Report a degraded route both to VSL and to stderr. varnishd relays child
+/// stderr to its own log ("Child said ..."), so the message shows up in the
+/// chaperone pod logs too, not only in varnishlog.
+fn report_degraded_route(ctx: &mut Ctx, msg: &str) {
+    use std::io::Write;
+    ctx.log(LogTag::Error, msg);
+    let _ = writeln!(std::io::stderr(), "{}", msg);
+}
+
 /// Build vhost directors from configuration
 ///
 /// Creates a VhostDirector for each vhost in the config. Each director handles
 /// route matching and backend selection for its hostname.
+///
+/// Routes whose regexes fail to compile are degraded individually (see
+/// [`compile_route`]) rather than failing the build; only backend creation
+/// errors abort it.
 pub fn build_vhost_directors(
     config: &Config,
     backend_pool: &mut BackendPool,
@@ -269,86 +426,34 @@ pub fn build_vhost_directors(
 
     // Process vhosts
     for (hostname, vhost) in &config.vhosts {
-        let mut route_entries = Vec::new();
+        let (compiled_routes, problems) = compile_vhost_routes(hostname, &vhost.routes);
+        for msg in &problems {
+            report_degraded_route(ctx, msg);
+        }
 
-        // Process each route in the vhost
-        for route in &vhost.routes {
+        let mut route_entries = Vec::with_capacity(compiled_routes.len());
+
+        // Resolve backends only for routes that survived compilation, so a
+        // dropped route doesn't keep backends alive in the pool.
+        for (route, compiled) in compiled_routes {
             let mut groups = Vec::new();
-
             for group in &route.backend_groups {
                 groups.push(resolve_backend_group(ctx, backend_pool, group)?);
             }
 
-            let path_match = match route.path_match.as_ref() {
-                Some(pm) => Some(
-                    PathMatchCompiled::from_config(pm)
-                        .map_err(|e| VclError::new(format!("Invalid path match: {}", e)))?,
-                ),
-                None => None,
-            };
-
-            // Compile header matches
-            let headers: Result<Vec<_>, _> = route
-                .headers
-                .iter()
-                .map(HeaderMatchCompiled::from_config)
-                .collect();
-            let headers =
-                headers.map_err(|e| VclError::new(format!("Invalid header match: {}", e)))?;
-
-            // Compile query param matches
-            let query_params: Result<Vec<_>, _> = route
-                .query_params
-                .iter()
-                .map(QueryParamMatchCompiled::from_config)
-                .collect();
-            let query_params = query_params
-                .map_err(|e| VclError::new(format!("Invalid query param match: {}", e)))?;
-
-            let filters = route.filters.as_ref().map(|f| Arc::new(f.clone()));
-
-            // Pre-compile bypass header regexes (avoids per-request compilation)
-            let bypass_headers = match &route.cache_policy {
-                Some(cp) => {
-                    let compiled: Result<Vec<_>, String> = cp
-                        .bypass_headers
-                        .iter()
-                        .map(|bh| match &bh.value_regex {
-                            None => Ok(BypassHeaderCompiled::Present {
-                                name: bh.name.clone(),
-                            }),
-                            Some(pattern) => {
-                                let re = Regex::new(pattern).map_err(|e| {
-                                    format!(
-                                        "Invalid bypass header regex '{}': {}",
-                                        pattern, e
-                                    )
-                                })?;
-                                Ok(BypassHeaderCompiled::Regex {
-                                    name: bh.name.clone(),
-                                    regex: Arc::new(re),
-                                })
-                            }
-                        })
-                        .collect();
-                    compiled.map_err(VclError::new)?
-                }
-                None => Vec::new(),
-            };
-
             route_entries.push(RouteEntry {
-                path_match,
+                path_match: compiled.path_match,
                 method: route.method.clone(),
-                headers,
-                query_params,
-                filters,
+                headers: compiled.headers,
+                query_params: compiled.query_params,
+                filters: route.filters.as_ref().map(|f| Arc::new(f.clone())),
                 backend_groups: groups,
                 listeners: route.listeners.clone(),
                 route_name: route.route_name.clone(),
                 priority: route.priority,
                 rule_index: route.rule_index,
-                cache_policy: route.cache_policy.clone(),
-                bypass_headers,
+                cache_policy: compiled.cache_policy,
+                bypass_headers: compiled.bypass_headers,
             });
         }
 
@@ -523,7 +628,6 @@ impl GhostDirectorBundle {
 }
 
 impl GhostDirector {
-
     /// Reload configuration from disk into this instance only.
     ///
     /// Use [`GhostDirector::reload_and_publish`] for an externally triggered
@@ -638,10 +742,12 @@ impl GhostDirector {
         let directors = self.vhost_directors.load();
         let vhost = match match_hostname(&directors, &host) {
             Some(dir) => dir,
-            None => return vhost_director::RouteRequestResult {
-                backend: Some(self.not_found_backend.0.clone()),
-                ..Default::default()
-            },
+            None => {
+                return vhost_director::RouteRequestResult {
+                    backend: Some(self.not_found_backend.0.clone()),
+                    ..Default::default()
+                }
+            }
         };
 
         let mut result = vhost.route_request(http, listener);
@@ -1010,6 +1116,166 @@ mod tests {
         // Invalid regex should return an error
         let result = PathMatchCompiled::from_config(&pm);
         assert!(result.is_err());
+    }
+
+    /// Patterns from issue #104 that Go `regexp` (and so the operator) accepts
+    /// but the Rust `regex` crate rejects.
+    const GO_ONLY_PATTERNS: &[&str] = &[
+        r"^/[\w.-]{1,255}$",
+        r"^[\w-]{300}$",
+        r"^[[a-z]+$",
+        r"[[]",
+        r"\Q.\E",
+        r"\0",
+        r"\101",
+        r"(",
+    ];
+
+    #[test]
+    fn test_go_only_patterns_rejected_by_regex_crate() {
+        for pattern in GO_ONLY_PATTERNS {
+            assert!(
+                Regex::new(pattern).is_err(),
+                "expected regex crate to reject {:?}",
+                pattern
+            );
+        }
+    }
+
+    #[test]
+    fn test_compile_regex_error_is_single_line() {
+        for pattern in GO_ONLY_PATTERNS {
+            let err = compile_regex(pattern).expect_err("pattern should be rejected");
+            assert!(!err.contains('\n'), "multi-line error: {:?}", err);
+            assert!(
+                err.starts_with(&format!("invalid regex '{}': ", pattern)),
+                "unexpected error: {}",
+                err
+            );
+            // Something beyond the prefix must describe the failure.
+            assert!(err.len() > format!("invalid regex '{}': ", pattern).len());
+        }
+        assert!(compile_regex("^/ok$").is_ok());
+    }
+
+    fn route_from_json(json: serde_json::Value) -> Route {
+        serde_json::from_value(json).expect("route JSON should deserialize")
+    }
+
+    fn backend_groups_json() -> serde_json::Value {
+        serde_json::json!([{"weight": 100, "backends": [{"address": "10.0.0.1", "port": 8080}]}])
+    }
+
+    #[test]
+    fn test_compile_vhost_routes_drops_only_routes_with_bad_match_regex() {
+        let mut routes = vec![route_from_json(serde_json::json!({
+            "route_name": "default/good-prefix",
+            "path_match": {"type": "PathPrefix", "value": "/api"},
+            "backend_groups": backend_groups_json(),
+            "priority": 100,
+        }))];
+        for (i, pattern) in GO_ONLY_PATTERNS.iter().enumerate() {
+            // Spread the bad patterns over all three match kinds.
+            let route = match i % 3 {
+                0 => serde_json::json!({
+                    "route_name": format!("default/bad-path-{}", i),
+                    "path_match": {"type": "RegularExpression", "value": pattern},
+                    "backend_groups": backend_groups_json(),
+                    "priority": 200,
+                }),
+                1 => serde_json::json!({
+                    "route_name": format!("default/bad-header-{}", i),
+                    "headers": [{"name": "X-Foo", "value": pattern, "type": "RegularExpression"}],
+                    "backend_groups": backend_groups_json(),
+                    "priority": 200,
+                }),
+                _ => serde_json::json!({
+                    "route_name": format!("default/bad-query-{}", i),
+                    "query_params": [{"name": "q", "value": pattern, "type": "RegularExpression"}],
+                    "backend_groups": backend_groups_json(),
+                    "priority": 200,
+                }),
+            };
+            routes.push(route_from_json(route));
+        }
+        routes.push(route_from_json(serde_json::json!({
+            "route_name": "default/good-regex",
+            "path_match": {"type": "RegularExpression", "value": r"^/files/\d+$"},
+            "headers": [{"name": "X-Env", "value": "^prod$", "type": "RegularExpression"}],
+            "backend_groups": backend_groups_json(),
+            "priority": 300,
+        })));
+
+        let (kept, problems) = compile_vhost_routes("api.example.com", &routes);
+
+        let kept_names: Vec<_> = kept
+            .iter()
+            .map(|(r, _)| r.route_name.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            kept_names,
+            vec!["default/good-prefix", "default/good-regex"]
+        );
+        assert_eq!(problems.len(), GO_ONLY_PATTERNS.len());
+        for msg in &problems {
+            assert!(msg.contains("route dropped"), "unexpected message: {}", msg);
+            assert!(
+                msg.contains("api.example.com"),
+                "unexpected message: {}",
+                msg
+            );
+        }
+
+        // The surviving regex route is fully compiled and usable.
+        let (_, good) = &kept[1];
+        assert!(good.path_match.as_ref().unwrap().matches("/files/42"));
+        assert_eq!(good.headers.len(), 1);
+    }
+
+    #[test]
+    fn test_compile_route_bad_bypass_regex_disables_caching_only() {
+        let routes = vec![
+            route_from_json(serde_json::json!({
+                "route_name": "default/bad-bypass",
+                "path_match": {"type": "PathPrefix", "value": "/private"},
+                "backend_groups": backend_groups_json(),
+                "priority": 100,
+                "cache_policy": {
+                    "default_ttl_seconds": 60,
+                    "bypass_headers": [
+                        {"name": "Authorization"},
+                        {"name": "Cookie", "value_regex": r"\Qsession\E"}
+                    ]
+                }
+            })),
+            route_from_json(serde_json::json!({
+                "route_name": "default/good-cache",
+                "path_match": {"type": "PathPrefix", "value": "/public"},
+                "backend_groups": backend_groups_json(),
+                "priority": 100,
+                "cache_policy": {
+                    "default_ttl_seconds": 60,
+                    "bypass_headers": [{"name": "Cookie", "value_regex": "session="}]
+                }
+            })),
+        ];
+
+        let (kept, problems) = compile_vhost_routes("www.example.com", &routes);
+
+        // Both routes still route; only the bad one loses its cache policy.
+        assert_eq!(kept.len(), 2);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("default/bad-bypass"));
+        assert!(problems[0].contains("requests on this route are passed"));
+
+        let (_, bad) = &kept[0];
+        assert!(bad.cache_policy.is_none());
+        assert!(bad.bypass_headers.is_empty());
+        assert!(bad.path_match.as_ref().unwrap().matches("/private/x"));
+
+        let (_, good) = &kept[1];
+        assert!(good.cache_policy.is_some());
+        assert_eq!(good.bypass_headers.len(), 1);
     }
 
     #[test]

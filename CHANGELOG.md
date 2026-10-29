@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than a push). No effect on the current single-VCL deployment; this is
   groundwork for per-route VCL.
 
+- **A regex that ghost cannot compile no longer crash-loops the gateway
+  (#104).** The API server accepts some regexes that the Rust `regex` crate
+  rejects, such as `\Q...\E`, backreferences, nested classes, and large `\w`
+  repetitions. Before this fix, one such pattern failed the whole `ghost.json`
+  reload. Chaperone then exited, and every pod crash-looped until the resource
+  was fixed. Ghost now compiles each route on its own and logs any failure. A
+  route with a bad path, header or query parameter regex is dropped. A route
+  with a bad VarnishCachePolicy bypass `valueRegex` keeps routing but is no
+  longer cached. Chaperone also no longer runs reload retries inside the
+  informer callback, which blocked that callback. Each retry now uses the
+  latest routing config, so a corrected ConfigMap is picked up instead of the
+  stale one.
+
+- **Ghost length limits now count characters, not bytes (#105).** The path
+  regex (1024), header value (4096) and query parameter value (1024) limits
+  now count characters, like the Gateway API CRD `maxLength`. Before this
+  fix, a non-ASCII value that passed API validation could still fail the
+  ghost reload.
+
 ## [v0.24.0 - 2026-10-17]
 
 ### Changed

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -835,5 +836,204 @@ func TestWatcherReloadSuccessDoesNotExit(t *testing.T) {
 		// Good - watcher is still running
 		t.Log("watcher still running after successful reload - test passed")
 		cancel() // Clean up
+	}
+}
+
+// routingConfigMap builds the watcher's ConfigMap with a single-route
+// routing.json for hostname.
+func routingConfigMap(t *testing.T, hostname string) *corev1.ConfigMap {
+	t.Helper()
+	data, err := json.Marshal(&RoutingConfig{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
+			hostname: {
+				Routes: []Route{{
+					PathMatch: &PathMatch{Type: PathMatchPathPrefix, Value: "/"},
+					Service:   "test-service",
+					Namespace: "default",
+					Port:      8080,
+					Weight:    100,
+					Priority:  100,
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-configmap", Namespace: "default"},
+		Data:       map[string]string{"routing.json": string(data)},
+	}
+}
+
+// TestWatcherRetryPicksUpCorrectedConfigMap reproduces issue #104 on the
+// chaperone side: a ConfigMap that ghost refuses to load is followed by a
+// corrected one while chaperone is still retrying. The ConfigMap informer
+// callback must not be blocked by the retries, and the next retry must use
+// the corrected routing config instead of the stale one, so the watcher
+// recovers rather than exiting.
+func TestWatcherRetryPicksUpCorrectedConfigMap(t *testing.T) {
+	ghostConfigPath := filepath.Join(t.TempDir(), "ghost.json")
+	client := fake.NewSimpleClientset(routingConfigMap(t, "good.example.com"))
+
+	var badReloads, goodReloadsAfterFix atomic.Int32
+	var fixed atomic.Bool
+	recovered := make(chan struct{})
+	reloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.varnish-ghost/reload" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		content, err := os.ReadFile(ghostConfigPath)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if strings.Contains(string(content), "bad.example.com") {
+			// Ghost rejects this config. On the first rejection, fix the
+			// ConfigMap; the informer has to deliver it during the backoff.
+			if badReloads.Add(1) == 1 {
+				fix := routingConfigMap(t, "fixed.example.com")
+				if _, err := client.CoreV1().ConfigMaps("default").Update(
+					context.Background(), fix, metav1.UpdateOptions{}); err != nil {
+					t.Errorf("ConfigMaps.Update: %v", err)
+				}
+				fixed.Store(true)
+			}
+			w.Header().Set("x-ghost-error", "invalid regex")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if fixed.Load() && strings.Contains(string(content), "fixed.example.com") {
+			if goodReloadsAfterFix.Add(1) == 1 {
+				close(recovered)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer reloadServer.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	watcher := NewWatcher(client, ghostConfigPath, strings.TrimPrefix(reloadServer.URL, "http://"),
+		"default", "test-configmap", logger)
+	// Three retries spanning 3s: before the fix, the corrected ConfigMap was
+	// only processed after the blocked callback gave up and went fatal.
+	watcher.retryBackoffs = []time.Duration{time.Second, time.Second, time.Second}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	varnishReady := make(chan struct{})
+	close(varnishReady)
+	errCh := make(chan error, 1)
+	go func() { errCh <- watcher.Run(ctx, varnishReady) }()
+
+	select {
+	case <-watcher.Ready():
+	case err := <-errCh:
+		t.Fatalf("watcher exited before becoming ready: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher did not become ready")
+	}
+
+	// Push the config ghost will reject.
+	if _, err := client.CoreV1().ConfigMaps("default").Update(
+		ctx, routingConfigMap(t, "bad.example.com"), metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("ConfigMaps.Update: %v", err)
+	}
+
+	select {
+	case <-recovered:
+	case err := <-errCh:
+		t.Fatalf("watcher exited instead of picking up the corrected ConfigMap: %v", err)
+	case <-time.After(2500 * time.Millisecond):
+		t.Fatalf("corrected ConfigMap not reloaded within one backoff (bad reloads: %d)", badReloads.Load())
+	}
+	if n := badReloads.Load(); n != 1 {
+		t.Errorf("expected exactly one rejected reload before recovery, got %d", n)
+	}
+
+	// The watcher must still be running.
+	select {
+	case err := <-errCh:
+		t.Fatalf("watcher exited after recovery: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestRegenerateRetryBudgetResetsOnRoutingChange verifies that a routing
+// config change during the retry backoff restarts the retry budget, while a
+// config that keeps failing still ends in a fatal error.
+func TestRegenerateRetryBudgetResetsOnRoutingChange(t *testing.T) {
+	var reloads atomic.Int32
+	var watcher *Watcher
+	reloadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Replace the routing config during the first attempt, as an
+		// informer callback would while the retry loop is backing off.
+		if reloads.Add(1) == 1 {
+			watcher.handleConfigMapUpdate(context.Background(), routingConfigMap(t, "second.example.com"))
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer reloadServer.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	watcher = NewWatcher(fake.NewSimpleClientset(), filepath.Join(t.TempDir(), "ghost.json"),
+		strings.TrimPrefix(reloadServer.URL, "http://"), "default", "test-configmap", logger)
+	watcher.retryBackoffs = []time.Duration{50 * time.Millisecond}
+	watcher.handleConfigMapUpdate(context.Background(), routingConfigMap(t, "first.example.com"))
+	watcher.mu.Lock()
+	watcher.initialSyncDone = true
+	watcher.mu.Unlock()
+
+	watcher.regenerateConfigWithRetry(context.Background())
+
+	// Without a change: 1 attempt + 1 retry. The change during the first
+	// backoff grants the new config its own attempt + retry: 3 in total.
+	if n := reloads.Load(); n != 3 {
+		t.Errorf("expected 3 reload attempts, got %d", n)
+	}
+	select {
+	case err := <-watcher.fatalErrCh:
+		if err == nil || !strings.Contains(err.Error(), "ghost reload failed") {
+			t.Errorf("unexpected fatal error: %v", err)
+		}
+	default:
+		t.Fatal("expected a fatal error once the retry budget was exhausted")
+	}
+}
+
+// TestRequestRegenerateNeverBlocks verifies that informer callbacks only
+// enqueue regeneration (coalescing duplicates) instead of running it inline.
+func TestRequestRegenerateNeverBlocks(t *testing.T) {
+	watcher := NewWatcher(fake.NewSimpleClientset(), filepath.Join(t.TempDir(), "ghost.json"),
+		"127.0.0.1:1", "default", "test-configmap", nil)
+	watcher.handleConfigMapUpdate(context.Background(), routingConfigMap(t, "a.example.com"))
+	watcher.mu.Lock()
+	watcher.initialSyncDone = true
+	watcher.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// No worker is running, so any inline reload attempt against the
+		// unreachable address would retry for seconds.
+		watcher.handleConfigMapUpdate(context.Background(), routingConfigMap(t, "b.example.com"))
+		watcher.handleConfigMapUpdate(context.Background(), routingConfigMap(t, "c.example.com"))
+		watcher.requestRegenerate()
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ConfigMap update handling blocked")
+	}
+	if n := len(watcher.regenCh); n != 1 {
+		t.Errorf("expected requests to coalesce into 1 pending, got %d", n)
+	}
+	watcher.mu.RLock()
+	_, latest := watcher.routingConfig.VHosts["c.example.com"]
+	watcher.mu.RUnlock()
+	if !latest {
+		t.Error("expected the latest ConfigMap to be the current routing config")
 	}
 }
