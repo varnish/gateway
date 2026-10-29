@@ -1,0 +1,164 @@
+varnishtest "ghost degrades only routes whose regex fails to compile"
+
+# A regex the operator accepts (Go regexp) but the Rust regex crate rejects
+# must not fail the whole reload. Routes with an uncompilable match regex are
+# dropped; a route with an uncompilable cache bypass regex keeps routing but
+# is passed (its cache policy is ignored). Everything else keeps working.
+
+server s1 {
+    rxreq
+    expect req.url == "/good"
+    txresp -body "good"
+} -start
+
+server s2 {
+    rxreq
+    expect req.url == "/private"
+    txresp -body "private"
+} -start
+
+server s3 {
+    rxreq
+    expect req.url == "/public"
+    txresp -body "public"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "api.example.com": {
+            "routes": [
+                {
+                    "route_name": "default/bad-path",
+                    "path_match": {"type": "RegularExpression", "value": "("},
+                    "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 9}]}],
+                    "priority": 300
+                },
+                {
+                    "route_name": "default/bad-header",
+                    "headers": [{"name": "X-Foo", "value": "[[]", "type": "RegularExpression"}],
+                    "backend_groups": [{"weight": 100, "backends": [{"address": "127.0.0.1", "port": 9}]}],
+                    "priority": 200
+                },
+                {
+                    "route_name": "default/good",
+                    "path_match": {"type": "PathPrefix", "value": "/good"},
+                    "backend_groups": [{"weight": 100, "backends": [{"address": "${s1_addr}", "port": ${s1_port}}]}],
+                    "priority": 100
+                },
+                {
+                    "route_name": "default/bad-bypass",
+                    "path_match": {"type": "PathPrefix", "value": "/private"},
+                    "backend_groups": [{"weight": 100, "backends": [{"address": "${s2_addr}", "port": ${s2_port}}]}],
+                    "priority": 100,
+                    "cache_policy": {
+                        "default_ttl_seconds": 60,
+                        "bypass_headers": [{"name": "Cookie", "value_regex": "(unclosed"}]
+                    }
+                },
+                {
+                    "route_name": "default/good-cache",
+                    "path_match": {"type": "PathPrefix", "value": "/public"},
+                    "backend_groups": [{"weight": 100, "backends": [{"address": "${s3_addr}", "port": ${s3_port}}]}],
+                    "priority": 100,
+                    "cache_policy": {
+                        "default_ttl_seconds": 60,
+                        "bypass_headers": [{"name": "Cookie", "value_regex": "session="}]
+                    }
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        new router = ghost.ghost_backend("${tmpdir}/ghost.json");
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                set req.http.X-Ghost-Error = router.last_error();
+                return (synth(500, "Reload failed"));
+            }
+        }
+        unset req.http.X-Ghost-Pass;
+        set req.backend_hint = router.recv();
+        if (req.http.X-Ghost-Pass == "true") {
+            return (pass);
+        }
+    }
+
+    sub vcl_deliver {
+        if (req.http.X-Ghost-Pass) {
+            set resp.http.X-Pass = req.http.X-Ghost-Pass;
+        }
+        set resp.http.X-Route = req.http.X-Gateway-Route;
+    }
+
+    sub vcl_synth {
+        if (req.url == "/.varnish-ghost/reload") {
+            set resp.http.X-Ghost-Error = req.http.X-Ghost-Error;
+        }
+    }
+} -start
+
+logexpect l1 -v v1 -g raw {
+    expect * * Error "default/bad-path.*invalid path match.*route dropped"
+    expect * * Error "default/bad-header.*invalid header match.*route dropped"
+} -start
+
+logexpect l2 -v v1 -g raw {
+    expect * * Error "default/bad-bypass.*invalid bypass header .Cookie.: invalid regex.*requests on this route are passed"
+} -start
+
+# The reload succeeds despite the bad routes.
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+logexpect l1 -wait
+logexpect l2 -wait
+
+# The higher-priority bad routes are gone, so the good route serves /good,
+# even with the header the dropped header route would have matched on.
+client c1 {
+    txreq -url "/good" -hdr "Host: api.example.com" -hdr "X-Foo: bar"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "good"
+    expect resp.http.X-Route == "default/good"
+} -run
+
+# The route with the bad bypass regex still routes, but is passed.
+client c2 {
+    txreq -url "/private" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "private"
+    expect resp.http.X-Route == "default/bad-bypass"
+    expect resp.http.X-Pass == "true"
+} -run
+
+# The healthy cache policy on the neighbouring route is untouched.
+client c3 {
+    txreq -url "/public" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "public"
+    expect resp.http.X-Route == "default/good-cache"
+    expect resp.http.X-Pass == <undef>
+} -run

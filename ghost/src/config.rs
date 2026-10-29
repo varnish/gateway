@@ -279,6 +279,18 @@ impl Config {
     }
 }
 
+/// Length limits mirror the Gateway API CRD `maxLength` values, which the API
+/// server enforces in characters (Unicode code points), not bytes. Counting
+/// bytes here would reject non-ASCII values the API server accepted.
+const MAX_PATH_REGEX_CHARS: usize = 1024;
+const MAX_HEADER_VALUE_CHARS: usize = 4096;
+const MAX_QUERY_PARAM_VALUE_CHARS: usize = 1024;
+
+/// Length of `s` in characters, matching how CRD `maxLength` is counted.
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
 /// Catch config errors early rather than failing at request time.
 fn validate(config: &Config) -> Result<(), String> {
     if config.version != 2 {
@@ -319,10 +331,7 @@ fn validate(config: &Config) -> Result<(), String> {
         }
 
         for (g, group) in vhost.default_backends.iter().enumerate() {
-            validate_backend_group(
-                &format!("{} default_backends group {}", hostname, g),
-                group,
-            )?;
+            validate_backend_group(&format!("{} default_backends group {}", hostname, g), group)?;
         }
     }
 
@@ -374,7 +383,10 @@ fn validate_backend_group(context: &str, group: &BackendGroup) -> Result<(), Str
             ));
         }
         if ep.hostname.is_empty() {
-            return Err(format!("{}: external_proxy.hostname cannot be empty", context));
+            return Err(format!(
+                "{}: external_proxy.hostname cannot be empty",
+                context
+            ));
         }
         if ep.port == 0 {
             return Err(format!("{}: external_proxy.port cannot be 0", context));
@@ -425,12 +437,12 @@ fn validate_path_match(path_match: &PathMatch, context: &str) -> Result<(), Stri
             }
         }
         PathMatchType::RegularExpression => {
-            // Regex patterns have a max length
-            if path_match.value.len() > 1024 {
+            // Regex patterns have a max length (in characters, as the CRD counts)
+            let len = char_len(&path_match.value);
+            if len > MAX_PATH_REGEX_CHARS {
                 return Err(format!(
-                    "{}: regex pattern too long ({} chars, max 1024)",
-                    context,
-                    path_match.value.len()
+                    "{}: regex pattern too long ({} chars, max {})",
+                    context, len, MAX_PATH_REGEX_CHARS
                 ));
             }
             // IMPORTANT: Don't compile regex here!
@@ -471,11 +483,11 @@ fn validate_header_match(header: &HeaderMatch, context: &str) -> Result<(), Stri
     if header.value.is_empty() {
         return Err(format!("{}: header value cannot be empty", context));
     }
-    if header.value.len() > 4096 {
+    let len = char_len(&header.value);
+    if len > MAX_HEADER_VALUE_CHARS {
         return Err(format!(
-            "{}: header value too long ({} chars, max 4096)",
-            context,
-            header.value.len()
+            "{}: header value too long ({} chars, max {})",
+            context, len, MAX_HEADER_VALUE_CHARS
         ));
     }
     if header.match_type == MatchType::RegularExpression {
@@ -492,11 +504,11 @@ fn validate_query_param_match(qp: &QueryParamMatch, context: &str) -> Result<(),
     if qp.value.is_empty() {
         return Err(format!("{}: query param value cannot be empty", context));
     }
-    if qp.value.len() > 1024 {
+    let len = char_len(&qp.value);
+    if len > MAX_QUERY_PARAM_VALUE_CHARS {
         return Err(format!(
-            "{}: query param value too long ({} chars, max 1024)",
-            context,
-            qp.value.len()
+            "{}: query param value too long ({} chars, max {})",
+            context, len, MAX_QUERY_PARAM_VALUE_CHARS
         ));
     }
     if qp.match_type == MatchType::RegularExpression {
@@ -803,7 +815,10 @@ mod tests {
 
         let config = load(file.path()).unwrap();
         let group = &config.vhosts["media.example.com"].routes[0].backend_groups[0];
-        let ep = group.external_proxy.as_ref().expect("expected external_proxy");
+        let ep = group
+            .external_proxy
+            .as_ref()
+            .expect("expected external_proxy");
         assert_eq!(ep.hostname, "web2026-assets.s3.nl-ams.scw.cloud");
         assert_eq!(ep.port, 443);
         assert!(ep.tls);
@@ -860,7 +875,94 @@ mod tests {
             }"#,
         );
         let err = load(file.path()).expect_err("expected validation error");
-        assert!(err.contains("hostname cannot be empty"), "unexpected error: {}", err);
+        assert!(
+            err.contains("hostname cannot be empty"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    /// Build a one-route config around `route_extra` (path_match / headers /
+    /// query_params JSON fragment).
+    fn config_with_route(route_extra: serde_json::Value) -> String {
+        let mut route = serde_json::json!({
+            "backend_groups": [{"weight": 100, "backends": [{"address": "10.0.0.1", "port": 80}]}],
+            "priority": 100
+        });
+        for (k, v) in route_extra.as_object().unwrap() {
+            route[k] = v.clone();
+        }
+        serde_json::json!({
+            "version": 2,
+            "vhosts": {"example.com": {"routes": [route]}}
+        })
+        .to_string()
+    }
+
+    fn path_regex_config(value: &str) -> String {
+        config_with_route(serde_json::json!({
+            "path_match": {"type": "RegularExpression", "value": value}
+        }))
+    }
+
+    fn header_config(value: &str) -> String {
+        config_with_route(serde_json::json!({
+            "headers": [{"name": "X-Foo", "value": value, "type": "Exact"}]
+        }))
+    }
+
+    fn query_param_config(value: &str) -> String {
+        config_with_route(serde_json::json!({
+            "query_params": [{"name": "q", "value": value, "type": "Exact"}]
+        }))
+    }
+
+    /// `n` copies of a 3-byte character: n chars, 3n bytes.
+    fn multibyte(n: usize) -> String {
+        "€".repeat(n)
+    }
+
+    #[test]
+    fn test_length_limits_count_characters_not_bytes() {
+        type BuildConfig = fn(&str) -> String;
+        let cases: [(&str, BuildConfig, usize); 3] = [
+            ("path regex", path_regex_config, MAX_PATH_REGEX_CHARS),
+            ("header value", header_config, MAX_HEADER_VALUE_CHARS),
+            (
+                "query param value",
+                query_param_config,
+                MAX_QUERY_PARAM_VALUE_CHARS,
+            ),
+        ];
+        for (what, build, limit) in cases {
+            // At the limit in characters but well over it in bytes: accepted,
+            // since the CRD maxLength (characters) accepted it too.
+            let at_limit = multibyte(limit);
+            assert!(at_limit.len() > limit);
+            let file = write_config(&build(&at_limit));
+            if let Err(e) = load(file.path()) {
+                panic!("{} of {} chars should be accepted: {}", what, limit, e);
+            }
+
+            // One character over: rejected, and the message reports characters.
+            let over = multibyte(limit + 1);
+            let file = write_config(&build(&over));
+            let err = load(file.path()).expect_err("value over the limit should be rejected");
+            assert!(
+                err.contains(&format!("({} chars, max {})", limit + 1, limit)),
+                "{}: unexpected error: {}",
+                what,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn test_char_len() {
+        assert_eq!(char_len(""), 0);
+        assert_eq!(char_len("abc"), 3);
+        assert_eq!(char_len("é"), 1);
+        assert_eq!(char_len("€uro"), 4);
     }
 
     #[test]
