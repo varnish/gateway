@@ -443,6 +443,40 @@ func TestIsVCPAccepted(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "accepted condition true but stale generation",
+			vcp: &gatewayparamsv1alpha1.VarnishCachePolicy{
+				ObjectMeta: metav1.ObjectMeta{Generation: 3},
+				Status: gatewayparamsv1alpha1.VarnishCachePolicyStatus{
+					Ancestors: []gatewayparamsv1alpha1.VarnishCachePolicyAncestorStatus{
+						{
+							ControllerName: "varnish",
+							Conditions: []metav1.Condition{
+								{Type: "Accepted", Status: metav1.ConditionTrue, ObservedGeneration: 2},
+							},
+						},
+					},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "accepted condition true with matching generation",
+			vcp: &gatewayparamsv1alpha1.VarnishCachePolicy{
+				ObjectMeta: metav1.ObjectMeta{Generation: 3},
+				Status: gatewayparamsv1alpha1.VarnishCachePolicyStatus{
+					Ancestors: []gatewayparamsv1alpha1.VarnishCachePolicyAncestorStatus{
+						{
+							ControllerName: "varnish",
+							Conditions: []metav1.Condition{
+								{Type: "Accepted", Status: metav1.ConditionTrue, ObservedGeneration: 3},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
 			name: "accepted condition false",
 			vcp: &gatewayparamsv1alpha1.VarnishCachePolicy{
 				Status: gatewayparamsv1alpha1.VarnishCachePolicyStatus{
@@ -1096,6 +1130,35 @@ func TestResolveCachePolicyForRoute(t *testing.T) {
 		cp := ResolveCachePolicyForRoute(context.Background(), c, route, gateway, "")
 		if cp != nil {
 			t.Fatal("expected nil, got policy")
+		}
+	})
+
+	t.Run("stale-generation VCP is ignored", func(t *testing.T) {
+		vcp := makeAcceptedVCP("gw-vcp", gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef:  vcpTargetRef("Gateway", "my-gw", nil),
+			DefaultTTL: durationPtr(120 * time.Second),
+		}, metav1.Now())
+		// Spec edited after the Accepted condition was recorded.
+		vcp.Generation = 2
+		vcp.Status.Ancestors[0].Conditions[0].ObservedGeneration = 1
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(vcp).Build()
+		if cp := ResolveCachePolicyForRoute(context.Background(), c, route, gateway, ""); cp != nil {
+			t.Fatalf("expected nil for stale-generation VCP, got %+v", cp)
+		}
+	})
+
+	t.Run("current-generation VCP applies", func(t *testing.T) {
+		vcp := makeAcceptedVCP("gw-vcp", gatewayparamsv1alpha1.VarnishCachePolicySpec{
+			TargetRef:  vcpTargetRef("Gateway", "my-gw", nil),
+			DefaultTTL: durationPtr(120 * time.Second),
+		}, metav1.Now())
+		vcp.Generation = 2
+		vcp.Status.Ancestors[0].Conditions[0].ObservedGeneration = 2
+
+		c := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(vcp).Build()
+		if cp := ResolveCachePolicyForRoute(context.Background(), c, route, gateway, ""); cp == nil {
+			t.Fatal("expected policy for current-generation VCP, got nil")
 		}
 	})
 

@@ -461,11 +461,14 @@ func ResolveCachePolicyForRoute(ctx context.Context, c client.Client, route *gat
 	return specToCachePolicy(&winner.Spec)
 }
 
-// isVCPAccepted checks if a VCP has been accepted (status condition).
+// isVCPAccepted checks if a VCP has been accepted (status condition) for its
+// current spec. A condition whose ObservedGeneration lags vcp.Generation is
+// stale (the spec was edited and not yet revalidated) and is not trusted.
 func isVCPAccepted(vcp *gatewayparamsv1alpha1.VarnishCachePolicy) bool {
 	for _, ancestor := range vcp.Status.Ancestors {
 		for _, cond := range ancestor.Conditions {
-			if cond.Type == "Accepted" && cond.Status == metav1.ConditionTrue {
+			if cond.Type == "Accepted" && cond.Status == metav1.ConditionTrue &&
+				cond.ObservedGeneration == vcp.Generation {
 				return true
 			}
 		}
