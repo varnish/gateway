@@ -657,8 +657,9 @@ func (m *MockVarnishadm) SetVCLListJSON(entries []VCLEntry) {
 }
 
 // SetStrictVCL makes the VCL commands refuse what varnishd refuses: labelling
-// or using an unknown VCL, loading a duplicate name or a VCL that returns to a
-// missing label, discarding the active VCL, a labelled VCL, or a label another
+// or using an unknown VCL, a label that would create a return(vcl) loop
+// (status 300), loading a duplicate name or a VCL that returns to a missing
+// label, discarding the active VCL, a labelled VCL, or a label another
 // VCL returns to. Without it those commands succeed and only update state.
 func (m *MockVarnishadm) SetStrictVCL(strict bool) {
 	m.mu.Lock()
@@ -754,6 +755,30 @@ func (m *MockVarnishadm) labelRefs(label string) int {
 	return n
 }
 
+// labelLoop reports whether pointing label at target would create a loop:
+// target, or a VCL reached from it by following return(vcl(<label>)) through
+// labels, returns to label. varnishd refuses such a vcl.label.
+func (m *MockVarnishadm) labelLoop(label string, target *mockVCL, seen map[string]bool) bool {
+	for _, match := range reReturnVCL.FindAllStringSubmatch(target.body, -1) {
+		next := match[1]
+		if next == label {
+			return true
+		}
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		l := m.findVCL(next)
+		if l == nil || l.labelTarget == "" {
+			continue
+		}
+		if t := m.findVCL(l.labelTarget); t != nil && m.labelLoop(label, t, seen) {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *MockVarnishadm) labelsOf(name string) []string {
 	var out []string
 	for _, v := range m.vcls {
@@ -820,6 +845,9 @@ func (m *MockVarnishadm) handleVCLCommand(cmd string) (resp VarnishResponse, han
 			}
 			if t.labelTarget != "" {
 				return vclResp(ClisParam, "VCL labels cannot point to labels"), true
+			}
+			if m.labelLoop(label, t, map[string]bool{}) {
+				return vclResp(ClisCant, "VCL %s would create a loop through label %s", target, label), true
 			}
 		}
 		if l := m.findVCL(label); l != nil {

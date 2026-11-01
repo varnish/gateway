@@ -28,20 +28,36 @@ var VarnishVCLPolicyGVR = schema.GroupVersionResource{
 const (
 	statusMaxAttempts = 5
 	statusRetryDelay  = 10 * time.Second
+	// statusResyncPeriod re-checks every entry this pod should have, so a
+	// policy deleted and recreated under the same name, or one whose status
+	// was rewritten without podResults, gets its entry back.
+	statusResyncPeriod = 60 * time.Second
+
+	// notInManifestMessage is the final entry written for a policy that left
+	// this pod's manifest (detached, moved to another policy, route VCL
+	// ConfigMap gone), so the operator can tell a stale entry from a live
+	// one.
+	notInManifestMessage = "not in manifest on this pod"
 )
 
 // statusReporter writes this pod's slot results into VarnishVCLPolicy
 // status.podResults. It runs on its own goroutine so a slow or failing API
 // server never holds up VCL work: the reconcile loop hands it the latest
 // results and moves on.
+//
+// There is no in-memory record of what was written: every flush goes through
+// write(), which reads the policy and only updates it when this pod's entry
+// differs. Flushes run when the results change, after a failure, and every
+// resync period.
 type statusReporter struct {
 	dyn     dynamic.Interface
 	podName string
 	logger  *slog.Logger
+	resync  time.Duration
 
 	mu      sync.Mutex
 	desired map[string]SlotResult // policy -> latest result
-	written map[string]SlotResult // policy -> result last written (or found already present)
+	gone    map[string]SlotResult // policy -> final entry still to write
 	nudge   chan struct{}
 }
 
@@ -50,41 +66,54 @@ func newStatusReporter(dyn dynamic.Interface, podName string, logger *slog.Logge
 		dyn:     dyn,
 		podName: podName,
 		logger:  logger,
+		resync:  statusResyncPeriod,
 		desired: make(map[string]SlotResult),
-		written: make(map[string]SlotResult),
+		gone:    make(map[string]SlotResult),
 		nudge:   make(chan struct{}, 1),
 	}
 }
 
-// update replaces the desired results. Policies that disappeared are
-// forgotten (their status entry is left for the operator to clean up).
+// update replaces the desired results. A policy that disappeared gets one
+// final entry, programmed false with notInManifestMessage, instead of being
+// deleted: replacing the entry goes through the same get/UpdateStatus path
+// as every other write, and the operator can still see which pods had it.
 func (s *statusReporter) update(results map[string]SlotResult) {
 	s.mu.Lock()
-	s.desired = maps.Clone(results)
-	for policy := range s.written {
-		if _, ok := s.desired[policy]; !ok {
-			delete(s.written, policy)
+	changed := !maps.Equal(s.desired, results)
+	for policy, old := range s.desired {
+		if _, ok := results[policy]; !ok {
+			s.gone[policy] = SlotResult{Policy: policy, Slot: old.Slot, Message: notInManifestMessage}
 		}
 	}
+	for policy := range results {
+		delete(s.gone, policy)
+	}
+	s.desired = maps.Clone(results)
 	s.mu.Unlock()
+	if !changed {
+		return
+	}
 	select {
 	case s.nudge <- struct{}{}:
 	default:
 	}
 }
 
-// run writes pending results on every update, retrying failures after
-// statusRetryDelay.
+// run writes the results on every change and every resync period, retrying
+// failures after statusRetryDelay.
 func (s *statusReporter) run(ctx context.Context) {
 	retry := time.NewTimer(time.Hour)
 	retry.Stop()
 	defer retry.Stop()
+	resync := time.NewTicker(s.resync)
+	defer resync.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-s.nudge:
 		case <-retry.C:
+		case <-resync.C:
 		}
 		if err := s.flush(ctx); err != nil {
 			s.logger.Warn("VarnishVCLPolicy status update failed, will retry", "error", err, "retryIn", statusRetryDelay)
@@ -93,27 +122,42 @@ func (s *statusReporter) run(ctx context.Context) {
 	}
 }
 
-// flush writes every result that differs from what was last written.
+// current returns the result to write for policy now: its desired result or
+// its pending final entry.
+func (s *statusReporter) current(policy string) (SlotResult, bool) {
+	if res, ok := s.desired[policy]; ok {
+		return res, true
+	}
+	res, ok := s.gone[policy]
+	return res, ok
+}
+
+// flush makes every policy's entry match the latest results. Each entry is
+// re-read under the lock right before its write, so a result superseded
+// while earlier writes were in flight is not written (the newer one is, by
+// the flush its update triggered).
 func (s *statusReporter) flush(ctx context.Context) error {
 	s.mu.Lock()
-	pending := make(map[string]SlotResult)
-	for policy, res := range s.desired {
-		if w, ok := s.written[policy]; !ok || w != res {
-			pending[policy] = res
-		}
-	}
+	pending := maps.Clone(s.gone)
+	maps.Copy(pending, s.desired)
 	s.mu.Unlock()
 
 	var errs []error
 	for _, policy := range slices.Sorted(maps.Keys(pending)) {
 		res := pending[policy]
+		s.mu.Lock()
+		cur, ok := s.current(policy)
+		s.mu.Unlock()
+		if !ok || cur != res {
+			continue
+		}
 		if err := s.write(ctx, res); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", policy, err))
 			continue
 		}
 		s.mu.Lock()
-		if s.desired[policy] == res {
-			s.written[policy] = res
+		if g, ok := s.gone[policy]; ok && g == res {
+			delete(s.gone, policy)
 		}
 		s.mu.Unlock()
 	}

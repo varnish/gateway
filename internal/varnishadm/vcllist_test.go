@@ -148,8 +148,23 @@ func TestMockVCLState_Strict(t *testing.T) {
 		t.Errorf("unexpected state: %+v", entries)
 	}
 
+	// return(vcl) loops: direct (a VCL returning to the label pointed at it)
+	// and through another label.
+	ok(m.VCLLabel("gwvcl-1", "ph"))
+	ok(m.VCLInline("self", "vcl 4.1; sub vcl_recv { return (vcl(gwvcl-1)); }"))
+	resp, _ := m.VCLLabel("gwvcl-1", "self")
+	if resp.StatusCode() != ClisCant || !strings.Contains(resp.Payload(), "would create a loop") {
+		t.Errorf("direct loop not refused: %d %q", resp.StatusCode(), resp.Payload())
+	}
+	ok(m.VCLInline("a", "vcl 4.1; sub vcl_recv { return (vcl(gwvcl-1)); }"))
+	ok(m.VCLInline("b", "vcl 4.1; sub vcl_recv { return (vcl(gwvcl-0)); }"))
+	ok(m.VCLLabel("gwvcl-0", "a"))
+	refused(m.VCLLabel("gwvcl-1", "b")) // b -> gwvcl-0 -> a -> gwvcl-1
+	ok(m.VCLLabel("gwvcl-0", "ph"))
+	ok(m.VCLLabel("gwvcl-1", "b")) // b -> gwvcl-0 -> ph: no loop
+
 	m.SetVCLCompileError("BROKEN", "Message from VCC-compiler:\nsyntax error")
-	resp, _ := m.VCLInline("r", "vcl 4.1; BROKEN")
+	resp, _ = m.VCLInline("r", "vcl 4.1; BROKEN")
 	if resp.StatusCode() != ClisParam || !strings.Contains(resp.Payload(), "VCC") {
 		t.Errorf("compile error not simulated: %d %q", resp.StatusCode(), resp.Payload())
 	}
