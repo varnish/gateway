@@ -866,3 +866,37 @@ first) silently breaks route VCL under the default install. The docs say so.
   caveat, with what to do instead), `docs/concepts/vcl-merging.md` (new short
   "Route VCL" section), CHANGELOG entry and the G5 row above.
   `mkdocs build --strict` is clean.
+
+### Results on kind (Varnish 9.1.0 data plane, Kubernetes via kind, local docker images)
+
+Scripts live in the session scratchpad (`p8/run-conformance-off.sh`,
+`p8/run-feature-on.sh`, `p8/run-load.sh`). All of them export an isolated
+`KUBECONFIG` so the Makefile's plain `kubectl` calls can never reach the
+workstation's default (production) context, and build from `git archive
+HEAD` so concurrent edits never leak into the images.
+
+| Run | Branch | Result |
+| --- | --- | --- |
+| Conformance, feature off | c7602c6 | core 33/33, extended 16/16, 0 skipped |
+| Conformance, feature on (`routeVCL.enabled: true`, pool 8) | 2297782 | core 33/33, extended 16/16, 0 skipped |
+| End-to-end smoke, feature on | 2297782 | all checks pass |
+
+The smoke test (two HTTPRoutes on one Gateway, one with a VarnishVCLPolicy):
+the slotted route gets the route VCL's `vcl_deliver` header and sees
+`X-Gateway-Route`; its `vcl_recv` `synth(403)` fires; the sibling route is
+untouched (no header, not blocked); a client-supplied `X-Ghost-VCL-Slot` does
+not jump; a broken document attached to the sibling reports
+`Programmed=False/CompileFailed` with the VCC output in `podResults` within
+~5 s while the first route keeps serving and the broken route answers the
+documented `503 Route VCL not loaded`; deleting the broken policy restores
+the route. Policy attach to `Programmed=True` took ~16 s end to end on first
+deploy (pod start included).
+
+Found and fixed on the way (see above): `deploy/01-operator.yaml` had no
+`GATEWAY_IMAGE`, so the kind flow had been deploying the published chaperone
+image rather than the local build; the VCC-error classification (bug A); the
+compose order (bug B).
+
+Still owed by P8: an in-pod re-measurement of compile cost under the default
+100m CPU request (the kind node has no CPU limit), and the load/churn numbers
+recorded below once the run completes.
