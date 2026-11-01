@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -65,6 +66,12 @@ type Config struct {
 	// and their slot manifest (empty = never watched).
 	RouteVCLConfigMapName string
 
+	// Route VCL compile throttle (token bucket on vcl.inline of route VCLs;
+	// the master and the placeholder are never throttled). Rate is compiles
+	// per second, 0 disables it.
+	RouteVCLCompileRate  float64
+	RouteVCLCompileBurst int
+
 	// TLS configuration
 	TLSCertDir string   // path to TLS cert directory (empty = no TLS)
 	TLSListen  []string // -a arguments for HTTPS (e.g., "https=:8443,https")
@@ -118,6 +125,21 @@ func loadConfig() (*Config, error) {
 	cfg.RouteVCLConfigMapName = os.Getenv("ROUTE_VCL_CONFIGMAP_NAME")
 	if cfg.RouteVCLConfigMapName == "" && cfg.GatewayName != "" {
 		cfg.RouteVCLConfigMapName = cfg.GatewayName + vcl.RouteVCLConfigMapSuffix
+	}
+
+	cfg.RouteVCLCompileRate = vcl.DefaultRouteVCLCompileRate
+	if v := os.Getenv("ROUTE_VCL_COMPILE_RATE"); v != "" {
+		cfg.RouteVCLCompileRate, err = strconv.ParseFloat(v, 64)
+		if err != nil || cfg.RouteVCLCompileRate < 0 || math.IsNaN(cfg.RouteVCLCompileRate) || math.IsInf(cfg.RouteVCLCompileRate, 0) {
+			return nil, fmt.Errorf("invalid ROUTE_VCL_COMPILE_RATE %q: want a number >= 0", v)
+		}
+	}
+	cfg.RouteVCLCompileBurst = vcl.DefaultRouteVCLCompileBurst
+	if v := os.Getenv("ROUTE_VCL_COMPILE_BURST"); v != "" {
+		cfg.RouteVCLCompileBurst, err = strconv.Atoi(v)
+		if err != nil || cfg.RouteVCLCompileBurst < 0 {
+			return nil, fmt.Errorf("invalid ROUTE_VCL_COMPILE_BURST %q: want an integer >= 0", v)
+		}
 	}
 
 	return cfg, nil
@@ -346,6 +368,7 @@ func run() error {
 	vclReloader.SetDashboard(dashBus)
 	vclReloader.SetRouteVCLConfigMap(cfg.RouteVCLConfigMapName)
 	vclReloader.SetStatusWriter(dynClient, cfg.PodName)
+	vclReloader.SetCompileThrottle(cfg.RouteVCLCompileRate, cfg.RouteVCLCompileBurst)
 
 	// 4. TLS reloader - watches TLS cert directory and hot-reloads certs (if TLS enabled)
 	var tlsReloader *vtls.Reloader
@@ -630,6 +653,11 @@ func run() error {
 	// Metrics updater: subscribes to dashboard events and increments Prometheus counters
 	g.Go(func() error {
 		return runMetricsUpdater(gctx, dashBus, chapMetrics)
+	})
+
+	// State tracker: applies route VCL snapshots from the event bus
+	g.Go(func() error {
+		return dashState.Run(gctx)
 	})
 
 	// Start dashboard server (if configured)

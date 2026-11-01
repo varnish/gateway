@@ -12,6 +12,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 )
 
 const testController = "varnish-software.com/gateway"
@@ -285,4 +287,50 @@ func labelsEqual(m *dto.Metric, want map[string]string) bool {
 		}
 	}
 	return true
+}
+
+func TestGatewayCollector_VCLPolicies(t *testing.T) {
+	scheme := testScheme(t)
+	if err := gatewayparamsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	pol := func(name, controller string, status metav1.ConditionStatus) *gatewayparamsv1alpha1.VarnishVCLPolicy {
+		return &gatewayparamsv1alpha1.VarnishVCLPolicy{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Status: gatewayparamsv1alpha1.VarnishVCLPolicyStatus{
+				Ancestors: []gatewayparamsv1alpha1.VarnishVCLPolicyAncestorStatus{{
+					ControllerName: controller,
+					Conditions: []metav1.Condition{
+						acceptedCond(gatewayparamsv1alpha1.VCLPolicyConditionProgrammed, status),
+					},
+				}},
+			},
+		}
+	}
+	objs := []client.Object{
+		pol("ok1", testController, metav1.ConditionTrue),
+		pol("ok2", testController, metav1.ConditionTrue),
+		pol("failed", testController, metav1.ConditionFalse),
+		pol("unknown", testController, metav1.ConditionUnknown),
+		// Programmed by somebody else does not count.
+		pol("foreign", "someone/else", metav1.ConditionTrue),
+		// No status at all.
+		&gatewayparamsv1alpha1.VarnishVCLPolicy{ObjectMeta: metav1.ObjectMeta{Name: "fresh", Namespace: "default"}},
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	reg := prometheus.NewRegistry()
+	RegisterGatewayMetrics(reg, c, testController, "v0", nil)
+	fams, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, tc := range []struct {
+		programmed string
+		want       float64
+	}{{"true", 2}, {"false", 4}} {
+		got, ok := findGauge(fams, "varnish_gateway_route_vcl_policies", map[string]string{"programmed": tc.programmed})
+		if !ok || got != tc.want {
+			t.Errorf("route_vcl_policies{programmed=%s} = %v (found %v), want %v", tc.programmed, got, ok, tc.want)
+		}
+	}
 }

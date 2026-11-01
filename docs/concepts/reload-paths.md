@@ -3,17 +3,18 @@
 A gateway's configuration is not monolithic. Routes, backends, user VCL,
 listeners, and the container image all change on different clocks, and
 propagating every change through a full pod restart would be wasteful —
-and, for a cache, destructive. Varnish Gateway therefore has three
-distinct propagation paths, each matched to the smallest unit of change
-that actually needs to move.
+and, for a cache, destructive. Varnish Gateway therefore has distinct
+propagation paths (three hot paths and a rolling restart), each matched to
+the smallest unit of change that actually needs to move.
 
 | Change                               | Path                  | Mechanism                                         | Cache impact                |
 | ------------------------------------ | --------------------- | ------------------------------------------------- | --------------------------- |
 | HTTPRoute, Service endpoints         | Ghost HTTP reload     | Chaperone GETs `/.varnish-ghost/reload`           | None — cache preserved      |
 | User VCL, `VarnishCachePolicy`       | varnishadm VCL reload | Chaperone issues `vcl.load` + `vcl.use`           | None — cache preserved      |
+| `VarnishVCLPolicy` (route VCL)       | Route VCL reload      | Chaperone issues `vcl.inline` + `vcl.label` per slot | None — cache preserved   |
 | Listener ports, image, varnishd args | Rolling pod restart   | Infrastructure hash annotation change on pod spec | Cache lost on each pod roll |
 
-The first two are in-process and essentially free. The third is a
+The first three are in-process and essentially free. The last is a
 Kubernetes rolling update and costs cache content. Getting a change onto
 the cheapest path that can carry it is the whole point of this design.
 
@@ -101,6 +102,49 @@ Compilation happens before `vcl.use` runs, so a broken VCL surfaces as
 a load error and never takes effect — the previous VCL stays active
 and traffic is unaffected.
 
+## Route VCL reload
+
+!!! note "Preview"
+    Only active when `routeVCL.enabled` is set on the GatewayClass. See
+    [VarnishVCLPolicy](../reference/varnishvclpolicy.md) and its
+    [caveats](../reference/route-vcl-caveats.md).
+
+A `VarnishVCLPolicy` attaches a VCL document to one HTTPRoute. Each route VCL
+is a separate VCL in varnishd, reached through a pre-allocated *slot*: a VCL
+label `gwvcl-N` that the master VCL dispatches to with `return (vcl(...))`.
+
+### What triggers it
+
+The Gateway controller assigns each accepted policy a stable slot and writes
+the composed documents (`preamble + gateway VCL + route VCL + postamble`) and
+a manifest to the `{gateway}-route-vcl` ConfigMap. The HTTPRoute controller
+writes the slot number into `routing.json`, which reaches ghost over the ghost
+reload path. Chaperone watches the route VCL ConfigMap in addition to
+`main.vcl`.
+
+### How the reload is delivered
+
+The VCL reloader's single reconcile loop (`internal/vcl/reloader.go`) first
+makes sure the master, the placeholder VCL and the labels exist, then walks
+the manifest slot by slot:
+
+1. `vcl.inline route_<slot>_<hash>` compiles the document. Compiles go
+   through a token bucket (`ROUTE_VCL_COMPILE_RATE` / `ROUTE_VCL_COMPILE_BURST`)
+   and run one at a time.
+2. `vcl.label gwvcl-<slot> <name>` repoints the slot atomically. In-flight
+   requests finish on the previous VCL.
+3. The replaced route VCL is discarded.
+
+A compile failure changes nothing: the slot keeps its previous VCL (or the
+placeholder, which answers 503), and the failure is reported to the policy's
+`status.podResults`. Other slots and the master are unaffected.
+
+Two things differ from the plain VCL reload path. A change to the gateway's
+user VCL recompiles the master **and every route VCL**, because the gateway
+VCL is composed into each of them. And the slot number and the route VCL
+document arrive by separate paths, so a newly slotted route can answer from
+the placeholder for a moment until the slot pass lands.
+
 ## Rolling restart
 
 Listener changes, image upgrades, `varnishdExtraArgs` changes, and
@@ -119,6 +163,11 @@ so a listener change must be a new process.
 
 ```mermaid
 flowchart TD
+    subgraph RVCL["Route VCL path"]
+        VVP["VarnishVCLPolicy +\nvclConfigMapRef"] -->|"Gateway controller\nslot assignment"| CM_RVCL["ConfigMap: route-vcl\nmanifest + slot-N.vcl"]
+        CM_RVCL -->|"chaperone informer,\nthrottled compiles"| LBL["varnishadm\nvcl.inline / vcl.label"]
+    end
+
     subgraph VCL["VCL reload path"]
         GW["Gateway / GatewayClassParameters\nuser-VCL ConfigMap"]
         GW -->|"Gateway controller"| CM_VCL["ConfigMap: main.vcl"]
@@ -136,14 +185,15 @@ flowchart TD
 ```
 
 The two reconcilers write into disjoint keys of the same ConfigMap, and
-the two chaperone watchers read disjoint keys. A VCL change is invisible
+the two chaperone watchers read disjoint keys. The route VCL path has its
+own ConfigMap. A VCL change is invisible
 to the ghost reload path, a routing change is invisible to the VCL
 reload path, and neither can trigger a pod restart without also
 flipping the infrastructure hash.
 
 ## Failure handling
 
-Both hot-reload paths are best-effort: if a reload fails, the previous
+All hot-reload paths are best-effort: if a reload fails, the previous
 configuration remains active and chaperone surfaces the error through
 logs and the dashboard event bus. The next successful ConfigMap or
 EndpointSlice event retries the reload from scratch, so transient
