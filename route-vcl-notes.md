@@ -32,3 +32,9 @@ Other assumptions:
   phase in this branch touches a cluster; cluster-level verification (P6 "done
   when", P8 conformance/load) is left for a kind cluster or the user.
 - Commits on this branch are unsigned by request (hardware key unavailable).
+- Target Varnish version is **9.1.0** (`chaperone.varnishVersion` in the chart;
+  the image is built from it). The local varnishd used for P1b measurements and
+  the `varnishd -C` compile tests is 9.0.0. The mechanism used here
+  (`return(vcl(label))`, `vcl.label`, labels always warm, `max_vcl`) predates
+  both. P8 must re-run the P1b numbers and the compile tests on 9.1.0 before
+  the defaults are called final.
