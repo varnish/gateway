@@ -92,3 +92,37 @@ Other assumptions:
   `"0 <name>"` (`"- <name>"` with no child) and the reloader's
   `garbageCollect` never matches the `vcl_` prefix. P5 switches to
   `vcl.list -j` and fixes this.
+
+## P1b — capacity spike (#96), measured locally
+
+Run on this workstation (16 cores, Varnish 9.0.0, no cgroup limits, loopback
+backend), **not in a pod**. Scripts and raw outputs live in the session
+scratchpad (`p1b/`); the full report is reproduced in
+`docs/development/route-vcl-capacity-spike.md`. Absolute times will be
+worse under a pod CPU limit; deltas are the portable numbers.
+
+| Measurement | Result |
+| --- | --- |
+| One route VCL compile (`vcl.inline`, ~200 lines) | ~220 ms median; ~160 ms fixed (cc fork + vmod load) + ~0.5 ms/line |
+| Populated route VCL | +~125 KB child RSS, +~40 VSC stat lines, ~0.22 s compile |
+| Unpopulated label | free: ~1 ms to create, no RSS, no stats |
+| 64 populated slots | +9.7 MB RSS, +2,580 stat lines, 14 s serial bootstrap |
+| 256 populated slots | +32 MB RSS, +10,260 stat lines, 57 s serial bootstrap, 0.6 s master compile |
+| Jump cost with a real backend | within noise (<1%) |
+| Jump cost, synthetic 900k req/s | 20–30 ns CPU; p50 +~18 µs under saturation |
+| 256-entry linear dispatch, last slot | +330 ns/request (-23% synthetic throughput); binary tree is flat |
+| `max_vcl` | default 100, warn-only (`max_vcl_handling=1`); **labels do not count** |
+| Connection pools | shared across VCLs by endpoint: the jump path opened 0 new backend connections after the master path warmed them, and vice versa |
+| varnishadm secret | manager and child both run as uid 1000 locally and in the container (`USER varnish`, no `-j`), so the child can read `$WORK_DIR/secret`. Route VCL can therefore reach the CLI secret; this is within the G1 trust grant and must be in the P8 docs |
+
+**Decisions (G3):**
+
+- Default `routeVCL.slotPoolSize` = **64**. Ceiling = **256** (largest measured).
+- The master dispatch is a **balanced binary tree** on `std.integer()` so slot
+  position never matters.
+- Chaperone sets `max_vcl` to `2 * poolSize + 10` (route VCLs count, labels
+  and the master do not matter much; replaced generations linger until
+  discarded).
+- Compile cost is ~0.2 s CPU per route VCL on this host. P7's throttle should
+  assume several times that under the default 100m CPU request, and P8 must
+  re-measure in a pod on 9.1.0.

@@ -144,7 +144,7 @@ spec:
 
 **Security:** turning this on lets anyone who can create an HTTPRoute in a namespace routed by this class run code inside the gateway pod. Read the [trust statement](varnishvclpolicy.md#trust-statement) before you enable it.
 
-Changing `routeVCL` does **not** trigger a pod restart. A `slotPoolSize` change will recompile the VCL in place once the feature is wired to the data plane. The default (16) and ceiling (256) are provisional and may change before the feature leaves preview.
+Changing `routeVCL` does **not** trigger a pod restart. A `slotPoolSize` change will recompile the VCL in place once the feature is wired to the data plane. The default (64) and ceiling (256) come from the capacity spike in `docs/development/route-vcl-capacity-spike.md`: unused slots cost nothing, each populated slot costs about 0.2 s of compile time and 125 KB of memory per pod.
 
 ## Environment Variables
 

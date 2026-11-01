@@ -106,13 +106,13 @@ type GatewayClassParametersSpec struct {
 const (
 	// DefaultRouteVCLSlotPoolSize is the number of route VCL slots per
 	// gateway when RouteVCLConfig.SlotPoolSize is unset.
-	// Provisional: the route VCL measurement phase (P1b) sets the final value.
-	DefaultRouteVCLSlotPoolSize = 16
+	// Set from the P1b capacity spike (docs/development/route-vcl-capacity-spike.md).
+	DefaultRouteVCLSlotPoolSize = 64
 
 	// MaxRouteVCLSlotPoolSize is the largest accepted
 	// RouteVCLConfig.SlotPoolSize. Keep in sync with the kubebuilder Maximum
 	// marker on that field.
-	// Provisional: the route VCL measurement phase (P1b) sets the final value.
+	// Set from the P1b capacity spike (docs/development/route-vcl-capacity-spike.md).
 	MaxRouteVCLSlotPoolSize = 256
 )
 
@@ -127,7 +127,7 @@ type RouteVCLConfig struct {
 
 	// SlotPoolSize is the number of pre-allocated VCL label slots per
 	// gateway. Each slot can hold one route VCL. Changing it recompiles the
-	// master VCL (hot, no pod restart). Defaults to 16; the ceiling is 256.
+	// master VCL (hot, no pod restart). Defaults to 64; the ceiling is 256.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=256

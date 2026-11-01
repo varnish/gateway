@@ -3703,7 +3703,7 @@ spec:
                     description: |-
                       SlotPoolSize is the number of pre-allocated VCL label slots per
                       gateway. Each slot can hold one route VCL. Changing it recompiles the
-                      master VCL (hot, no pod restart). Defaults to 16; the ceiling is 256.
+                      master VCL (hot, no pod restart). Defaults to 64; the ceiling is 256.
                     format: int32
                     maximum: 256
                     minimum: 1
