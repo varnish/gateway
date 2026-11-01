@@ -5,6 +5,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -170,6 +171,91 @@ func TestGatewayCollector(t *testing.T) {
 	// gw3 (foreign class) must not produce per-Gateway series.
 	if _, ok := findGauge(fams, "varnish_gateway_gateway_accepted", map[string]string{"gateway_namespace": "default", "gateway_name": "gw3"}); ok {
 		t.Error("gw3 (foreign GatewayClass) produced a per-Gateway series")
+	}
+}
+
+func TestGatewayCollector_RouteVCL(t *testing.T) {
+	scheme := testScheme(t)
+	manifest := `{
+  "slots": {
+    "0": {"policy": "default/a", "route": "default/ra", "generation": 1, "hash": "x"},
+    "2": {"policy": "default/b", "route": "default/rb", "generation": 1, "hash": "y"},
+    "9": {"policy": "default/c", "route": "default/rc", "generation": 1, "hash": "z"}
+  },
+  "unassigned": [
+    {"policy": "default/d", "route": "default/rd", "reason": "NoSlotAvailable"},
+    {"policy": "default/e", "route": "default/re", "reason": "NoSlotAvailable"}
+  ]
+}`
+	gw := func(name string) *gatewayv1.Gateway {
+		return &gatewayv1.Gateway{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec:       gatewayv1.GatewaySpec{GatewayClassName: "varnish"},
+		}
+	}
+	objs := []client.Object{
+		&gatewayv1.GatewayClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "varnish"},
+			Spec:       gatewayv1.GatewayClassSpec{ControllerName: testController},
+		},
+		// on: pool of 4, slots 0 and 2 used (9 is outside the pool and
+		// does not count), 2 policies unassigned.
+		gw("on"),
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "on-vcl", Namespace: "default"},
+			Data:       map[string]string{"route-vcl-pool-size": "4"},
+		},
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "on-route-vcl", Namespace: "default"},
+			Data:       map[string]string{"manifest.json": manifest},
+		},
+		// off: pool size "0", empty manifest.
+		gw("off"),
+		&corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{Name: "off-vcl", Namespace: "default"},
+			Data:       map[string]string{"route-vcl-pool-size": "0"},
+		},
+		// bare: no ConfigMaps at all yet.
+		gw("bare"),
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	reg := prometheus.NewRegistry()
+	RegisterGatewayMetrics(reg, c, testController, "v0", nil)
+	fams, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+
+	lbl := func(gw, state string) map[string]string {
+		m := map[string]string{"gateway_namespace": "default", "gateway_name": gw}
+		if state != "" {
+			m["state"] = state
+		}
+		return m
+	}
+	checks := []struct {
+		name   string
+		labels map[string]string
+		want   float64
+	}{
+		{"varnish_gateway_route_vcl_slots", lbl("on", "used"), 2},
+		{"varnish_gateway_route_vcl_slots", lbl("on", "free"), 2},
+		{"varnish_gateway_route_vcl_unassigned", lbl("on", ""), 2},
+		{"varnish_gateway_route_vcl_slots", lbl("off", "used"), 0},
+		{"varnish_gateway_route_vcl_slots", lbl("off", "free"), 0},
+		{"varnish_gateway_route_vcl_unassigned", lbl("off", ""), 0},
+		{"varnish_gateway_route_vcl_slots", lbl("bare", "free"), 0},
+		{"varnish_gateway_route_vcl_unassigned", lbl("bare", ""), 0},
+	}
+	for _, tc := range checks {
+		got, ok := findGauge(fams, tc.name, tc.labels)
+		if !ok {
+			t.Errorf("%s%v: metric not found", tc.name, tc.labels)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%s%v = %v, want %v", tc.name, tc.labels, got, tc.want)
+		}
 	}
 }
 

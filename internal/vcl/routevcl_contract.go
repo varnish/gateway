@@ -52,16 +52,44 @@ func SlotKey(slot int) string {
 	return "slot-" + strconv.Itoa(slot) + ".vcl"
 }
 
+// Reasons a policy is listed in RouteVCLManifest.Unassigned.
+const (
+	// UnassignedNoSlotAvailable: every slot in the pool is occupied.
+	UnassignedNoSlotAvailable = "NoSlotAvailable"
+	// UnassignedSlotOutsidePool: the policy held a slot at or above a
+	// reduced pool size, and no free slot inside the pool was left for it.
+	UnassignedSlotOutsidePool = "SlotOutsidePool"
+	// UnassignedConfigMapFull: adding the document would push the route VCL
+	// ConfigMap past the operator's size guard.
+	UnassignedConfigMapFull = "ConfigMapFull"
+)
+
 // RouteVCLManifest describes which slot holds which policy's VCL.
 type RouteVCLManifest struct {
 	// Slots maps the decimal slot number to its occupant.
 	Slots map[string]RouteVCLSlot `json:"slots"`
+	// Unassigned lists eligible policies that did not get a slot. The
+	// chaperone ignores it; the operator uses it for status and metrics.
+	Unassigned []RouteVCLUnassigned `json:"unassigned,omitempty"`
+}
+
+// RouteVCLUnassigned is an eligible policy that has no slot on the gateway.
+type RouteVCLUnassigned struct {
+	// Policy is the VarnishVCLPolicy as "<namespace>/<name>".
+	Policy string `json:"policy"`
+	// Route is the policy's target HTTPRoute as "<namespace>/<name>".
+	Route string `json:"route"`
+	// Reason is one of the Unassigned* constants.
+	Reason string `json:"reason"`
 }
 
 // RouteVCLSlot is one occupied slot in a RouteVCLManifest.
 type RouteVCLSlot struct {
 	// Policy is the VarnishVCLPolicy as "<namespace>/<name>".
 	Policy string `json:"policy"`
+	// Route is the policy's target HTTPRoute as "<namespace>/<name>". The
+	// operator matches it against ghost route names to set vcl_slot.
+	Route string `json:"route"`
 	// Generation is the policy's metadata.generation the document was built from.
 	Generation int64 `json:"generation"`
 	// Hash is RouteVCLHash of the slot's document.

@@ -97,8 +97,8 @@ type GatewayClassParametersSpec struct {
 	Service *ServiceConfig `json:"service,omitempty"`
 
 	// RouteVCL gates per-HTTPRoute VCL (VarnishVCLPolicy) for Gateways of
-	// this class. API preview: not yet wired to the data plane. Changes do
-	// not trigger pod restarts.
+	// this class. API preview: wired end to end, not yet load-tested.
+	// Changes do not trigger pod restarts.
 	// +optional
 	RouteVCL *RouteVCLConfig `json:"routeVCL,omitempty"`
 }
@@ -127,7 +127,9 @@ type RouteVCLConfig struct {
 
 	// SlotPoolSize is the number of pre-allocated VCL label slots per
 	// gateway. Each slot can hold one route VCL. Changing it recompiles the
-	// master VCL (hot, no pod restart). Defaults to 64; the ceiling is 256.
+	// master VCL (hot, no pod restart). Shrinking it below a slot that is in
+	// use takes that slot away from its policy (other slots keep their
+	// numbers). Defaults to 64; the ceiling is 256.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=256

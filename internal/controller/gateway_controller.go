@@ -215,8 +215,12 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		effectiveImage = imageOverride
 	}
 
-	// Generate VCL content (ghost preamble + user VCL)
-	vclContent := r.generateVCL(ctx, gateway)
+	// Generate the master VCL (ghost preamble, route VCL dispatch for the
+	// slot pool, user VCL). With route VCL off the pool is 0 and this is
+	// exactly Merge(Generate(), userVCL).
+	poolSize := routeVCLPoolSize(params)
+	userVCL := r.userVCLFromParams(ctx, params)
+	vclContent := vcl.GenerateMaster(poolSize, userVCL)
 
 	// Parse image pull secrets
 	imagePullSecrets := r.parseImagePullSecrets()
@@ -249,7 +253,7 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	// Create resources in order (some depend on others existing)
 	// ConfigMap must be created first so HTTPRoute controller can process routes immediately
 	resources := []client.Object{
-		r.buildVCLConfigMap(gateway, vclContent),
+		r.buildVCLConfigMap(gateway, vclContent, poolSize),
 	}
 	// Add TLS bundle Secret if any HTTPS listeners with certs exist
 	if hasTLS {
@@ -285,6 +289,13 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 		if err := r.reconcileResource(ctx, gateway, desired); err != nil {
 			return err
 		}
+	}
+
+	// The route VCL ConfigMap is always present (empty manifest when the
+	// feature is off) and is written after "{gateway}-vcl", so a pool that
+	// grows has its labels before the slots that need them are listed.
+	if err := r.reconcileRouteVCLConfigMap(ctx, gateway, poolSize, userVCL); err != nil {
+		return err
 	}
 
 	// If the PDB was toggled off (or never set), make sure no stale one remains.
@@ -361,24 +372,32 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 		return fmt.Errorf("r.Get(%s): %w", desired.GetName(), err)
 	}
 
-	// For ConfigMaps, update only main.vcl, preserve routing.json (owned by HTTPRoute controller)
+	// For ConfigMaps, update only the keys the Gateway controller owns
+	// (main.vcl and the route VCL pool size) and preserve routing.json
+	// (owned by the HTTPRoute controller). The master VCL and the pool size
+	// it was generated for always land in the same update.
 	if desiredCM, ok := desired.(*corev1.ConfigMap); ok {
 		existingCM := existing.(*corev1.ConfigMap)
-		// Check if main.vcl changed
-		if existingCM.Data["main.vcl"] != desiredCM.Data["main.vcl"] {
+		if !gatewayOwnedVCLKeysEqual(existingCM.Data, desiredCM.Data) {
 			// A pre-existing ConfigMap (e.g. one a user created by hand before
 			// the Gateway) can have a nil Data map; assigning into a nil map
 			// panics, so materialize it first.
 			if existingCM.Data == nil {
 				existingCM.Data = map[string]string{}
 			}
-			// Update only main.vcl, keep routing.json from existing
-			existingCM.Data["main.vcl"] = desiredCM.Data["main.vcl"]
+			for _, key := range gatewayOwnedVCLKeys {
+				if v, ok := desiredCM.Data[key]; ok {
+					existingCM.Data[key] = v
+				} else {
+					delete(existingCM.Data, key)
+				}
+			}
 			if err := r.Update(ctx, existingCM); err != nil {
 				return fmt.Errorf("r.Update(%s): %w", desired.GetName(), err)
 			}
 			r.Logger.Info("updated configmap main.vcl",
-				"name", desired.GetName())
+				"name", desired.GetName(),
+				"routeVCLPoolSize", desiredCM.Data[vcl.PoolSizeKey])
 		}
 		return nil
 	}
@@ -487,6 +506,24 @@ func (r *GatewayReconciler) reconcileResource(ctx context.Context, gateway *gate
 	}
 
 	return nil
+}
+
+// gatewayOwnedVCLKeys are the "{gateway}-vcl" ConfigMap keys written by the
+// Gateway controller. Everything else (routing.json) belongs to the HTTPRoute
+// controller and is preserved.
+var gatewayOwnedVCLKeys = []string{vcl.MainVCLKey, vcl.PoolSizeKey}
+
+// gatewayOwnedVCLKeysEqual reports whether existing and desired agree on the
+// presence and value of every key in gatewayOwnedVCLKeys.
+func gatewayOwnedVCLKeysEqual(existing, desired map[string]string) bool {
+	for _, key := range gatewayOwnedVCLKeys {
+		ev, eok := existing[key]
+		dv, dok := desired[key]
+		if eok != dok || ev != dv {
+			return false
+		}
+	}
+	return true
 }
 
 // needsDeploymentUpdate checks if the Deployment needs to be updated.
@@ -1168,7 +1205,12 @@ func resolveGatewayClassParameters(ctx context.Context, c client.Reader, classNa
 // getUserVCL returns user-provided VCL from GatewayClassParameters.
 // It traverses: Gateway -> GatewayClass -> GatewayClassParameters -> ConfigMap
 func (r *GatewayReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
-	params := r.getGatewayClassParameters(ctx, gateway)
+	return r.userVCLFromParams(ctx, r.getGatewayClassParameters(ctx, gateway))
+}
+
+// userVCLFromParams returns the user VCL referenced by already-resolved
+// GatewayClassParameters ("" when params is nil or has no reference).
+func (r *GatewayReconciler) userVCLFromParams(ctx context.Context, params *gatewayparamsv1alpha1.GatewayClassParameters) string {
 	if params == nil || params.Spec.UserVCLConfigMapRef == nil {
 		return ""
 	}
@@ -1203,16 +1245,12 @@ func (r *GatewayReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.G
 	return userVCL
 }
 
-// generateVCL generates ghost preamble VCL and merges it with user VCL
+// generateVCL returns the master VCL for a Gateway: ghost preamble (with the
+// route VCL dispatch for the class's slot pool) merged with user VCL. It is
+// what reconcileResources writes to main.vcl.
 func (r *GatewayReconciler) generateVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
-	// Generate ghost preamble VCL
-	generatedVCL := vcl.Generate()
-
-	// Get user VCL if configured
-	userVCL := r.getUserVCL(ctx, gateway)
-
-	// Merge generated and user VCL
-	return vcl.Merge(generatedVCL, userVCL)
+	params := r.getGatewayClassParameters(ctx, gateway)
+	return vcl.GenerateMaster(routeVCLPoolSize(params), r.userVCLFromParams(ctx, params))
 }
 
 // parseImagePullSecrets parses the comma-separated ImagePullSecrets config
@@ -1454,6 +1492,13 @@ func (r *GatewayReconciler) collectBackendCACerts(ctx context.Context, gateway *
 
 // buildLabels returns labels for resources owned by a Gateway.
 func (r *GatewayReconciler) buildLabels(gateway *gatewayv1.Gateway) map[string]string {
+	return gatewayLabels(gateway)
+}
+
+// gatewayLabels returns the labels the operator puts on every object it
+// creates for a Gateway. They are also the Deployment's pod selector, so
+// they identify the Gateway's pods.
+func gatewayLabels(gateway *gatewayv1.Gateway) map[string]string {
 	return map[string]string{
 		LabelManagedBy:        ManagedByValue,
 		LabelGatewayName:      gateway.Name,
@@ -1583,7 +1628,11 @@ func (r *GatewayReconciler) enqueueGatewaysForParams() handler.EventHandler {
 
 // enqueueGatewaysForConfigMap returns an EventHandler that enqueues all Gateways
 // that use a user VCL ConfigMap (via GatewayClass -> GatewayClassParameters).
-// Lookup chain: ConfigMap -> GatewayClassParameters -> GatewayClass -> Gateway
+// Lookup chain: ConfigMap -> GatewayClassParameters -> GatewayClass -> Gateway.
+// It also enqueues the Gateways whose route VCL slots read a document from the
+// ConfigMap: ConfigMap -> VarnishVCLPolicy (same namespace) -> HTTPRoute ->
+// parent Gateways. Operator-managed ConfigMaps ({gateway}-vcl,
+// {gateway}-route-vcl) are skipped; Owns() covers them.
 func (r *GatewayReconciler) enqueueGatewaysForConfigMap() handler.EventHandler {
 	return handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, obj client.Object) []ctrl.Request {
 		cm, ok := obj.(*corev1.ConfigMap)
@@ -1631,6 +1680,20 @@ func (r *GatewayReconciler) enqueueGatewaysForConfigMap() handler.EventHandler {
 		if len(requests) > 0 {
 			r.Logger.Info("user VCL ConfigMap changed, enqueuing Gateways for reconciliation",
 				"configmap", fmt.Sprintf("%s/%s", cm.Namespace, cm.Name), "gateways", len(requests))
+		}
+
+		// Route VCL documents: a ConfigMap referenced by a VarnishVCLPolicy
+		// in the same namespace feeds a slot document on the Gateways of
+		// the policy's target route.
+		seen := make(map[types.NamespacedName]bool, len(requests))
+		for _, req := range requests {
+			seen[req.NamespacedName] = true
+		}
+		for _, req := range r.gatewayRequestsForVVPConfigMap(ctx, cm) {
+			if !seen[req.NamespacedName] {
+				seen[req.NamespacedName] = true
+				requests = append(requests, req)
+			}
 		}
 
 		return requests
@@ -1946,7 +2009,23 @@ func (r *GatewayReconciler) enqueueGatewaysForBackendTLSPolicy() handler.EventHa
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr)
+	vvpInstalled, err := varnishVCLPolicyCRDInstalled(mgr.GetRESTMapper())
+	if err != nil {
+		return err
+	}
+	if vvpInstalled {
+		// Route VCL slots: a policy appearing, being accepted, retargeted
+		// or deleted changes the slot manifest of its route's Gateways.
+		b = b.Watches(
+			&gatewayparamsv1alpha1.VarnishVCLPolicy{},
+			r.enqueueGatewaysForVVP(),
+			builder.WithPredicates(vvpSlotRelevantChange()),
+		)
+	} else {
+		r.Logger.Warn("VarnishVCLPolicy CRD not installed; route VCL slots will not follow policy changes")
+	}
+	return b.
 		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
 		For(&gatewayv1.Gateway{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&appsv1.Deployment{}).

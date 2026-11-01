@@ -416,3 +416,180 @@ Accepted as-is, must be documented in P7/P8:
   GC can treat such entries as stale.
 - Mock: strict mode refuses `vcl.label L T` with status 300 ("would create a
   loop") when T, followed through `return (vcl(...))` labels, returns to L.
+
+## P6 — operator wiring and stable slot assignment (#101)
+
+### Contract additions (`internal/vcl/routevcl_contract.go`)
+
+- `RouteVCLSlot.Route` (`<ns>/<name>` of the target HTTPRoute) and
+  `RouteVCLManifest.Unassigned []RouteVCLUnassigned{Policy, Route, Reason}`
+  with reasons `UnassignedNoSlotAvailable` / `UnassignedSlotOutsidePool` /
+  `UnassignedConfigMapFull`. `ParseRouteVCLManifest` is plain
+  `json.Unmarshal`, so unknown fields are ignored; tested in the chaperone
+  package (`TestReconcile_ManifestWithOperatorFields`: route, unassigned and
+  invented fields parse and the slot is programmed). **Note:** that test got
+  swept into commit 8955105 (P5 review fixes) while P6 was uncommitted, so
+  HEAD's `internal/vcl` tests only compile together with this phase's
+  contract change.
+
+### Gateway controller (`routevcl_slots.go`, `gateway_controller.go`)
+
+- Pool size N = `routeVCLPoolSize(params)`: 0 unless `routeVCL.enabled`,
+  else `slotPoolSize` or 64, clamped to 256.
+- `main.vcl` = `vcl.GenerateMaster(N, userVCL)` and `route-vcl-pool-size` =
+  N, **always written, "0" when off** (choice: explicit beats absent; the
+  chaperone treats both the same). The `{gateway}-vcl` branch of
+  `reconcileResource` compares/updates both keys (`gatewayOwnedVCLKeys`) in
+  one Update and keeps `routing.json`. N == 0 output is byte-identical to
+  `Merge(Generate(), userVCL)` (tested). `generateVCL` now does the same as
+  the reconcile path. On operator upgrade every existing `{gateway}-vcl`
+  gains the `"0"` key (one hot reload; main.vcl also differs by P4's one
+  extra `unset` line).
+- `{gateway}-route-vcl` is reconciled by its own function after the generic
+  resource loop (not through `reconcileResource`): the previous manifest is
+  read from the same object that gets updated, so a stale cache read fails
+  with a conflict (requeue) instead of overwriting a newer assignment. It is
+  always created (empty manifest when N == 0), carries the gateway labels
+  (so `enqueueGatewaysForConfigMap` skips it) and a controller reference.
+  Updated only when `Data` differs; the whole `Data` is replaced, so stale
+  `slot-N.vcl` keys vanish.
+- Eligibility: cluster-wide VVP list; `Accepted=True` in ancestors[0] under
+  our controller name with `observedGeneration == generation`; target
+  `HTTPRoute` in the policy namespace whose parentRefs include this Gateway
+  (`routeHasParentGateway`); document present now (missing ConfigMap/key or
+  > 256 KiB = left out this round). Two eligible policies on one route
+  (stale status during a conflict): only the older is kept. CRD not
+  installed (NoMatch) = no candidates.
+- `assignRouteVCLSlots` (pure): candidates sorted by creation timestamp then
+  `ns/name`; pass 1 keeps every previous slot `< N`; pass 2 gives everyone
+  else the lowest free slot (freed slots reusable after retained ones).
+  **Interpretation of "shrink below an assigned slot"**: the policy loses
+  that slot and is treated like a new one in the same pass, i.e. it gets a
+  free slot inside the smaller pool if there is one; only when none is free
+  is it Unassigned `SlotOutsidePool` (literal "always unassigned" would flip
+  to a slot on the next reconcile and break determinism). The reason is
+  sticky while it waits (carried via the previous manifest's Unassigned
+  list), so the manifest is a fixed point.
+- Size guard: each document costs `len(key)+len(composed doc)+names+160`;
+  over 900 KiB the policy is Unassigned `ConfigMapFull` and consumes no slot.
+  Checked per document (a smaller later one can still fit) rather than
+  "stop at the first overflow"; a retained policy whose document grows past
+  the guard loses its slot. The Unassigned list is not counted.
+- Warn once: `newlyUnassigned` = Unassigned entries not present (same
+  policy+reason) in the previous manifest; logged at warn. Stateless, so an
+  operator restart does not re-log.
+- Watches: VVP (map: policy -> parent Gateways of its target route, old and
+  new object, deletes) with predicate `vvpSlotRelevantChange` (generation or
+  Accepted-current flips; podResults churn filtered). Added only when the
+  VVP CRD is served (`varnishVCLPolicyCRDInstalled`), else a warning.
+  `enqueueGatewaysForConfigMap` also maps a ConfigMap to the Gateways of
+  every same-namespace VVP referencing it.
+
+### Pod template (`resources.go`)
+
+- `VCL_PATH` dropped; `startupProbe` HTTP `/health`, period 2 s,
+  failureThreshold 90 (180 s). Neither is in the infra hash and
+  `needsDeploymentUpdate` only copies the template on image or infra-hash
+  change, so existing gateways pick them up at the next image bump (every
+  operator release bumps the image) or infra change, not on their own. No
+  test pinned the env list.
+
+### HTTPRoute controller
+
+- `attachRouteVCLSlots` after the other attach steps: reads
+  `{gateway}-route-vcl`, sets `VCLSlot` where `RouteName == slot.Route`.
+  Missing ConfigMap = no slots. **An unparseable manifest fails
+  `updateConfigMap`** (retried) instead of dropping every slot: silently
+  routing slotted traffic through the master could skip auth-style route VCL.
+  The Gateway controller rewrites a bad manifest from scratch on its next
+  reconcile.
+- Watch: ConfigMaps passing `isRouteVCLConfigMap` (suffix + managed-by
+  label) -> routes named in Slots and Unassigned (old and new object).
+
+### VVP controller (`varnishvclpolicy_programmed.go`)
+
+- `status.slots []{gateway "ns/name", slot}` (`listType=map`,
+  `listMapKey=gateway`), printcolumn `Programmed`, reason constants
+  `Programmed`, `Pending`, `CompileFailed`, `NoSlotAvailable`,
+  `NotProgrammed`, `NotAccepted`.
+- Per parent Gateway of our class with route VCL on: slot -> Programmed when
+  every live pod has an entry with the manifest hash and `programmed`;
+  CompileFailed when a live pod reports the manifest hash with
+  `programmed=false` (first pod by name, message = its message);
+  Pending otherwise (including zero live pods); Unassigned ->
+  NoSlotAvailable (message = reason); not listed -> NotProgrammed.
+  Aggregate: all programmed -> True; else CompileFailed > NoSlotAvailable >
+  Pending; NotProgrammed (Unknown) only when no Gateway is programmed and
+  none is in a worse state (with some programmed it becomes Pending).
+  Message lists each contributing Gateway, capped at 8 KiB. Not accepted ->
+  False/NotAccepted, slots cleared. No enabled parent -> Unknown/NotProgrammed.
+- Live pods: `List(Pods, ns, MatchingLabels(gatewayLabels(gw)))` without
+  `deletionTimestamp`, phase not Succeeded/Failed, for every parent Gateway
+  of our class (enabled or not, so GC does not drop entries of a Gateway
+  whose class just toggled the feature off). P5's final
+  `"not in manifest on this pod"` entries have `hash: ""` and so count as
+  stale (Pending), never as CompileFailed.
+- GC: entries whose pod is not live on any parent Gateway are dropped in the
+  same status write; entries of live pods are kept even when stale.
+- Write guard covers Accepted, Programmed, Slots and the GC; conflict on
+  `Status().Update` (a chaperone wrote) -> `RequeueAfter: 1s`.
+- Triggers: `For` uses `vvpGenerationOrPodResultsChanged` (generation or
+  `status.podResults` changed; sibling watch keeps
+  GenerationChangedPredicate); `findVVPsForConfigMap` maps a route VCL
+  ConfigMap to every policy in its manifest (any namespace); Deployment
+  watch (operator-labelled gateway Deployments) -> policies in that
+  Gateway's manifest. **No Pod watch.** Pods are listed through the
+  manager cache, which `cmd/operator` now restricts with
+  `cache.Options.ByObject{&corev1.Pod{}: label managed-by=varnish-gateway-operator}`,
+  so the Pod informer only holds gateway pods. Operator ClusterRole gained
+  `pods get/list/watch` (chart and `deploy/01-operator.yaml`).
+
+### Metrics
+
+- `varnish_gateway_route_vcl_slots{gateway_namespace,gateway_name,state=used|free}`
+  (used = manifest slots `< N`) and `varnish_gateway_route_vcl_unassigned`,
+  emitted for every managed Gateway (zeros when off or ConfigMaps missing).
+  This is the exhaustion metric; there is no separate counter.
+
+### Not done / deviations
+
+- vclparser validation skipped (`github.com/perbu/vclparser` not vendored);
+  varnishd in the chaperone stays authoritative and its errors surface as
+  `CompileFailed`.
+- Cluster-level "done when" from #101 not exercised (no kind cluster used;
+  the local kube context is production).
+
+### Tests
+
+- Unit: `routevcl_slots_test.go` (pool size; stability across reconciles,
+  document changes and creation-order changes; release/reuse with retained
+  first; exhaustion + warn-once; shrink with full pool (sticky
+  SlotOutsidePool) and with a free slot; composition + hash; pool 0;
+  ConfigMap full; Gateway reconcile on/off with main.vcl + pool key, single
+  write on resize, eligibility filters incl. cross-namespace route and
+  duplicate route, stale slot keys removed; map funcs; predicate),
+  `routevcl_httproute_test.go` (vcl_slot set, cleared, no ConfigMap, bad
+  manifest is an error, ConfigMap -> routes), `varnishvclpolicy_programmed_test.go`
+  (every reason, GC, no-op second reconcile per case, terminating/failed/
+  other-gateway pods, multi-gateway aggregation, disabled parent, predicate,
+  ConfigMap/Deployment maps), metrics `TestGatewayCollector_RouteVCL`,
+  resources (no VCL_PATH, startup probe, pool key "0").
+- Envtest `TestRouteVCL_EndToEnd_Envtest`: VVP Accepted -> Gateway reconcile
+  creates `{gw}-route-vcl` (slot 0, hash, owner) and `{gw}-vcl` with pool 4
+  and dispatch -> HTTPRoute reconcile gives `"vcl_slot": 0` -> pod without
+  results = Pending + status.slots -> podResults write = Programmed True and
+  a gone pod's entry GCed.
+
+### For P7/P8
+
+- A compile failure on a new slot leaves the placeholder (503) in place for
+  that route on that pod; docs say so. Consider whether the HTTPRoute
+  controller should withhold `vcl_slot` until Programmed (it does not now).
+- Programmed follows the Deployment status for pod churn; a pod that dies
+  without the Deployment status changing (rare) is only noticed on the next
+  podResults/ConfigMap/Deployment event.
+- Stale `"not in manifest"` entries for live pods stay until the pod goes.
+- Size guard is per Gateway ConfigMap; at 256 slots x 256 KiB documents the
+  900 KiB guard is the real limit, which the docs state.
+- Re-measure startup probe headroom (180 s) on 9.1.0 in a pod with the
+  default 100m CPU request: 256 populated slots took ~57 s unthrottled.

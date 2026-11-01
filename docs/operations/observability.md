@@ -83,6 +83,8 @@ GatewayClass with our controller name are counted.
 | `varnish_gateway_gateway_attached_routes` | `gateway_namespace`, `gateway_name` | Total AttachedRoutes across all listeners of the Gateway           |
 | `varnish_gateway_httproutes`              | —                     | Number of HTTPRoutes attached to a managed Gateway                 |
 | `varnish_gateway_httproutes_accepted`     | —                     | Number of managed HTTPRoutes Accepted on at least one parent       |
+| `varnish_gateway_route_vcl_slots`         | `gateway_namespace`, `gateway_name`, `state` (`used`/`free`) | Route VCL slots of the Gateway holding a VarnishVCLPolicy, or free. Both 0 when route VCL is off |
+| `varnish_gateway_route_vcl_unassigned`    | `gateway_namespace`, `gateway_name` | Eligible VarnishVCLPolicies that got no slot (pool exhausted, pool shrunk, ConfigMap full) |
 | `varnish_gateway_info`                    | `version`             | Constant 1; carries the operator build version as a label          |
 
 The per-Gateway labels are `gateway_namespace` / `gateway_name` rather

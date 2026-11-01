@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -17,6 +18,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
+	"github.com/varnish/gateway/internal/vcl"
 )
 
 const (
@@ -41,6 +43,12 @@ const (
 
 	// varnishAdminPort is the varnishadm reverse-mode port the chaperone binds.
 	varnishAdminPort = 6082
+
+	// startupProbePeriodSeconds and startupProbeFailureThreshold give a
+	// gateway pod up to 180 s to compile its master and route VCLs before
+	// the liveness probe starts counting.
+	startupProbePeriodSeconds    = 2
+	startupProbeFailureThreshold = 90
 )
 
 // reservedContainerPorts are ports the chaperone/data-plane binds internally.
@@ -111,8 +119,10 @@ func mustParseQuantity(s string) resource.Quantity {
 }
 
 // buildVCLConfigMap creates the ConfigMap containing VCL and routing.json.
-// The vclContent parameter contains the generated VCL (ghost preamble + user VCL)
-func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway, vclContent string) *corev1.ConfigMap {
+// The vclContent parameter contains the generated master VCL
+// (vcl.GenerateMaster(poolSize, userVCL)); poolSize is written alongside it
+// under vcl.PoolSizeKey, always, with "0" meaning route VCL is off.
+func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway, vclContent string, poolSize int) *corev1.ConfigMap {
 	// Empty routing config initially (HTTPRoute controller will populate this)
 	routingJSON := `{"version": 2, "vhosts": {}}`
 
@@ -127,8 +137,9 @@ func (r *GatewayReconciler) buildVCLConfigMap(gateway *gatewayv1.Gateway, vclCon
 			Labels:    r.buildLabels(gateway),
 		},
 		Data: map[string]string{
-			"main.vcl":     vclContent,
-			"routing.json": routingJSON,
+			vcl.MainVCLKey:  vclContent,
+			vcl.PoolSizeKey: strconv.Itoa(poolSize),
+			"routing.json":  routingJSON,
 		},
 	}
 }
@@ -445,7 +456,6 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, cf
 		{Name: "VARNISH_HTTP_ADDR", Value: httpAddr},
 		{Name: "VARNISH_LISTEN", Value: varnishListen},
 		{Name: "VARNISH_STORAGE", Value: "malloc,256m"},
-		{Name: "VCL_PATH", Value: "/etc/varnish/main.vcl"},
 		{Name: "CONFIGMAP_NAME", Value: fmt.Sprintf("%s-vcl", gateway.Name)},
 		{Name: "GHOST_CONFIG_PATH", Value: "/var/run/varnish/ghost.json"},
 		{Name: "WORK_DIR", Value: "/var/run/varnish"},
@@ -589,6 +599,22 @@ func (r *GatewayReconciler) buildGatewayContainer(gateway *gatewayv1.Gateway, cf
 					},
 				},
 			},
+		},
+		// A (re)started pod compiles the master and then every populated
+		// route VCL slot before it starts the varnishd child (~0.2 s per
+		// slot, more under a CPU limit; 256 populated slots took ~57 s
+		// unthrottled in the P1b spike). The startup probe holds off the
+		// liveness and readiness probes for up to 180 s while that runs.
+		StartupProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path:   "/health",
+					Port:   intstr.FromInt(chaperoneHealthPort),
+					Scheme: corev1.URISchemeHTTP,
+				},
+			},
+			PeriodSeconds:    startupProbePeriodSeconds,
+			FailureThreshold: startupProbeFailureThreshold,
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{

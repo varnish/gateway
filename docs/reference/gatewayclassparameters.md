@@ -123,10 +123,10 @@ spec:
 
 ### spec.routeVCL
 
-!!! warning "API preview, not yet wired to the data plane"
-    The fields are accepted and gate the `Accepted` condition on
-    [VarnishVCLPolicy](varnishvclpolicy.md), but no route VCL reaches the
-    gateway pods yet.
+!!! warning "API preview: end-to-end wiring complete, not yet load-tested or conformance-verified with the feature on"
+    With `enabled: true`, accepted [VarnishVCLPolicy](varnishvclpolicy.md)
+    resources get a slot, are compiled on every gateway pod, and run for the
+    requests their route matches.
 
 Gates per-HTTPRoute VCL (VarnishVCLPolicy) for Gateways of this class. Off by default.
 
@@ -140,11 +140,15 @@ spec:
 | Field          | Type    | Default | Description                                                                                                                             |
 | -------------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`      | `bool`  | `false` | Turns route VCL on for Gateways of this class. While it is off, every VarnishVCLPolicy on routes of this class reports `Accepted=False`, reason `Disabled`. |
-| `slotPoolSize` | `int32` | `16`    | Pre-allocated VCL label slots per gateway. Each slot holds one route VCL. Range 1–256. |
+| `slotPoolSize` | `int32` | `64`    | Pre-allocated VCL label slots per gateway. Each slot holds one route VCL. Range 1–256. |
 
 **Security:** turning this on lets anyone who can create an HTTPRoute in a namespace routed by this class run code inside the gateway pod. Read the [trust statement](varnishvclpolicy.md#trust-statement) before you enable it.
 
-Changing `routeVCL` does **not** trigger a pod restart. A `slotPoolSize` change will recompile the VCL in place once the feature is wired to the data plane. The default (64) and ceiling (256) come from the capacity spike in `docs/development/route-vcl-capacity-spike.md`: unused slots cost nothing, each populated slot costs about 0.2 s of compile time and 125 KB of memory per pod.
+Changing `routeVCL` does **not** trigger a pod restart. Turning it on or off, or changing `slotPoolSize`, is a hot recompile of the master VCL on every pod: the operator writes the new master and the pool size in the same ConfigMap update, and the chaperone creates or removes slot labels to match. Growing the pool never moves an existing policy. Shrinking it below a slot that is in use takes that slot away from its policy (it moves to a free slot inside the smaller pool if there is one, otherwise it reports `NoSlotAvailable` with reason `SlotOutsidePool`); the other policies keep their slot numbers. See [slots](varnishvclpolicy.md#slots).
+
+A gateway pod that starts (or restarts) compiles every populated slot before it serves traffic, about 0.2 s per slot unthrottled and more under a CPU limit. The pod has a startup probe that allows up to 180 s for this.
+
+The default (64) and ceiling (256) come from the capacity spike in `docs/development/route-vcl-capacity-spike.md`: unused slots cost nothing, each populated slot costs about 0.2 s of compile time and 125 KB of memory per pod.
 
 ## Environment Variables
 

@@ -49,12 +49,16 @@ func TestVarnishVCLPolicy_CRDAndStatus_Envtest(t *testing.T) {
 	if err := testEnv.Client.Get(ctx, client.ObjectKeyFromObject(vvp), &got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	if len(got.Status.Ancestors) != 1 || len(got.Status.Ancestors[0].Conditions) != 1 {
-		t.Fatalf("status = %+v, want one ancestor with one condition", got.Status)
+	if len(got.Status.Ancestors) != 1 || len(got.Status.Ancestors[0].Conditions) != 2 {
+		t.Fatalf("status = %+v, want one ancestor with Accepted and Programmed", got.Status)
 	}
 	c := got.Status.Ancestors[0].Conditions[0]
 	if c.Type != "Accepted" || c.Status != metav1.ConditionFalse || c.Reason != gatewayparamsv1alpha1.VCLPolicyReasonTargetNotFound {
 		t.Errorf("condition = %+v, want Accepted=False/TargetNotFound", c)
+	}
+	p := got.Status.Ancestors[0].Conditions[1]
+	if p.Type != "Programmed" || p.Status != metav1.ConditionFalse || p.Reason != gatewayparamsv1alpha1.VCLPolicyReasonNotAccepted {
+		t.Errorf("condition = %+v, want Programmed=False/NotAccepted", p)
 	}
 
 	// Schema: an empty ConfigMap name is rejected by the API server.

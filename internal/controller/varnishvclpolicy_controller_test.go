@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -139,18 +140,20 @@ func getVVPAccepted(t *testing.T, r *VarnishVCLPolicyReconciler, name string) me
 	if anc.ControllerName != ControllerName {
 		t.Errorf("%s: controllerName = %q, want %q", name, anc.ControllerName, ControllerName)
 	}
-	for _, c := range anc.Conditions {
-		if c.Type == gatewayparamsv1alpha1.VCLPolicyConditionProgrammed {
-			t.Errorf("%s: Programmed must not be set in this phase", name)
-		}
+	accepted := meta.FindStatusCondition(anc.Conditions, gatewayparamsv1alpha1.VCLPolicyConditionAccepted)
+	if accepted == nil {
+		t.Fatalf("%s: no Accepted condition", name)
 	}
-	for _, c := range anc.Conditions {
-		if c.Type == gatewayparamsv1alpha1.VCLPolicyConditionAccepted {
-			return c
-		}
+	// Programmed is always written alongside Accepted, and follows it to
+	// False/NotAccepted.
+	programmed := meta.FindStatusCondition(anc.Conditions, gatewayparamsv1alpha1.VCLPolicyConditionProgrammed)
+	if programmed == nil {
+		t.Errorf("%s: no Programmed condition", name)
+	} else if accepted.Status != metav1.ConditionTrue &&
+		(programmed.Status != metav1.ConditionFalse || programmed.Reason != gatewayparamsv1alpha1.VCLPolicyReasonNotAccepted) {
+		t.Errorf("%s: Accepted=%s but Programmed=%s/%s, want False/NotAccepted", name, accepted.Status, programmed.Status, programmed.Reason)
 	}
-	t.Fatalf("%s: no Accepted condition", name)
-	return metav1.Condition{}
+	return *accepted
 }
 
 func assertVVPAccepted(t *testing.T, r *VarnishVCLPolicyReconciler, name string, want metav1.ConditionStatus, reason string) metav1.Condition {

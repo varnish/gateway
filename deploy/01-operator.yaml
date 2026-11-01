@@ -69,6 +69,11 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
+  # Gateway pods (read-only; the cache is restricted to operator-labelled
+  # pods). Used to derive VarnishVCLPolicy Programmed from per-pod results.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
   # Core resources the operator creates for Gateways
   - apiGroups: ["apps"]
     resources: ["deployments"]

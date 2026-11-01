@@ -1,11 +1,11 @@
 # VarnishVCLPolicy Reference
 
-!!! warning "API preview, not yet wired to the data plane"
-    You can create VarnishVCLPolicy resources, and the operator validates them
-    and sets the `Accepted` condition. No route VCL is compiled or delivered
-    to the gateway pods yet, so attaching a policy does not change how
-    requests are handled. Fields and behaviour may change before the feature
-    leaves preview.
+!!! warning "API preview: end-to-end wiring complete, not yet load-tested or conformance-verified with the feature on"
+    An accepted policy gets a slot on each parent Gateway, its VCL is compiled
+    and loaded on every gateway pod, and requests matched by the route run it.
+    The feature has not yet been load-tested, and the Gateway API conformance
+    suite has not yet been run with it turned on. Fields and behaviour may
+    change before the feature leaves preview.
 
 ## Overview
 
@@ -69,9 +69,24 @@ The VCL document can be at most 256 KiB. All route VCLs of a gateway are deliver
 
 Short name: `kubectl get vvp`.
 
+## Slots
+
+Each Gateway with route VCL enabled has a fixed pool of VCL slots ([`routeVCL.slotPoolSize`](gatewayclassparameters.md#specroutevcl), default 64). An accepted policy occupies one slot on every parent Gateway of its route that has the feature on. The slot number is what ghost tags a matched request with, and what the master VCL dispatches on.
+
+- **Slots are stable.** A policy keeps its slot for as long as it stays accepted and attached, including when its VCL document changes. Only the document in the slot is replaced (and recompiled on each pod).
+- **Assignment order.** A policy without a slot gets the lowest free slot. When several policies need one in the same pass, the oldest (creation timestamp, then namespace/name) goes first. Slots that are already held are honoured before any new ones are handed out.
+- **Release.** A policy that is deleted, retargeted, no longer accepted, or whose route leaves the Gateway frees its slot. The slot can go to another policy in the same pass.
+- **Pool exhaustion.** When every slot is taken, the policy gets no slot on that Gateway. It reports `Programmed=False`, reason `NoSlotAvailable`, and requests on its route keep running the gateway's master VCL. The operator logs a warning once and the `varnish_gateway_route_vcl_unassigned` metric counts it. It gets a slot as soon as one is freed or the pool grows.
+- **Pool shrink.** If `slotPoolSize` is reduced below a slot that is in use, that policy loses its slot (other policies keep their numbers). It is given a free slot inside the smaller pool if there is one, otherwise it waits with reason `SlotOutsidePool`.
+- **Size limit.** All route VCLs of a Gateway travel in one ConfigMap (`{gateway}-route-vcl`). If adding a document would push it past 900 KiB, that policy gets no slot (reason `ConfigMapFull`).
+
+The operator-side metrics `varnish_gateway_route_vcl_slots{state="used|free"}` and `varnish_gateway_route_vcl_unassigned` show pool usage per Gateway.
+
 ## Status and Conditions
 
-The operator writes one entry under `status.ancestors`, with the target HTTPRoute as `ancestorRef`.
+The operator writes one entry under `status.ancestors`, with the target HTTPRoute as `ancestorRef`. It holds two conditions, `Accepted` and `Programmed`.
+
+### Accepted
 
 | Condition      | Reason            | Meaning                                                                                                                                  |
 | -------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -84,4 +99,45 @@ The operator writes one entry under `status.ancestors`, with the target HTTPRout
 
 Conflict resolution: if two policies target the same HTTPRoute, the older one (by creation timestamp, then name) wins. When the winner is deleted or retargeted, the other policy is promoted.
 
-A `Programmed` condition is reserved for when the VCL has compiled and loaded on every gateway pod. It is not set yet. Slot assignment and per-pod compile results will be added to the status later.
+### Programmed
+
+`Programmed` is derived for every parent Gateway that has route VCL enabled, from that Gateway's slot assignment and from the results its pods report in `status.podResults`. A pod counts as "live" when it belongs to the Gateway's Deployment and is neither terminating nor finished.
+
+| Condition          | Reason          | Meaning                                                                                                                       |
+| ------------------ | --------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Programmed=True    | Programmed      | On every Gateway, every live pod reports the current document compiled and its slot label pointing at it                       |
+| Programmed=False   | CompileFailed   | A live pod reports that the current document failed to compile or label. The message carries that pod's compiler output        |
+| Programmed=False   | NoSlotAvailable | A Gateway could not give the policy a slot. The message gives the reason: `NoSlotAvailable`, `SlotOutsidePool` or `ConfigMapFull` |
+| Programmed=False   | Pending         | The policy has a slot, but some live pods have not reported the current document yet (still compiling, just started, or a Gateway has not picked the policy up yet while another has) |
+| Programmed=Unknown | NotProgrammed   | No Gateway has picked the policy up yet                                                                                         |
+| Programmed=False   | NotAccepted     | The policy is not `Accepted`                                                                                                   |
+
+With several parent Gateways, the worst state wins, in the order CompileFailed, NoSlotAvailable, Pending. The message names the Gateway (and pod) each part refers to.
+
+A compile failure leaves the slot's previous VCL in place on that pod. For a new policy that is a placeholder that answers 503 for the route's requests, so fix the VCL or detach the policy.
+
+### status.slots
+
+One entry per parent Gateway on which the policy holds a slot:
+
+```yaml
+status:
+  slots:
+    - gateway: default/my-gateway   # <namespace>/<name>
+      slot: 3
+```
+
+### status.podResults
+
+Written by each gateway pod's chaperone after every attempt to compile and label the policy's VCL. One entry per pod:
+
+| Field        | Description                                                                                       |
+| ------------ | ------------------------------------------------------------------------------------------------- |
+| `podName`    | The gateway pod                                                                                   |
+| `slot`       | The slot the pod loaded the VCL into (`-1` if the slot in the manifest was not a number)          |
+| `hash`       | SHA-256 of the composed route VCL document the result refers to                                   |
+| `programmed` | `true` when the document compiled and the slot label points at it                                 |
+| `message`    | Compiler output, or why the entry was skipped, when `programmed` is `false`                       |
+| `lastUpdate` | When the pod last changed the entry                                                               |
+
+An entry whose `hash` differs from the current document's is stale: the pod has not caught up yet. The operator removes entries for pods that no longer exist. It keeps entries for live pods even when they are stale, because a pod only rewrites its entry when its result changes.

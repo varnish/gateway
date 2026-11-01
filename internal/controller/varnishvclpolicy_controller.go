@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,9 +33,12 @@ const vvpRequeueAfter = 10 * time.Second
 
 // VarnishVCLPolicyReconciler reconciles VarnishVCLPolicy objects.
 //
-// API preview: this controller only validates policies and maintains the
-// Accepted condition. It does not deliver VCL to the data plane, and it never
-// sets Programmed; the data-plane phases of the route VCL work add that.
+// It maintains the Accepted condition (validation, references, enablement,
+// conflicts), and the Programmed condition and status.slots, derived from
+// each parent Gateway's route VCL manifest (written by the Gateway
+// controller) and the per-pod results the chaperones write to
+// status.podResults. It also garbage-collects podResults of pods that no
+// longer exist.
 type VarnishVCLPolicyReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -69,9 +73,23 @@ func (r *VarnishVCLPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !vvpConditionMatches(&vvp, cond) {
-		setVVPAccepted(&vvp, cond)
+	prog, err := r.computeProgrammed(ctx, &vvp, cond.accepted)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !vvpStatusMatches(&vvp, cond, prog) {
+		// Mutate the fetched object: status.podResults belongs to the
+		// gateway pods and must survive this write (apart from the GC of
+		// entries for pods that no longer exist).
+		setVVPConditions(&vvp, cond, prog)
+		vvp.Status.Slots = prog.slots
+		vvp.Status.PodResults = gcPodResults(vvp.Status.PodResults, prog.livePods)
 		if err := r.Status().Update(ctx, &vvp); err != nil {
+			if apierrors.IsConflict(err) {
+				// A chaperone wrote podResults meanwhile; recompute.
+				log.Debug("conflict writing VarnishVCLPolicy status, requeueing", "error", err)
+				return ctrl.Result{RequeueAfter: time.Second}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("r.Status().Update(%s): %w", req.NamespacedName, err)
 		}
 	}
@@ -81,7 +99,8 @@ func (r *VarnishVCLPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// findSiblingVVPs watch rather than written here, so every policy
 	// writes only its own status and failed writes get the normal retry.
 
-	log.Debug("VarnishVCLPolicy reconciliation complete", "accepted", cond.accepted, "reason", cond.reason)
+	log.Debug("VarnishVCLPolicy reconciliation complete", "accepted", cond.accepted, "reason", cond.reason,
+		"programmed", prog.status, "programmedReason", prog.reason)
 	return ctrl.Result{RequeueAfter: cond.requeueAfter}, nil
 }
 
@@ -362,11 +381,11 @@ func vvpConditionMatches(vvp *gatewayparamsv1alpha1.VarnishVCLPolicy, cond vvpCo
 	return false
 }
 
-// setVVPAccepted writes the Accepted condition into ancestors[0], whose
-// ancestorRef is the policy's target, mirroring VarnishCachePolicy. Other
-// condition types already present (none in this version) are preserved, and
-// LastTransitionTime only moves when the status flips.
-func setVVPAccepted(vvp *gatewayparamsv1alpha1.VarnishVCLPolicy, cond vvpCondition) {
+// setVVPConditions writes the Accepted and Programmed conditions into
+// ancestors[0], whose ancestorRef is the policy's target, mirroring
+// VarnishCachePolicy. Other condition types already present are preserved,
+// and LastTransitionTime only moves when a status flips.
+func setVVPConditions(vvp *gatewayparamsv1alpha1.VarnishVCLPolicy, cond vvpCondition, prog vvpProgrammed) {
 	var conditions []metav1.Condition
 	if len(vvp.Status.Ancestors) > 0 {
 		conditions = vvp.Status.Ancestors[0].Conditions
@@ -377,6 +396,13 @@ func setVVPAccepted(vvp *gatewayparamsv1alpha1.VarnishVCLPolicy, cond vvpConditi
 		vvp.Generation,
 		cond.reason,
 		cond.message,
+	))
+	status.SetCondition(&conditions, status.NewCondition(
+		gatewayparamsv1alpha1.VCLPolicyConditionProgrammed,
+		prog.status,
+		vvp.Generation,
+		prog.reason,
+		prog.message,
 	))
 	vvp.Status.Ancestors = []gatewayparamsv1alpha1.VarnishVCLPolicyAncestorStatus{{
 		AncestorRef:    vvp.Spec.TargetRef,
@@ -416,11 +442,16 @@ func (r *VarnishVCLPolicyReconciler) findVVPsForHTTPRoute(ctx context.Context, o
 }
 
 // findVVPsForConfigMap maps a ConfigMap event to the policies in the same
-// namespace that reference it by name.
+// namespace that reference it by name. A gateway's "{gateway}-route-vcl"
+// ConfigMap instead maps to the policies listed in its manifest, in any
+// namespace (slot assignment drives Programmed and status.slots).
 func (r *VarnishVCLPolicyReconciler) findVVPsForConfigMap(ctx context.Context, obj client.Object) []reconcile.Request {
 	cm, ok := obj.(*corev1.ConfigMap)
 	if !ok {
 		return nil
+	}
+	if isRouteVCLConfigMap(cm) {
+		return r.findVVPsForRouteVCLConfigMap(cm)
 	}
 	var list gatewayparamsv1alpha1.VarnishVCLPolicyList
 	if err := r.List(ctx, &list, client.InNamespace(cm.Namespace)); err != nil {
@@ -490,14 +521,16 @@ func (r *VarnishVCLPolicyReconciler) findAllVVPs(ctx context.Context, _ client.O
 
 // SetupWithManager sets up the VarnishVCLPolicy controller with the Manager.
 func (r *VarnishVCLPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// GenerationChangedPredicate on the primary resource ignores our own
-	// status writes, which would otherwise re-trigger reconciles in a loop.
-	// On HTTPRoute, Gateway and GatewayClass it filters out the frequent
-	// status-only updates: only spec changes (parentRefs, gatewayClassName,
-	// parametersRef), creates and deletes affect a policy's condition.
+	// The primary resource passes spec changes and status.podResults
+	// changes (gateway pods reporting compile results), and ignores our own
+	// condition writes, which would otherwise re-trigger reconciles in a
+	// loop. On HTTPRoute, Gateway and GatewayClass GenerationChangedPredicate
+	// filters out the frequent status-only updates: only spec changes
+	// (parentRefs, gatewayClassName, parametersRef), creates and deletes
+	// affect a policy's conditions.
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
-		For(&gatewayparamsv1alpha1.VarnishVCLPolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		For(&gatewayparamsv1alpha1.VarnishVCLPolicy{}, builder.WithPredicates(vvpGenerationOrPodResultsChanged())).
 		// Second source on the same kind: a policy's create, retarget or
 		// delete enqueues its same-target siblings (conflict re-evaluation).
 		Watches(
@@ -527,6 +560,15 @@ func (r *VarnishVCLPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&gatewayparamsv1alpha1.GatewayClassParameters{},
 			handler.EnqueueRequestsFromMapFunc(r.findAllVVPs),
+		).
+		// Gateway Deployments: rollouts and pod churn change the set of
+		// live pods that must report a policy's VCL before it counts as
+		// Programmed. This stands in for a cluster-wide Pod watch; pods
+		// themselves are only listed (through a cache restricted to
+		// operator-labelled pods).
+		Watches(
+			&appsv1.Deployment{},
+			handler.EnqueueRequestsFromMapFunc(r.findVVPsForDeployment),
 		).
 		Complete(r)
 }
