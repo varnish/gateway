@@ -1,0 +1,105 @@
+varnishtest "ghost sets X-Ghost-VCL-Slot only for routes with vcl_slot"
+
+server s1 {
+    rxreq
+    expect req.url == "/a"
+    expect req.http.X-Ghost-VCL-Slot == "7"
+    txresp -body "a"
+
+    rxreq
+    expect req.url == "/b"
+    expect req.http.X-Ghost-VCL-Slot == <undef>
+    txresp -body "b"
+
+    rxreq
+    expect req.url == "/b"
+    expect req.http.X-Ghost-VCL-Slot == <undef>
+    txresp -body "b"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOT
+{
+    "version": 2,
+    "vhosts": {
+        "api.example.com": {
+            "routes": [
+                {
+                    "path_match": {"type": "Exact", "value": "/a"},
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
+                    ],
+                    "vcl_slot": 7,
+                    "priority": 100
+                },
+                {
+                    "path_match": {"type": "Exact", "value": "/b"},
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOT
+}
+
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        new router = ghost.ghost_backend("${tmpdir}/ghost.json");
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                return (synth(500, "Reload failed"));
+            }
+        }
+        # Trust boundary (copied from the gateway preamble)
+        unset req.http.X-Ghost-VCL-Slot;
+        set req.backend_hint = router.recv();
+        return (pass);
+    }
+} -start
+
+client c_reload {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+client c1 {
+    txreq -url "/a" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "a"
+} -run
+
+client c2 {
+    txreq -url "/b" -hdr "Host: api.example.com"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "b"
+} -run
+
+# Client-supplied value must not reach the backend
+client c3 {
+    txreq -url "/b" -hdr "Host: api.example.com" -hdr "X-Ghost-VCL-Slot: 99"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "b"
+} -run
+
+server s1 -wait

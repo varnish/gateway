@@ -194,6 +194,7 @@ type Route struct {
 	Listeners   []string          `json:"listeners,omitempty"`  // Varnish socket names (e.g., ["http-80"])
 	RouteName   string            `json:"route_name,omitempty"` // HTTPRoute namespace/name
 	RuleName    string            `json:"rule_name,omitempty"`  // HTTPRouteRule name for per-rule VCP targeting
+	VCLSlot     *int              `json:"vcl_slot,omitempty"`   // Per-route VCL slot; nil means no route VCL
 	Priority    int               `json:"priority"`
 	RuleIndex   int               `json:"rule_index"`             // Original rule ordering for tiebreaking
 	CachePolicy *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy
@@ -227,6 +228,7 @@ type RouteBackends struct {
 	BackendGroups []BackendGroup    `json:"backend_groups"`
 	Listeners     []string          `json:"listeners,omitempty"`  // Varnish socket names (e.g., ["http-80"])
 	RouteName     string            `json:"route_name,omitempty"` // HTTPRoute namespace/name
+	VCLSlot       *int              `json:"vcl_slot,omitempty"`   // Per-route VCL slot; nil means no route VCL
 	Priority      int               `json:"priority"`
 	RuleIndex     int               `json:"rule_index"`
 	CachePolicy   *CachePolicy      `json:"cache_policy,omitempty"` // Caching behavior from VarnishCachePolicy

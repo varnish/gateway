@@ -222,6 +222,9 @@ pub struct Route {
     /// HTTPRoute namespace/name for X-Gateway-Route header.
     #[serde(default)]
     pub route_name: Option<String>,
+    /// Per-route VCL slot. When set, recv sets X-Ghost-VCL-Slot to its decimal value.
+    #[serde(default)]
+    pub vcl_slot: Option<u32>,
     pub priority: i32,
     #[serde(default)]
     pub rule_index: i32,

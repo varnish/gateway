@@ -95,6 +95,8 @@ The `recv()` method sets two headers on every request for use in user VCL:
 - `X-Gateway-Listener` — Varnish socket name (e.g., `http-80`)
 - `X-Gateway-Route` — HTTPRoute namespace/name (e.g., `default/my-route`)
 
+It also sets the internal `X-Ghost-VCL-Slot` header (decimal slot number) when the matched route has `vcl_slot` set.
+
 For the full API reference, see [API.md](API.md).
 
 ### Stack Requirements

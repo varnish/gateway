@@ -52,3 +52,18 @@ Other assumptions:
   (`GatewayClassParametersSpec.Resources`, `VarnishCachePolicyAncestorStatus.AncestorRef`).
 - Operator skips the VVP controller with a warning when the CRD is not
   installed (Helm does not upgrade CRDs).
+
+## P3 — ghost sets X-Ghost-VCL-Slot (#98)
+
+- Wire format: optional integer `vcl_slot` on route objects in routing.json
+  (`Route`) and ghost.json (`RouteBackends`); Go `*int` with `omitempty`,
+  Rust `Option<u32>` with `serde(default)`. Absent/null = no route VCL.
+- `mergeRoutesByMatchCriteria` carries `VCLSlot` from the first route and
+  includes it in the merge key.
+- Ghost `recv()` sets request header `X-Ghost-VCL-Slot: <decimal slot>` (no
+  padding) only when the matched route has a slot (threaded through
+  `RouteEntry` -> `RouteMatchResult` -> `RouteRequestResult` like `route_name`).
+  The default_backends synthetic route has no slot.
+- Preamble `vcl_recv` unsets client-supplied `X-Ghost-VCL-Slot` before ghost
+  runs. No dispatch block yet (later phase).
+- VTC: `ghost/tests/test_vcl_slot.vtc`.

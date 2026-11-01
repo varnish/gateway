@@ -31,6 +31,7 @@ sub vcl_recv {
     unset req.http.X-Ghost-Filter-Context;
     unset req.http.X-Ghost-Redirect-Config;
     unset req.http.X-Ghost-Error;
+    unset req.http.X-Ghost-VCL-Slot;
     unset req.http.X-Gateway-Listener;
     unset req.http.X-Gateway-Route;
 

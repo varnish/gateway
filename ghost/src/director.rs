@@ -215,6 +215,8 @@ pub struct RouteEntry {
     pub listeners: Vec<String>,
     /// HTTPRoute namespace/name for X-Gateway-Route header.
     pub route_name: Option<String>,
+    /// Per-route VCL slot for X-Ghost-VCL-Slot header.
+    pub vcl_slot: Option<u32>,
     pub priority: i32,
     pub rule_index: i32,
     /// Cache policy from VarnishCachePolicy. None means pass-through (no caching).
@@ -450,6 +452,7 @@ pub fn build_vhost_directors(
                 backend_groups: groups,
                 listeners: route.listeners.clone(),
                 route_name: route.route_name.clone(),
+                vcl_slot: route.vcl_slot,
                 priority: route.priority,
                 rule_index: route.rule_index,
                 cache_policy: compiled.cache_policy,
@@ -479,6 +482,7 @@ pub fn build_vhost_directors(
                 backend_groups: default_groups,
                 listeners: Vec::new(),
                 route_name: None,
+                vcl_slot: None,
                 priority: 0,
                 rule_index: i32::MAX,
                 cache_policy: None,
