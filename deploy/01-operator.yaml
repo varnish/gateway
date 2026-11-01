@@ -55,6 +55,12 @@ rules:
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["varnishcachepolicies/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishvclpolicies"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishvclpolicies/status"]
+    verbs: ["get", "update", "patch"]
   # Garbage collect completed VarnishCacheInvalidation resources
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["varnishcacheinvalidations"]

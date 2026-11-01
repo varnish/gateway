@@ -3677,6 +3677,29 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              routeVCL:
+                description: |-
+                  RouteVCL gates per-HTTPRoute VCL (VarnishVCLPolicy) for Gateways of
+                  this class. API preview: not yet wired to the data plane. Changes do
+                  not trigger pod restarts.
+                properties:
+                  enabled:
+                    description: |-
+                      Enabled turns the feature on. Default false. Attaching VCL to an
+                      HTTPRoute grants code execution inside the gateway pod to anyone who
+                      can create an HTTPRoute in a namespace routed by this class; see the
+                      documentation.
+                    type: boolean
+                  slotPoolSize:
+                    description: |-
+                      SlotPoolSize is the number of pre-allocated VCL label slots per
+                      gateway. Each slot can hold one route VCL. Changing it recompiles the
+                      master VCL (hot, no pod restart). Defaults to 16; the ceiling is 256.
+                    format: int32
+                    maximum: 256
+                    minimum: 1
+                    type: integer
+                type: object
               service:
                 description: |-
                   Service configures the data-plane Service. When omitted, the operator

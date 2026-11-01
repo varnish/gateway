@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
@@ -181,6 +183,26 @@ func main() {
 		Logger: logger.With("controller", "VarnishCachePolicy"),
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "controller", "VarnishCachePolicy", "error", err)
+		os.Exit(1)
+	}
+
+	// Setup VarnishVCLPolicy controller (API preview: status only, no data-plane effect).
+	// Helm does not upgrade CRDs, so an operator upgraded without applying the
+	// new CRD would otherwise fail to start on the missing watch. Skip the
+	// controller with a warning in that case.
+	vvpGK := schema.GroupKind{Group: gatewayparamsv1alpha1.GroupName, Kind: "VarnishVCLPolicy"}
+	if _, err := mgr.GetRESTMapper().RESTMapping(vvpGK, gatewayparamsv1alpha1.GroupVersion.Version); err != nil {
+		if !meta.IsNoMatchError(err) {
+			logger.Error("unable to look up VarnishVCLPolicy CRD", "error", err)
+			os.Exit(1)
+		}
+		logger.Warn("VarnishVCLPolicy CRD not installed; VarnishVCLPolicy controller disabled. Apply the chart CRDs to enable it.")
+	} else if err := (&controller.VarnishVCLPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Logger: logger.With("controller", "VarnishVCLPolicy"),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create controller", "controller", "VarnishVCLPolicy", "error", err)
 		os.Exit(1)
 	}
 

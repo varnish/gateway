@@ -1123,38 +1123,46 @@ func (r *GatewayReconciler) validateListenerTLSRefs(ctx context.Context, gateway
 // getGatewayClassParameters fetches GatewayClassParameters for the given Gateway.
 // Returns nil if not found or if ParametersRef is not set.
 func (r *GatewayReconciler) getGatewayClassParameters(ctx context.Context, gateway *gatewayv1.Gateway) *gatewayparamsv1alpha1.GatewayClassParameters {
-	// 1. Get GatewayClass
+	_, params, err := resolveGatewayClassParameters(ctx, r.Client, string(gateway.Spec.GatewayClassName))
+	if err != nil {
+		r.Logger.Error("failed to resolve GatewayClassParameters",
+			"gatewayClass", gateway.Spec.GatewayClassName, "error", err)
+		return nil
+	}
+	return params
+}
+
+// resolveGatewayClassParameters looks up a GatewayClass by name and the
+// GatewayClassParameters its parametersRef points to.
+//
+// gc is nil when the GatewayClass does not exist. params is nil when the class
+// has no parametersRef, the ref points at a type other than our
+// GatewayClassParameters, or the referenced object does not exist. err is
+// non-nil only for unexpected API errors.
+func resolveGatewayClassParameters(ctx context.Context, c client.Reader, className string) (*gatewayv1.GatewayClass, *gatewayparamsv1alpha1.GatewayClassParameters, error) {
 	var gatewayClass gatewayv1.GatewayClass
-	if err := r.Get(ctx, types.NamespacedName{Name: string(gateway.Spec.GatewayClassName)}, &gatewayClass); err != nil {
-		if !apierrors.IsNotFound(err) {
-			r.Logger.Error("failed to get GatewayClass", "error", err)
+	if err := c.Get(ctx, types.NamespacedName{Name: className}, &gatewayClass); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil, nil
 		}
-		return nil
+		return nil, nil, fmt.Errorf("c.Get(GatewayClass %s): %w", className, err)
 	}
 
-	// 2. Check if ParametersRef is set
-	if gatewayClass.Spec.ParametersRef == nil {
-		return nil
-	}
-
-	// 3. Validate ParametersRef points to our CRD
 	ref := gatewayClass.Spec.ParametersRef
-	if string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
+	if ref == nil ||
+		string(ref.Group) != gatewayparamsv1alpha1.GroupName ||
 		string(ref.Kind) != "GatewayClassParameters" {
-		return nil // Not our parameters type
+		return &gatewayClass, nil, nil
 	}
 
-	// 4. Fetch GatewayClassParameters
 	var params gatewayparamsv1alpha1.GatewayClassParameters
-	if err := r.Get(ctx, types.NamespacedName{Name: ref.Name}, &params); err != nil {
-		if !apierrors.IsNotFound(err) {
-			r.Logger.Error("failed to get GatewayClassParameters",
-				"name", ref.Name, "error", err)
+	if err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, &params); err != nil {
+		if apierrors.IsNotFound(err) {
+			return &gatewayClass, nil, nil
 		}
-		return nil
+		return &gatewayClass, nil, fmt.Errorf("c.Get(GatewayClassParameters %s): %w", ref.Name, err)
 	}
-
-	return &params
+	return &gatewayClass, &params, nil
 }
 
 // getUserVCL returns user-provided VCL from GatewayClassParameters.

@@ -95,6 +95,43 @@ type GatewayClassParametersSpec struct {
 	// Service shape changes do NOT trigger pod restarts.
 	// +optional
 	Service *ServiceConfig `json:"service,omitempty"`
+
+	// RouteVCL gates per-HTTPRoute VCL (VarnishVCLPolicy) for Gateways of
+	// this class. API preview: not yet wired to the data plane. Changes do
+	// not trigger pod restarts.
+	// +optional
+	RouteVCL *RouteVCLConfig `json:"routeVCL,omitempty"`
+}
+
+const (
+	// DefaultRouteVCLSlotPoolSize is the number of route VCL slots per
+	// gateway when RouteVCLConfig.SlotPoolSize is unset.
+	// Provisional: the route VCL measurement phase (P1b) sets the final value.
+	DefaultRouteVCLSlotPoolSize = 16
+
+	// MaxRouteVCLSlotPoolSize is the largest accepted
+	// RouteVCLConfig.SlotPoolSize. Keep in sync with the kubebuilder Maximum
+	// marker on that field.
+	// Provisional: the route VCL measurement phase (P1b) sets the final value.
+	MaxRouteVCLSlotPoolSize = 256
+)
+
+// RouteVCLConfig configures per-HTTPRoute VCL for a GatewayClass.
+type RouteVCLConfig struct {
+	// Enabled turns the feature on. Default false. Attaching VCL to an
+	// HTTPRoute grants code execution inside the gateway pod to anyone who
+	// can create an HTTPRoute in a namespace routed by this class; see the
+	// documentation.
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+
+	// SlotPoolSize is the number of pre-allocated VCL label slots per
+	// gateway. Each slot can hold one route VCL. Changing it recompiles the
+	// master VCL (hot, no pod restart). Defaults to 16; the ceiling is 256.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=256
+	SlotPoolSize *int32 `json:"slotPoolSize,omitempty"`
 }
 
 // PodDisruptionBudget configures a PodDisruptionBudget for Gateway pods.
