@@ -67,3 +67,28 @@ Other assumptions:
 - Preamble `vcl_recv` unsets client-supplied `X-Ghost-VCL-Slot` before ghost
   runs. No dispatch block yet (later phase).
 - VTC: `ghost/tests/test_vcl_slot.vtc`.
+
+## Varnish facts probed before P4 (local 9.0.0, scripts in the session scratchpad `p4probe/`)
+
+- `varnishd -C -f master.vcl` **fails** for a master that references labels
+  (`Symbol not found: 'gwvcl-7'`). Compile tests must drive a manager process
+  (`varnishd -f '' -F -n <dir>`, child never started) and load placeholder,
+  labels, then master through the CLI.
+- `vcl.load`/`vcl.label`/`vcl.use` all work with no child running.
+- A labelled VCL cannot be discarded (`Cannot discard labeled VCL program`),
+  cannot be set cold (`A labeled VCL cannot be set cold`), and a label the
+  master references cannot be discarded (`other VCLs depend on it`).
+- `return (vcl(...))` after a restart fails the request with
+  `VCL_Error Illegal return(vcl): Not after restarts` (503). The dispatch
+  block must be guarded with `req.restarts == 0` (and `req.esi_level == 0`
+  for good measure).
+- A VCL that itself contains `return (vcl(gwvcl-N))` compiles and can be
+  labelled as long as it does not point at itself (`would create a loop`).
+  So a route VCL *can* name another slot's label; the second hop fails at
+  runtime. Caveat for P7, acceptable under G1.
+- **Latent bug:** `internal/varnishadm.parseVCLList` was written for the
+  pre-7.x text format (`auto/warm`). Varnish 9 prints five columns
+  (`status state temp busy name`), so every parsed `Name` comes back as
+  `"0 <name>"` (`"- <name>"` with no child) and the reloader's
+  `garbageCollect` never matches the `vcl_` prefix. P5 switches to
+  `vcl.list -j` and fixes this.
