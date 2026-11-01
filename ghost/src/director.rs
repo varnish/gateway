@@ -19,7 +19,9 @@ use varnish::vcl::{
 };
 
 use crate::backend_pool::BackendPool;
-use crate::config::{BackendGroup, Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch};
+use crate::config::{
+    BackendGroup, Config, HeaderMatch, MatchType, PathMatch, PathMatchType, QueryParamMatch,
+};
 use crate::internal_error_backend::{InternalErrorBackend, InternalErrorBody};
 use crate::not_found_backend::{NotFoundBackend, NotFoundBody};
 use crate::redirect_backend::{RedirectBackend, RedirectBody};
@@ -197,6 +199,8 @@ pub struct RouteEntry {
     pub listeners: Vec<String>,
     /// HTTPRoute namespace/name for X-Gateway-Route header.
     pub route_name: Option<String>,
+    /// Per-route VCL slot for X-Ghost-VCL-Slot header.
+    pub vcl_slot: Option<u32>,
     pub priority: i32,
     pub rule_index: i32,
     /// Cache policy from VarnishCachePolicy. None means pass-through (no caching).
@@ -319,10 +323,7 @@ pub fn build_vhost_directors(
                             }),
                             Some(pattern) => {
                                 let re = Regex::new(pattern).map_err(|e| {
-                                    format!(
-                                        "Invalid bypass header regex '{}': {}",
-                                        pattern, e
-                                    )
+                                    format!("Invalid bypass header regex '{}': {}", pattern, e)
                                 })?;
                                 Ok(BypassHeaderCompiled::Regex {
                                     name: bh.name.clone(),
@@ -345,6 +346,7 @@ pub fn build_vhost_directors(
                 backend_groups: groups,
                 listeners: route.listeners.clone(),
                 route_name: route.route_name.clone(),
+                vcl_slot: route.vcl_slot,
                 priority: route.priority,
                 rule_index: route.rule_index,
                 cache_policy: route.cache_policy.clone(),
@@ -374,6 +376,7 @@ pub fn build_vhost_directors(
                 backend_groups: default_groups,
                 listeners: Vec::new(),
                 route_name: None,
+                vcl_slot: None,
                 priority: 0,
                 rule_index: i32::MAX,
                 cache_policy: None,
@@ -523,7 +526,6 @@ impl GhostDirectorBundle {
 }
 
 impl GhostDirector {
-
     /// Reload configuration from disk into this instance only.
     ///
     /// Use [`GhostDirector::reload_and_publish`] for an externally triggered
@@ -638,10 +640,12 @@ impl GhostDirector {
         let directors = self.vhost_directors.load();
         let vhost = match match_hostname(&directors, &host) {
             Some(dir) => dir,
-            None => return vhost_director::RouteRequestResult {
-                backend: Some(self.not_found_backend.0.clone()),
-                ..Default::default()
-            },
+            None => {
+                return vhost_director::RouteRequestResult {
+                    backend: Some(self.not_found_backend.0.clone()),
+                    ..Default::default()
+                }
+            }
         };
 
         let mut result = vhost.route_request(http, listener);

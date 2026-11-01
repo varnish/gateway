@@ -3,6 +3,7 @@ package ghost
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -114,6 +115,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 		filters     string // JSON serialization of Filters
 		listeners   string // sorted, comma-joined
 		cachePolicy string // JSON serialization of CachePolicy
+		vclSlot     string // decimal VCL slot or empty
 		priority    int
 		ruleIndex   int
 	}
@@ -134,6 +136,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			filters:     serializeFilters(route.Filters),
 			listeners:   serializeListeners(route.Listeners),
 			cachePolicy: serializeCachePolicy(route.CachePolicy),
+			vclSlot:     serializeVCLSlot(route.VCLSlot),
 			priority:    route.Priority,
 			ruleIndex:   route.RuleIndex,
 		}
@@ -163,6 +166,7 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 			BackendGroups: groups,
 			Listeners:     firstRoute.Listeners,
 			RouteName:     firstRoute.RouteName,
+			VCLSlot:       firstRoute.VCLSlot,
 			Priority:      key.priority,
 			RuleIndex:     key.ruleIndex,
 			CachePolicy:   firstRoute.CachePolicy,
@@ -170,6 +174,14 @@ func mergeRoutesByMatchCriteria(routes []Route, endpoints ServiceEndpoints) []Ro
 	}
 
 	return result
+}
+
+// serializeVCLSlot converts the optional VCL slot to a string for grouping.
+func serializeVCLSlot(s *int) string {
+	if s == nil {
+		return ""
+	}
+	return strconv.Itoa(*s)
 }
 
 // serializePathMatch converts PathMatch to a string for grouping.

@@ -222,6 +222,9 @@ pub struct Route {
     /// HTTPRoute namespace/name for X-Gateway-Route header.
     #[serde(default)]
     pub route_name: Option<String>,
+    /// Per-route VCL slot. When set, recv sets X-Ghost-VCL-Slot to its decimal value.
+    #[serde(default)]
+    pub vcl_slot: Option<u32>,
     pub priority: i32,
     #[serde(default)]
     pub rule_index: i32,
@@ -319,10 +322,7 @@ fn validate(config: &Config) -> Result<(), String> {
         }
 
         for (g, group) in vhost.default_backends.iter().enumerate() {
-            validate_backend_group(
-                &format!("{} default_backends group {}", hostname, g),
-                group,
-            )?;
+            validate_backend_group(&format!("{} default_backends group {}", hostname, g), group)?;
         }
     }
 
@@ -374,7 +374,10 @@ fn validate_backend_group(context: &str, group: &BackendGroup) -> Result<(), Str
             ));
         }
         if ep.hostname.is_empty() {
-            return Err(format!("{}: external_proxy.hostname cannot be empty", context));
+            return Err(format!(
+                "{}: external_proxy.hostname cannot be empty",
+                context
+            ));
         }
         if ep.port == 0 {
             return Err(format!("{}: external_proxy.port cannot be 0", context));
@@ -803,7 +806,10 @@ mod tests {
 
         let config = load(file.path()).unwrap();
         let group = &config.vhosts["media.example.com"].routes[0].backend_groups[0];
-        let ep = group.external_proxy.as_ref().expect("expected external_proxy");
+        let ep = group
+            .external_proxy
+            .as_ref()
+            .expect("expected external_proxy");
         assert_eq!(ep.hostname, "web2026-assets.s3.nl-ams.scw.cloud");
         assert_eq!(ep.port, 443);
         assert!(ep.tls);
@@ -860,7 +866,11 @@ mod tests {
             }"#,
         );
         let err = load(file.path()).expect_err("expected validation error");
-        assert!(err.contains("hostname cannot be empty"), "unexpected error: {}", err);
+        assert!(
+            err.contains("hostname cannot be empty"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
