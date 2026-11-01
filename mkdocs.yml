@@ -121,6 +121,7 @@ nav:
       - Canary Deployments: guides/canary-deployments.md
       - Logging: guides/logging.md
       - Custom VCL: guides/custom-vcl.md
+      - Route VCL (preview): guides/route-vcl.md
       - Cache Invalidation: guides/cache-invalidation.md
       - External Backends: guides/external-backends.md
       - TLS: guides/tls.md
