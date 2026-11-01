@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/pprof"
 	"os"
@@ -57,12 +58,19 @@ type Config struct {
 	// Ghost configuration
 	GhostConfigPath string // path to write ghost.json
 
-	// VCL configuration
-	VCLPath string // path to watch for VCL changes
-
 	// Kubernetes
 	Namespace     string // kubernetes namespace to watch
 	ConfigMapName string // name of ConfigMap containing routing.json and main.vcl
+
+	// RouteVCLConfigMapName is the ConfigMap with per-HTTPRoute VCL documents
+	// and their slot manifest (empty = never watched).
+	RouteVCLConfigMapName string
+
+	// Route VCL compile throttle (token bucket on vcl.inline of route VCLs;
+	// the master and the placeholder are never throttled). Rate is compiles
+	// per second, 0 disables it.
+	RouteVCLCompileRate  float64
+	RouteVCLCompileBurst int
 
 	// TLS configuration
 	TLSCertDir string   // path to TLS cert directory (empty = no TLS)
@@ -102,7 +110,6 @@ func loadConfig() (*Config, error) {
 		VarnishStorage:    parseList(getEnvOrDefault("VARNISH_STORAGE", "malloc,256m")),
 		VarnishdExtraArgs: parseList(os.Getenv("VARNISHD_EXTRA_ARGS")), // no default, optional
 		GhostConfigPath:   getEnvOrDefault("GHOST_CONFIG_PATH", "/var/run/varnish/ghost.json"),
-		VCLPath:           getEnvOrDefault("VCL_PATH", "/var/run/varnish/main.vcl"),
 		Namespace:         getEnvOrDefault("NAMESPACE", "default"),
 		ConfigMapName:     getEnvOrDefault("CONFIGMAP_NAME", "gateway-vcl"),
 		TLSCertDir:        os.Getenv("TLS_CERT_DIR"),                  // empty by default
@@ -113,6 +120,26 @@ func loadConfig() (*Config, error) {
 		DashboardAddr:     os.Getenv("DASHBOARD_ADDR"), // empty = disabled
 		GatewayName:       os.Getenv("GATEWAY_NAME"),
 		PodName:           os.Getenv("POD_NAME"),
+	}
+
+	cfg.RouteVCLConfigMapName = os.Getenv("ROUTE_VCL_CONFIGMAP_NAME")
+	if cfg.RouteVCLConfigMapName == "" && cfg.GatewayName != "" {
+		cfg.RouteVCLConfigMapName = cfg.GatewayName + vcl.RouteVCLConfigMapSuffix
+	}
+
+	cfg.RouteVCLCompileRate = vcl.DefaultRouteVCLCompileRate
+	if v := os.Getenv("ROUTE_VCL_COMPILE_RATE"); v != "" {
+		cfg.RouteVCLCompileRate, err = strconv.ParseFloat(v, 64)
+		if err != nil || cfg.RouteVCLCompileRate < 0 || math.IsNaN(cfg.RouteVCLCompileRate) || math.IsInf(cfg.RouteVCLCompileRate, 0) {
+			return nil, fmt.Errorf("invalid ROUTE_VCL_COMPILE_RATE %q: want a number >= 0", v)
+		}
+	}
+	cfg.RouteVCLCompileBurst = vcl.DefaultRouteVCLCompileBurst
+	if v := os.Getenv("ROUTE_VCL_COMPILE_BURST"); v != "" {
+		cfg.RouteVCLCompileBurst, err = strconv.Atoi(v)
+		if err != nil || cfg.RouteVCLCompileBurst < 0 {
+			return nil, fmt.Errorf("invalid ROUTE_VCL_COMPILE_BURST %q: want an integer >= 0", v)
+		}
 	}
 
 	return cfg, nil
@@ -189,9 +216,9 @@ func run() error {
 		"adminPort", cfg.AdminPort,
 		"varnishHTTPAddr", cfg.VarnishHTTPAddr,
 		"ghostConfigPath", cfg.GhostConfigPath,
-		"vclPath", cfg.VCLPath,
 		"namespace", cfg.Namespace,
 		"configMapName", cfg.ConfigMapName,
+		"routeVCLConfigMapName", cfg.RouteVCLConfigMapName,
 	)
 
 	// Create Kubernetes client - try in-cluster first, fall back to kubeconfig
@@ -328,10 +355,10 @@ func run() error {
 	)
 	ghostWatcher.SetDashboard(dashBus, dashState)
 
-	// 3. VCL reloader - watches main.vcl and hot-reloads via varnishadm
+	// 3. VCL reloader - converges varnishd's master, slot labels and route
+	// VCLs on the gateway's ConfigMaps via varnishadm
 	vclReloader := vcl.New(
 		vadm,
-		cfg.VCLPath,
 		vcl.DefaultKeepCount,
 		k8sClient,
 		cfg.ConfigMapName,
@@ -339,6 +366,9 @@ func run() error {
 		logger.With("component", "vcl"),
 	)
 	vclReloader.SetDashboard(dashBus)
+	vclReloader.SetRouteVCLConfigMap(cfg.RouteVCLConfigMapName)
+	vclReloader.SetStatusWriter(dynClient, cfg.PodName)
+	vclReloader.SetCompileThrottle(cfg.RouteVCLCompileRate, cfg.RouteVCLCompileBurst)
 
 	// 4. TLS reloader - watches TLS cert directory and hot-reloads certs (if TLS enabled)
 	var tlsReloader *vtls.Reloader
@@ -567,6 +597,26 @@ func run() error {
 			return nil
 		}
 
+		// Step 2.5: Wait for the first route VCL slot pass, so a restarted
+		// pod does not answer programmed slots with the placeholder's 503
+		// while their route VCLs are still compiling.
+		slotsStart := time.Now()
+		slotsTick := time.NewTicker(10 * time.Second)
+	waitSlots:
+		for {
+			select {
+			case <-vclReloader.SlotsReady():
+				slog.Info("route VCL slots loaded", "waited", time.Since(slotsStart).Round(time.Millisecond))
+				break waitSlots
+			case <-slotsTick.C:
+				slog.Info("waiting for route VCL slot pass", "elapsed", time.Since(slotsStart).Round(time.Second))
+			case <-gctx.Done():
+				slotsTick.Stop()
+				return nil
+			}
+		}
+		slotsTick.Stop()
+
 		// Step 3: Start the child process
 		slog.Debug("starting Varnish child process")
 		if _, err := vadm.Start(); err != nil {
@@ -603,6 +653,11 @@ func run() error {
 	// Metrics updater: subscribes to dashboard events and increments Prometheus counters
 	g.Go(func() error {
 		return runMetricsUpdater(gctx, dashBus, chapMetrics)
+	})
+
+	// State tracker: applies route VCL snapshots from the event bus
+	g.Go(func() error {
+		return dashState.Run(gctx)
 	})
 
 	// Start dashboard server (if configured)

@@ -11,7 +11,9 @@ fn main() {
     let ver = semver::Version::parse(&version)
         .unwrap_or_else(|_| panic!("varnishapi invalid version: {version}"));
     if ver < semver::Version::new(9, 0, 0) {
-        panic!("Varnish {version} is not supported. Varnish 9.0+ is required for BackendTLS support.");
+        panic!(
+            "Varnish {version} is not supported. Varnish 9.0+ is required for BackendTLS support."
+        );
     }
     println!("cargo::rustc-cfg=varnishsys_90_sslflags");
 

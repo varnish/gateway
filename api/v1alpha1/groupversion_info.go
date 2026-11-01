@@ -32,6 +32,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&VarnishCachePolicyList{},
 		&VarnishCacheInvalidation{},
 		&VarnishCacheInvalidationList{},
+		&VarnishVCLPolicy{},
+		&VarnishVCLPolicyList{},
 	)
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil

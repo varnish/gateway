@@ -2,6 +2,7 @@ package ghost
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -772,5 +773,55 @@ func TestBackendTLSMergesIntoWeightedGroups(t *testing.T) {
 	}
 	if !weights[90] || !weights[10] {
 		t.Errorf("expected weights {90,10}, got %v", weights)
+	}
+}
+
+func TestGenerateVCLSlot(t *testing.T) {
+	slot := 7
+	routingConfig := &RoutingConfig{
+		Version: 2,
+		VHosts: map[string]VHostRouting{
+			"api.example.com": {
+				Routes: []Route{
+					{
+						PathMatch: &PathMatch{Type: PathMatchExact, Value: "/a"},
+						Service:   "svc", Namespace: "default", Port: 80, Weight: 100,
+						Priority: 100, VCLSlot: &slot,
+					},
+					{
+						PathMatch: &PathMatch{Type: PathMatchExact, Value: "/b"},
+						Service:   "svc", Namespace: "default", Port: 80, Weight: 100,
+						Priority: 100,
+					},
+				},
+			},
+		},
+	}
+	config := Generate(routingConfig, ServiceEndpoints{})
+	routes := config.VHosts["api.example.com"].Routes
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(routes))
+	}
+	for _, r := range routes {
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.PathMatch.Value {
+		case "/a":
+			if r.VCLSlot == nil || *r.VCLSlot != 7 {
+				t.Errorf("/a: expected vcl_slot 7, got %v", r.VCLSlot)
+			}
+			if !strings.Contains(string(data), `"vcl_slot":7`) {
+				t.Errorf("/a: vcl_slot missing from JSON: %s", data)
+			}
+		case "/b":
+			if r.VCLSlot != nil {
+				t.Errorf("/b: expected nil vcl_slot, got %d", *r.VCLSlot)
+			}
+			if strings.Contains(string(data), "vcl_slot") {
+				t.Errorf("/b: vcl_slot should be omitted: %s", data)
+			}
+		}
 	}
 }

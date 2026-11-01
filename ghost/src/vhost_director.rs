@@ -30,6 +30,7 @@ pub struct RouteMatchResult<'a> {
     pub filters: Option<Arc<RouteFilters>>,
     pub matched_path: Option<&'a PathMatchCompiled>,
     pub route_name: Option<&'a str>,
+    pub vcl_slot: Option<u32>,
     pub cache_policy: Option<&'a crate::config::CachePolicy>,
     pub bypass_headers: &'a [crate::director::BypassHeaderCompiled],
 }
@@ -40,6 +41,7 @@ pub struct RouteMatchResult<'a> {
 pub struct RouteRequestResult {
     pub backend: Option<BackendRef>,
     pub route_name: Option<String>,
+    pub vcl_slot: Option<u32>,
     pub log_msgs: Vec<(LogTag, String)>,
     /// Whether to bypass the cache entirely (return(pass) in VCL terms).
     pub pass: bool,
@@ -52,6 +54,7 @@ impl Default for RouteRequestResult {
         Self {
             backend: None,
             route_name: None,
+            vcl_slot: None,
             log_msgs: Vec::new(),
             pass: true,
         }
@@ -285,6 +288,7 @@ impl VhostDirector {
         let backend_groups = match_result.backend_groups;
         let matched_filters = match_result.filters.as_ref();
         let route_name = match_result.route_name.map(|s| s.to_string());
+        let vcl_slot = match_result.vcl_slot;
 
         // Apply request filters BEFORE backend selection
         if let Some(filters) = matched_filters {
@@ -336,6 +340,7 @@ impl VhostDirector {
                         ));
                         return RouteRequestResult {
                             route_name: route_name.clone(),
+                            vcl_slot,
                             log_msgs,
                             ..Default::default()
                         };
@@ -351,6 +356,7 @@ impl VhostDirector {
                     ));
                     return RouteRequestResult {
                         route_name: route_name.clone(),
+                        vcl_slot,
                         log_msgs,
                         ..Default::default()
                     };
@@ -359,6 +365,7 @@ impl VhostDirector {
                 return RouteRequestResult {
                     backend: self.redirect_backend.as_ref().map(|r| r.0.clone()),
                     route_name: route_name.clone(),
+                    vcl_slot,
                     log_msgs,
                     ..Default::default()
                 };
@@ -396,6 +403,7 @@ impl VhostDirector {
                 return RouteRequestResult {
                     backend: self.internal_error_backend.as_ref().map(|r| r.0.clone()),
                     route_name,
+                    vcl_slot,
                     log_msgs,
                     pass,
                 };
@@ -412,6 +420,7 @@ impl VhostDirector {
                 return RouteRequestResult {
                     backend: None,
                     route_name,
+                    vcl_slot,
                     log_msgs,
                     pass,
                 }
@@ -421,6 +430,7 @@ impl VhostDirector {
         RouteRequestResult {
             backend: Some(entry.backend_ref()),
             route_name,
+            vcl_slot,
             log_msgs,
             pass,
         }
@@ -519,6 +529,7 @@ fn match_routes<'a>(
             filters: route.filters.clone(),
             matched_path: route.path_match.as_ref(),
             route_name: route.route_name.as_deref(),
+            vcl_slot: route.vcl_slot,
             cache_policy: route.cache_policy.as_ref(),
             bypass_headers: &route.bypass_headers,
         });
@@ -1151,6 +1162,7 @@ mod tests {
             }],
             listeners: Vec::new(),
             route_name: None,
+            vcl_slot: None,
             priority: 100,
             rule_index: 0,
             cache_policy: None,
@@ -1178,6 +1190,7 @@ mod tests {
             }],
             listeners: Vec::new(),
             route_name: None,
+            vcl_slot: None,
             priority: 100,
             rule_index: 0,
             cache_policy: None,
@@ -1208,6 +1221,7 @@ mod tests {
                 }],
                 listeners: Vec::new(),
                 route_name: None,
+                vcl_slot: None,
                 priority: 100,
                 rule_index: 0,
                 cache_policy: None,
@@ -1309,6 +1323,7 @@ mod tests {
             filters: Some(filters.clone()),
             matched_path: Some(&path_match),
             route_name: Some("default/my-route"),
+            vcl_slot: None,
             cache_policy: None,
             bypass_headers: &[],
         };

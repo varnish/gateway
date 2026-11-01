@@ -130,6 +130,10 @@ An empty `listeners` list means the route matches on all listeners.
 - `X-Gateway-Listener` — Varnish socket name (e.g., `http-80`)
 - `X-Gateway-Route` — HTTPRoute namespace/name (e.g., `default/my-route`)
 
+Ghost also sets the internal `X-Ghost-VCL-Slot` header (decimal slot, e.g. `7`) only when the
+matched route has per-route VCL attached (`vcl_slot` in routing.json/ghost.json). The preamble
+unsets any client-supplied value first; user VCL should not rely on it.
+
 These propagate to the backend and are available in user VCL:
 
 ```vcl
@@ -570,7 +574,6 @@ NAMESPACE=default \
 VARNISH_ADMIN_PORT=6082 \
 VARNISH_HTTP_ADDR=localhost:8080 \
 VARNISH_LISTEN="http-8080=:8080,http" \
-VCL_PATH=/tmp/main.vcl \
 ROUTING_CONFIG_PATH=/tmp/routing.json \
 GHOST_CONFIG_PATH=/tmp/ghost.json \
 WORK_DIR=/tmp/varnish \

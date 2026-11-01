@@ -76,7 +76,9 @@ async fn process_request(client: Client, request: reqwest::Request, resp_tx: Sen
     let mut resp = match client.execute(request).await {
         Ok(r) => r,
         Err(e) => {
-            let _ = resp_tx.send(RespMsg::Err(format!("external proxy: {}", e))).await;
+            let _ = resp_tx
+                .send(RespMsg::Err(format!("external proxy: {}", e)))
+                .await;
             return;
         }
     };
@@ -121,7 +123,9 @@ pub struct ExternalBackend {
 impl ExternalBackend {
     pub fn new(proxy: &ExternalProxy) -> Result<Self, VclError> {
         if proxy.hostname.is_empty() {
-            return Err(VclError::new("external_proxy: hostname is empty".to_string()));
+            return Err(VclError::new(
+                "external_proxy: hostname is empty".to_string(),
+            ));
         }
         if proxy.port == 0 {
             return Err(VclError::new("external_proxy: port is zero".to_string()));
@@ -223,7 +227,9 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             .map_err(|e| VclError::new(format!("external_proxy: build request: {}", e)))?;
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<RespMsg>(CHUNK_CHANNEL_SIZE);
-        bgt().rt.spawn(process_request(self.client.clone(), request, tx));
+        bgt()
+            .rt
+            .spawn(process_request(self.client.clone(), request, tx));
 
         let headers_frame = match rx.blocking_recv() {
             Some(RespMsg::Headers(f)) => f,
@@ -328,9 +334,9 @@ impl VclResponse for ExternalBody {
                     }
                     let chunk = current.as_ref().unwrap();
                     let remaining = &chunk[*cursor..];
-                    let n = buf.write(remaining).map_err(|e| {
-                        VclError::new(format!("external_proxy: body write: {}", e))
-                    })?;
+                    let n = buf
+                        .write(remaining)
+                        .map_err(|e| VclError::new(format!("external_proxy: body write: {}", e)))?;
                     *cursor += n;
                     total += n;
                     if *cursor >= chunk.len() {

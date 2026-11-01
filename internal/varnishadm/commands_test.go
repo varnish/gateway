@@ -506,25 +506,15 @@ func TestCommands_StructuredMethods(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	mock := NewMock(2000, "secret", logger)
 
-	t.Run("VCLListStructured", func(t *testing.T) {
-		result, err := mock.VCLListStructured()
+	t.Run("VCLListJSON", func(t *testing.T) {
+		mock.SetVCLListJSON([]VCLEntry{{Name: "boot", Status: "active", State: "auto", Temperature: "warm"}})
+		defer mock.SetVCLListJSON(nil)
+		entries, err := mock.VCLListJSON()
 		if err != nil {
-			t.Fatalf("VCLListStructured() error = %v", err)
+			t.Fatalf("VCLListJSON() error = %v", err)
 		}
-
-		if len(result.Entries) == 0 {
-			t.Error("VCLListStructured() returned no entries")
-		}
-
-		// Check first entry
-		if len(result.Entries) > 0 {
-			entry := result.Entries[0]
-			if entry.Name == "" {
-				t.Error("First VCL entry has empty name")
-			}
-			if entry.Status == "" {
-				t.Error("First VCL entry has empty status")
-			}
+		if len(entries) != 1 || entries[0].Name != "boot" || entries[0].Status != "active" {
+			t.Errorf("VCLListJSON() = %+v", entries)
 		}
 	})
 
@@ -565,15 +555,15 @@ func TestCommands_StructuredMethods(t *testing.T) {
 		}
 	})
 
-	t.Run("VCLListStructured error handling", func(t *testing.T) {
-		mock.SetResponse("vcl.list", VarnishResponse{
+	t.Run("VCLListJSON error handling", func(t *testing.T) {
+		mock.SetResponse("vcl.list -j", VarnishResponse{
 			statusCode: ClisUnknown,
 			payload:    "Command failed",
 		})
 
-		_, err := mock.VCLListStructured()
+		_, err := mock.VCLListJSON()
 		if err == nil {
-			t.Error("VCLListStructured() should return error when vcl.list fails")
+			t.Error("VCLListJSON() should return error when vcl.list -j fails")
 		}
 	})
 

@@ -2,8 +2,11 @@ package varnishadm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +32,20 @@ type MockVarnishadm struct {
 	// simulateDelay adds artificial delay to responses
 	simulateDelay time.Duration
 
+	// VCL state: loaded VCLs and labels in load order, plus the active one.
+	// vcl.inline/vcl.load/vcl.label/vcl.use/vcl.discard update it and
+	// `vcl.list -j` renders it, unless SetVCLListJSON scripted a fixed list.
+	vcls            []*mockVCL
+	activeVCL       string
+	vclListOverride []VCLEntry
+	strictVCL       bool
+	held            map[string]bool   // see HoldVCL
+	compileErrors   map[string]string // VCL body substring -> CLI error payload
+
+	// serverErrors makes Exec return non-200 replies as a *CLIError, like
+	// Server.Exec does. See SetServerErrorSemantics.
+	serverErrors bool
+
 	// TLS certificate state tracking
 	tlsCertsCommitted map[string]TLSCertEntry // committed certificates (current state)
 	tlsCertsStaged    map[string]TLSCertEntry // staged certificates (transaction state)
@@ -46,6 +63,7 @@ func NewMock(port int, secret string, logger *slog.Logger) *MockVarnishadm {
 		logger:            logger,
 		connected:         connected,
 		responses:         make(map[string]VarnishResponse),
+		compileErrors:     make(map[string]string),
 		tlsCertsCommitted: make(map[string]TLSCertEntry),
 		tlsCertsStaged:    make(map[string]TLSCertEntry),
 	}
@@ -134,11 +152,30 @@ func (m *MockVarnishadm) Run(ctx context.Context) error {
 	return nil
 }
 
+// SetServerErrorSemantics makes Exec (and every command built on it) report
+// a non-200 reply the way Server.Exec does: an empty response and a
+// *CLIError carrying the status and payload. The default (false) returns the
+// response with its status code and a nil error.
+func (m *MockVarnishadm) SetServerErrorSemantics(on bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.serverErrors = on
+}
+
 // Exec executes a command and returns a mock response
 func (m *MockVarnishadm) Exec(cmd string) (VarnishResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	resp, err := m.exec(cmd)
+	if err == nil && m.serverErrors && resp.statusCode != ClisOk {
+		return VarnishResponse{}, &CLIError{Status: resp.statusCode, Payload: resp.payload}
+	}
+	return resp, err
+}
+
+// exec produces the reply to cmd. m.mu must be held.
+func (m *MockVarnishadm) exec(cmd string) (VarnishResponse, error) {
 	// Add to call history
 	m.callHistory = append(m.callHistory, cmd)
 
@@ -182,40 +219,8 @@ func (m *MockVarnishadm) Exec(cmd string) (VarnishResponse, error) {
 		return resp, nil
 	}
 
-	// Handle pattern-based commands
-	if strings.HasPrefix(cmd, "vcl.load") {
-		return VarnishResponse{
-			statusCode: ClisOk,
-			payload:    "VCL compiled",
-		}, nil
-	}
-
-	if strings.HasPrefix(cmd, "vcl.inline") {
-		return VarnishResponse{
-			statusCode: ClisOk,
-			payload:    "VCL compiled",
-		}, nil
-	}
-
-	if strings.HasPrefix(cmd, "vcl.use") {
-		return VarnishResponse{
-			statusCode: ClisOk,
-			payload:    "VCL '" + strings.TrimPrefix(cmd, "vcl.use ") + "' now active",
-		}, nil
-	}
-
-	if strings.HasPrefix(cmd, "vcl.label") {
-		return VarnishResponse{
-			statusCode: ClisOk,
-			payload:    "VCL label applied",
-		}, nil
-	}
-
-	if strings.HasPrefix(cmd, "vcl.discard") {
-		return VarnishResponse{
-			statusCode: ClisOk,
-			payload:    "VCL discarded",
-		}, nil
+	if resp, handled := m.handleVCLCommand(cmd); handled {
+		return resp, nil
 	}
 
 	if strings.HasPrefix(cmd, "param.set") {
@@ -338,18 +343,16 @@ func (m *MockVarnishadm) VCLList() (VarnishResponse, error) {
 	return m.Exec("vcl.list")
 }
 
-// VCLListStructured lists all VCL configurations and returns parsed results in the mock
-func (m *MockVarnishadm) VCLListStructured() (*VCLListResult, error) {
-	resp, err := m.Exec("vcl.list")
+// VCLListJSON runs `vcl.list -j` against the mock and parses the reply.
+func (m *MockVarnishadm) VCLListJSON() ([]VCLEntry, error) {
+	resp, err := m.Exec("vcl.list -j")
 	if err != nil {
 		return nil, err
 	}
-
 	if resp.statusCode != ClisOk {
-		return nil, fmt.Errorf("vcl.list command failed with status %d: %s", resp.statusCode, resp.payload)
+		return nil, fmt.Errorf("vcl.list -j failed with status %d: %s", resp.statusCode, resp.payload)
 	}
-
-	return parseVCLList(resp.payload)
+	return ParseVCLListJSON(resp.payload)
 }
 
 // Parameter command wrappers
@@ -634,4 +637,337 @@ func (m *MockVarnishadm) BackendList(detailed, json bool) (VarnishResponse, erro
 		cmd += " -p"
 	}
 	return m.Exec(cmd)
+}
+
+// mockVCL is one loaded VCL or label in the mock's VCL state.
+type mockVCL struct {
+	name        string
+	body        string // VCL source (vcl.inline only)
+	labelTarget string // non-empty for labels
+	discarded   bool   // discarded while held busy (see HoldVCL)
+}
+
+// HoldVCL simulates in-flight requests on a VCL: a vcl.discard of it is
+// accepted but the VCL stays listed with status "discarded" (as varnishd
+// does while idle keep-alive sessions still reference it) until ReleaseVCL.
+func (m *MockVarnishadm) HoldVCL(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.held == nil {
+		m.held = make(map[string]bool)
+	}
+	m.held[name] = true
+}
+
+// ReleaseVCL ends HoldVCL; a VCL discarded meanwhile goes away.
+func (m *MockVarnishadm) ReleaseVCL(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.held, name)
+	if v := m.findVCL(name); v != nil && v.discarded {
+		m.removeVCL(name)
+	}
+}
+
+var reReturnVCL = regexp.MustCompile(`return\s*\(\s*vcl\s*\(\s*([^)\s]+)\s*\)\s*\)`)
+
+// SetVCLListJSON scripts the entries `vcl.list -j` returns, overriding the
+// tracked VCL state. Pass nil to go back to the tracked state.
+func (m *MockVarnishadm) SetVCLListJSON(entries []VCLEntry) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.vclListOverride = entries
+}
+
+// SetStrictVCL makes the VCL commands refuse what varnishd refuses: labelling
+// or using an unknown VCL, a label that would create a return(vcl) loop
+// (status 300), loading a duplicate name or a VCL that returns to a missing
+// label, discarding the active VCL, a labelled VCL, or a label another
+// VCL returns to. Without it those commands succeed and only update state.
+func (m *MockVarnishadm) SetStrictVCL(strict bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.strictVCL = strict
+}
+
+// SetVCLCompileError makes vcl.inline fail with a VCC-style error whenever the
+// VCL body contains substr. An empty payload removes the rule.
+func (m *MockVarnishadm) SetVCLCompileError(substr, payload string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if payload == "" {
+		delete(m.compileErrors, substr)
+		return
+	}
+	m.compileErrors[substr] = payload
+}
+
+// SetVCLState replaces the tracked VCL state: vcls maps VCL names to bodies,
+// labels maps label names to targets, active names the active VCL.
+func (m *MockVarnishadm) SetVCLState(vcls map[string]string, labels map[string]string, active string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.vcls = nil
+	names := make([]string, 0, len(vcls))
+	for n := range vcls {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		m.vcls = append(m.vcls, &mockVCL{name: n, body: vcls[n]})
+	}
+	names = names[:0]
+	for n := range labels {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		m.vcls = append(m.vcls, &mockVCL{name: n, labelTarget: labels[n]})
+	}
+	m.activeVCL = active
+}
+
+// VCLState returns the tracked labels (label -> target), the loaded non-label
+// VCL names in load order, and the active VCL.
+func (m *MockVarnishadm) VCLState() (labels map[string]string, vcls []string, active string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	labels = make(map[string]string)
+	for _, v := range m.vcls {
+		if v.labelTarget != "" {
+			labels[v.name] = v.labelTarget
+		} else {
+			vcls = append(vcls, v.name)
+		}
+	}
+	return labels, vcls, m.activeVCL
+}
+
+func (m *MockVarnishadm) findVCL(name string) *mockVCL {
+	for _, v := range m.vcls {
+		if v.name == name {
+			return v
+		}
+	}
+	return nil
+}
+
+func (m *MockVarnishadm) removeVCL(name string) {
+	for i, v := range m.vcls {
+		if v.name == name {
+			m.vcls = append(m.vcls[:i], m.vcls[i+1:]...)
+			return
+		}
+	}
+}
+
+// labelRefs counts the loaded VCLs that return(vcl) to label.
+func (m *MockVarnishadm) labelRefs(label string) int {
+	n := 0
+	for _, v := range m.vcls {
+		if v.labelTarget != "" || v.discarded {
+			continue
+		}
+		for _, match := range reReturnVCL.FindAllStringSubmatch(v.body, -1) {
+			if match[1] == label {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// labelLoop reports whether pointing label at target would create a loop:
+// target, or a VCL reached from it by following return(vcl(<label>)) through
+// labels, returns to label. varnishd refuses such a vcl.label.
+func (m *MockVarnishadm) labelLoop(label string, target *mockVCL, seen map[string]bool) bool {
+	for _, match := range reReturnVCL.FindAllStringSubmatch(target.body, -1) {
+		next := match[1]
+		if next == label {
+			return true
+		}
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		l := m.findVCL(next)
+		if l == nil || l.labelTarget == "" {
+			continue
+		}
+		if t := m.findVCL(l.labelTarget); t != nil && m.labelLoop(label, t, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *MockVarnishadm) labelsOf(name string) []string {
+	var out []string
+	for _, v := range m.vcls {
+		if v.labelTarget == name {
+			out = append(out, v.name)
+		}
+	}
+	return out
+}
+
+func vclResp(status int, format string, args ...any) VarnishResponse {
+	return VarnishResponse{statusCode: status, payload: fmt.Sprintf(format, args...)}
+}
+
+// handleVCLCommand applies the vcl.* commands to the tracked state. It must
+// be called with m.mu held. handled is false for commands it does not own.
+func (m *MockVarnishadm) handleVCLCommand(cmd string) (resp VarnishResponse, handled bool) {
+	firstLine, body, _ := strings.Cut(cmd, "\n")
+	fields := strings.Fields(firstLine)
+	if len(fields) == 0 {
+		return VarnishResponse{}, false
+	}
+	switch fields[0] {
+	case "vcl.list":
+		if len(fields) == 2 && fields[1] == "-j" {
+			return m.renderVCLListJSON(), true
+		}
+		return VarnishResponse{}, false
+	case "vcl.inline", "vcl.load":
+		if len(fields) < 2 {
+			return vclResp(ClisToofew, "Too few parameters"), true
+		}
+		name := fields[1]
+		if fields[0] == "vcl.inline" {
+			for substr, payload := range m.compileErrors {
+				if strings.Contains(body, substr) {
+					return vclResp(ClisParam, "%s", payload), true
+				}
+			}
+		} else {
+			body = ""
+		}
+		if m.findVCL(name) != nil {
+			return vclResp(ClisParam, "Already a VCL named %s", name), true
+		}
+		if m.strictVCL {
+			for _, match := range reReturnVCL.FindAllStringSubmatch(body, -1) {
+				if l := m.findVCL(match[1]); l == nil || l.labelTarget == "" {
+					return vclResp(ClisParam, "Message from VCC-compiler:\nSymbol not found: '%s'\nVCL compilation failed", match[1]), true
+				}
+			}
+		}
+		m.vcls = append(m.vcls, &mockVCL{name: name, body: body})
+		return vclResp(ClisOk, "VCL compiled."), true
+	case "vcl.label":
+		if len(fields) < 3 {
+			return vclResp(ClisToofew, "Too few parameters"), true
+		}
+		label, target := fields[1], fields[2]
+		if m.strictVCL {
+			t := m.findVCL(target)
+			if t == nil || t.discarded {
+				return vclResp(ClisParam, "No VCL name matches %s", target), true
+			}
+			if t.labelTarget != "" {
+				return vclResp(ClisParam, "VCL labels cannot point to labels"), true
+			}
+			if m.labelLoop(label, t, map[string]bool{}) {
+				return vclResp(ClisCant, "VCL %s would create a loop through label %s", target, label), true
+			}
+		}
+		if l := m.findVCL(label); l != nil {
+			if l.labelTarget == "" {
+				return vclResp(ClisParam, "%s is not a label", label), true
+			}
+			l.labelTarget = target
+		} else {
+			m.vcls = append(m.vcls, &mockVCL{name: label, labelTarget: target})
+		}
+		return vclResp(ClisOk, ""), true
+	case "vcl.use":
+		if len(fields) < 2 {
+			return vclResp(ClisToofew, "Too few parameters"), true
+		}
+		if v := m.findVCL(fields[1]); m.strictVCL && (v == nil || v.labelTarget != "" || v.discarded) {
+			return vclResp(ClisParam, "No VCL name matches %s", fields[1]), true
+		}
+		m.activeVCL = fields[1]
+		return vclResp(ClisOk, "VCL '%s' now active", fields[1]), true
+	case "vcl.discard":
+		if len(fields) < 2 {
+			return vclResp(ClisToofew, "Too few parameters"), true
+		}
+		name := fields[1]
+		if m.strictVCL {
+			v := m.findVCL(name)
+			if v == nil || v.discarded {
+				return vclResp(ClisParam, "No VCL name matches %s", name), true
+			}
+			if name == m.activeVCL {
+				return vclResp(ClisCant, "Cannot discard active VCL program"), true
+			}
+			if v.labelTarget != "" && m.labelRefs(name) > 0 {
+				return vclResp(ClisCant, "Cannot discard VCL label %s, other VCLs depend on it", name), true
+			}
+			if labels := m.labelsOf(name); v.labelTarget == "" && len(labels) > 0 {
+				return vclResp(ClisCant, "Cannot discard labeled VCL program %s:\n\t%s", name, strings.Join(labels, "\n\t")), true
+			}
+		}
+		if v := m.findVCL(name); v != nil && m.held[name] {
+			v.discarded = true
+		} else {
+			m.removeVCL(name)
+		}
+		return vclResp(ClisOk, ""), true
+	}
+	return VarnishResponse{}, false
+}
+
+// renderVCLListJSON renders the tracked state (or the scripted override) in
+// the `vcl.list -j` envelope. It must be called with m.mu held.
+func (m *MockVarnishadm) renderVCLListJSON() VarnishResponse {
+	entries := m.vclListOverride
+	if entries == nil {
+		for _, v := range m.vcls {
+			e := VCLEntry{Name: v.name, Status: "available", State: "auto", Temperature: "warm"}
+			if v.name == m.activeVCL {
+				e.Status = "active"
+			}
+			if v.discarded {
+				e.Status, e.State, e.Temperature, e.Busy = "discarded", "cold", "busy", 1
+			}
+			if v.labelTarget != "" {
+				e.State = "label"
+				e.LabelTarget = v.labelTarget
+				e.LabelRefs = m.labelRefs(v.name)
+			} else {
+				e.Labels = len(m.labelsOf(v.name))
+			}
+			entries = append(entries, e)
+		}
+	}
+	parts := []any{2, []string{"vcl.list", "-j"}, 1700000000.0}
+	for _, e := range entries {
+		obj := map[string]any{
+			"status":      e.Status,
+			"state":       e.State,
+			"temperature": e.Temperature,
+			"busy":        e.Busy,
+			"name":        e.Name,
+		}
+		if e.Labels > 0 {
+			obj["labels"] = e.Labels
+		}
+		if e.State == "label" {
+			label := map[string]any{"name": e.LabelTarget}
+			if e.LabelRefs > 0 {
+				label["refs"] = e.LabelRefs
+			}
+			obj["label"] = label
+		}
+		parts = append(parts, obj)
+	}
+	b, err := json.Marshal(parts)
+	if err != nil {
+		return vclResp(ClisCant, "json.Marshal: %v", err)
+	}
+	return vclResp(ClisOk, "%s", b)
 }

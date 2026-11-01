@@ -50,7 +50,26 @@ you cannot re-enter ghost's router — there is no call back in.
 **User VCL is global.** The same VCL applies on every listener and
 every route. Branch on `X-Gateway-Listener` or `X-Gateway-Route` for
 listener- or route-specific behavior; see
-[multi-listener.md](multi-listener.md).
+[multi-listener.md](multi-listener.md). For VCL that belongs to one
+HTTPRoute, see route VCL below.
+
+## Route VCL
+
+With [route VCL](../guides/route-vcl.md) enabled, a route's
+[VarnishVCLPolicy](../reference/varnishvclpolicy.md) document is
+compiled into its own VCL, merged the same way with one more piece:
+
+```
+preamble + route VCL + gateway user VCL + postamble
+```
+
+Route VCL subroutines run before the gateway user VCL's. A `return` in
+a route `vcl_recv` ends `vcl_recv` for the gateway user VCL and the
+postamble too, so ghost's deferred `return(pass)` is skipped when the
+route does `return (hash)`, the same rule as above. A `return` in the
+gateway user VCL (the shipped default ends `vcl_recv` with
+`return (pass)`) runs after the route's code and cannot keep it from
+running.
 
 ## See also
 

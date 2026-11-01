@@ -138,7 +138,15 @@ func TestBuildVCLConfigMap_RoutingJSON(t *testing.T) {
 	r := testReconcilerSimple()
 	gw := testGateway("my-gw", "test-ns")
 
-	cm := r.buildVCLConfigMap(gw, "vcl 4.1;\nbackend default { .host = \"127.0.0.1\"; }")
+	cm := r.buildVCLConfigMap(gw, "vcl 4.1;\nbackend default { .host = \"127.0.0.1\"; }", 0)
+
+	// Route VCL off is written explicitly as "0", not omitted.
+	if got, ok := cm.Data["route-vcl-pool-size"]; !ok || got != "0" {
+		t.Errorf("route-vcl-pool-size = %q (present %v), want \"0\"", got, ok)
+	}
+	if cm := r.buildVCLConfigMap(gw, "x", 64); cm.Data["route-vcl-pool-size"] != "64" {
+		t.Errorf("route-vcl-pool-size = %q, want \"64\"", cm.Data["route-vcl-pool-size"])
+	}
 
 	if cm.Name != "my-gw-vcl" {
 		t.Errorf("name = %q, want %q", cm.Name, "my-gw-vcl")
@@ -694,6 +702,30 @@ func TestBuildGatewayContainer_EnvVars(t *testing.T) {
 	// Should not have TLS_CERT_DIR for HTTP-only
 	if _, ok := envMap["TLS_CERT_DIR"]; ok {
 		t.Error("unexpected TLS_CERT_DIR for HTTP-only gateway")
+	}
+	// The chaperone reads main.vcl from the ConfigMap via the API, not a file.
+	if _, ok := envMap["VCL_PATH"]; ok {
+		t.Error("VCL_PATH is set; the chaperone no longer reads it")
+	}
+}
+
+// A restarted pod compiles every populated route VCL slot before it starts
+// the child, so a startup probe holds off liveness/readiness for up to 180 s.
+func TestBuildGatewayContainer_StartupProbe(t *testing.T) {
+	r := testReconcilerSimple()
+	c := r.buildGatewayContainer(testGateway("my-gw", "default"), deploymentConfig{effectiveImage: "test:latest"})
+	p := c.StartupProbe
+	if p == nil || p.HTTPGet == nil {
+		t.Fatalf("startup probe = %+v, want an HTTP GET probe", p)
+	}
+	if p.HTTPGet.Path != "/health" || p.HTTPGet.Port.IntValue() != chaperoneHealthPort {
+		t.Errorf("startup probe target = %s:%s", p.HTTPGet.Path, p.HTTPGet.Port.String())
+	}
+	if p.PeriodSeconds != 2 || p.FailureThreshold != 90 {
+		t.Errorf("startup probe period/threshold = %d/%d, want 2/90", p.PeriodSeconds, p.FailureThreshold)
+	}
+	if c.ReadinessProbe == nil || c.LivenessProbe == nil {
+		t.Error("readiness/liveness probes missing")
 	}
 }
 

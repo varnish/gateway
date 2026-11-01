@@ -2,9 +2,11 @@ package vcl
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,533 +17,1376 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestReload_Success(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
+// TestReconcile_ManifestWithOperatorFields checks that the chaperone accepts
+// a manifest carrying the operator-side fields (slot route, unassigned list)
+// and fields it does not know about yet: they are ignored and the slot is
+// programmed as usual.
+func TestReconcile_ManifestWithOperatorFields(t *testing.T) {
+	doc := routeDoc("a")
+	raw := fmt.Sprintf(`{
+  "slots": {"0": {"policy": "default/p0", "route": "default/r0", "generation": 3, "hash": %q, "future": true}},
+  "unassigned": [{"policy": "default/p9", "route": "default/r9", "reason": %q}],
+  "somethingNew": {"x": 1}
+}`, RouteVCLHash(doc), UnassignedNoSlotAvailable)
 
-	// Set up vcl.list to return no managed VCLs (nothing to garbage collect)
-	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, "active      auto/warm          - boot"))
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-	if err := os.WriteFile(vclPath, []byte("vcl 4.1;"), 0644); err != nil {
-		t.Fatal(err)
+	m, err := ParseRouteVCLManifest(raw)
+	if err != nil {
+		t.Fatalf("ParseRouteVCLManifest: %v", err)
+	}
+	if s := m.Slots["0"]; s.Policy != "default/p0" || s.Route != "default/r0" || s.Generation != 3 {
+		t.Errorf("slot 0 = %+v", s)
+	}
+	if len(m.Unassigned) != 1 || m.Unassigned[0].Reason != UnassignedNoSlotAvailable {
+		t.Errorf("unassigned = %+v", m.Unassigned)
 	}
 
-	// Create fake client (not needed for Reload() test, but required by New)
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
-	if err := r.Reload(); err != nil {
-		t.Fatalf("Reload() failed: %v", err)
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	r.setRouteConfigMap(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-route-vcl", Namespace: "default"},
+		Data:       map[string]string{ManifestKey: raw, SlotKey(0): doc},
+	})
+	mustReconcile(t, r)
+	if res := r.SlotResults()["default/p0"]; !res.Programmed {
+		t.Errorf("slot 0 not programmed: %+v", res)
 	}
-
-	// Verify commands were called
-	history := mock.GetCallHistory()
-	if len(history) < 3 {
-		t.Fatalf("expected at least 3 commands, got %d: %v", len(history), history)
+	if _, ok := r.SlotResults()["default/p9"]; ok {
+		t.Error("an unassigned policy got a slot result")
 	}
-
-	// First command should be vcl.load with our naming convention
-	if !strings.HasPrefix(history[0], "vcl.load vcl_") {
-		t.Errorf("expected vcl.load command, got: %s", history[0])
-	}
-
-	// Second command should be vcl.use
-	if !strings.HasPrefix(history[1], "vcl.use vcl_") {
-		t.Errorf("expected vcl.use command, got: %s", history[1])
-	}
-
-	// Third command should be vcl.list (for garbage collection)
-	if history[2] != "vcl.list" {
-		t.Errorf("expected vcl.list command, got: %s", history[2])
-	}
-}
-
-func TestReload_LoadFailure(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-	if err := os.WriteFile(vclPath, []byte("invalid vcl"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
-
-	// Set up a failure response for VCL load
-	// The mock pattern matches "vcl.load" prefix, so we need to override default behavior
-	// by making the VCL path trigger an error. Since we can't easily do that, we'll
-	// need to test the error handling differently.
-	//
-	// Actually, the mock always returns success for vcl.load by default.
-	// We need to use SetResponse with the exact command. But we don't know the
-	// exact timestamp. Let's test that Reload works first, then test error handling
-	// by checking the flow.
-
-	// For now, verify that a successful load works
-	if err := r.Reload(); err != nil {
-		t.Fatalf("Reload() should succeed with default mock: %v", err)
+	labels, _, _ := mock.VCLState()
+	if labels["gwvcl-0"] == PlaceholderVCLName {
+		t.Errorf("gwvcl-0 still on the placeholder: %v", labels)
 	}
 }
 
-func TestGarbageCollect(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
-	// Set up vcl.list with multiple managed VCLs
-	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, `active      auto/warm          - vcl_20240101_100000_001
-available   auto/warm          - vcl_20240101_100000_002
-available   auto/warm          - vcl_20240101_100000_003
-available   auto/warm          - vcl_20240101_100000_004
-available   auto/warm          - vcl_20240101_100000_005`))
+// newTestReloader returns a Reloader on a strict mock (it refuses what
+// varnishd refuses) with no kube client in use.
+func newTestReloader(t *testing.T) (*Reloader, *varnishadm.MockVarnishadm) {
+	t.Helper()
+	mock := varnishadm.NewMock(6082, "secret", testLogger())
+	mock.SetStrictVCL(true)
+	r := New(mock, 0, fake.NewSimpleClientset(), "gw-vcl", "default", testLogger())
+	return r, mock
+}
 
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 2, client, "test-cm", "default", logger)
-
-	if err := r.garbageCollect(); err != nil {
-		t.Fatalf("garbageCollect() failed: %v", err)
+func vclConfigMap(pool int, userVCL string) *corev1.ConfigMap {
+	data := map[string]string{MainVCLKey: GenerateMaster(pool, userVCL)}
+	if pool > 0 {
+		data[PoolSizeKey] = fmt.Sprint(pool)
 	}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-vcl", Namespace: "default"},
+		Data:       data,
+	}
+}
 
-	history := mock.GetCallHistory()
+// routeConfigMap builds a "{gateway}-route-vcl" ConfigMap with one document
+// per slot; policies are named "default/p<slot>".
+func routeConfigMap(docs map[int]string) *corev1.ConfigMap {
+	manifest := RouteVCLManifest{Slots: map[string]RouteVCLSlot{}}
+	data := map[string]string{}
+	for slot, doc := range docs {
+		manifest.Slots[fmt.Sprint(slot)] = RouteVCLSlot{
+			Policy:     fmt.Sprintf("default/p%d", slot),
+			Generation: 1,
+			Hash:       RouteVCLHash(doc),
+		}
+		data[SlotKey(slot)] = doc
+	}
+	data[ManifestKey] = mustJSON(manifest)
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-route-vcl", Namespace: "default"},
+		Data:       data,
+	}
+}
 
-	// Should have vcl.list + 2 vcl.discard calls (5 available - 1 active - 2 keepCount = 2 to discard)
-	// Wait, active is vcl_20240101_100000_001, so available ones are:
-	// - vcl_20240101_100000_002
-	// - vcl_20240101_100000_003
-	// - vcl_20240101_100000_004
-	// - vcl_20240101_100000_005
-	// With keepCount=2, we should discard 2 oldest: 002, 003
-	discardCount := 0
+func mustJSON(m RouteVCLManifest) string {
+	var sb strings.Builder
+	sb.WriteString(`{"slots":{`)
+	first := true
+	for _, k := range slices.Sorted(func(yield func(string) bool) {
+		for k := range m.Slots {
+			if !yield(k) {
+				return
+			}
+		}
+	}) {
+		s := m.Slots[k]
+		if !first {
+			sb.WriteString(",")
+		}
+		first = false
+		fmt.Fprintf(&sb, `%q:{"policy":%q,"generation":%d,"hash":%q}`, k, s.Policy, s.Generation, s.Hash)
+	}
+	sb.WriteString(`}}`)
+	return sb.String()
+}
+
+func routeDoc(tag string) string {
+	return GenerateRouteVCL("", "vcl 4.1;\nsub vcl_deliver {\n    set resp.http.X-Tag = \""+tag+"\";\n}\n")
+}
+
+func mustReconcile(t *testing.T, r *Reloader) {
+	t.Helper()
+	if err := r.reconcile(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+}
+
+// commandNames reduces the call history to "verb arg1 [arg2]" lines, dropping
+// inline VCL bodies.
+func commandNames(history []string) []string {
+	out := make([]string, 0, len(history))
 	for _, cmd := range history {
-		if strings.HasPrefix(cmd, "vcl.discard") {
-			discardCount++
+		first, _, _ := strings.Cut(cmd, "\n")
+		first = strings.TrimSuffix(first, " << EOF")
+		out = append(out, first)
+	}
+	return out
+}
+
+func indexOf(t *testing.T, cmds []string, pred func(string) bool, what string) int {
+	t.Helper()
+	for i, c := range cmds {
+		if pred(c) {
+			return i
+		}
+	}
+	t.Fatalf("no %s in history %v", what, cmds)
+	return -1
+}
+
+func masters(vcls []string) []string {
+	var out []string
+	for _, v := range vcls {
+		if strings.HasPrefix(v, vclPrefix) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func routeVCLs(vcls []string) []string {
+	var out []string
+	for _, v := range vcls {
+		if strings.HasPrefix(v, routeVCLPrefix) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func TestReconcile_PoolZeroIsMasterOnly(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(0, ""))
+	mustReconcile(t, r)
+
+	cmds := commandNames(mock.GetCallHistory())
+	for _, c := range cmds {
+		if strings.HasPrefix(c, "param.set") || strings.HasPrefix(c, "vcl.label") || strings.Contains(c, PlaceholderVCLName) {
+			t.Errorf("pool 0 issued %q; history %v", c, cmds)
+		}
+	}
+	inline := indexOf(t, cmds, func(c string) bool { return strings.HasPrefix(c, "vcl.inline vcl_") }, "master vcl.inline")
+	use := indexOf(t, cmds, func(c string) bool { return strings.HasPrefix(c, "vcl.use vcl_") }, "vcl.use")
+	if use < inline {
+		t.Errorf("vcl.use before vcl.inline: %v", cmds)
+	}
+	if !isClosed(r.Ready()) || !isClosed(r.SlotsReady()) {
+		t.Error("Ready and SlotsReady must be closed after the first master load with pool 0")
+	}
+	labels, vcls, active := mock.VCLState()
+	if len(labels) != 0 || len(vcls) != 1 || active != vcls[0] {
+		t.Errorf("state labels=%v vcls=%v active=%q", labels, vcls, active)
+	}
+
+	// Same ConfigMap again (e.g. a resync): no new compile.
+	mock.ClearCallHistory()
+	r.setVCLConfigMap(vclConfigMap(0, ""))
+	mustReconcile(t, r)
+	for _, c := range commandNames(mock.GetCallHistory()) {
+		if strings.HasPrefix(c, "vcl.inline") || strings.HasPrefix(c, "vcl.use") {
+			t.Errorf("unchanged ConfigMap issued %q", c)
 		}
 	}
 
-	if discardCount != 2 {
-		t.Errorf("expected 2 vcl.discard commands, got %d. History: %v", discardCount, history)
-	}
+	// Changed content: reload.
+	mock.ClearCallHistory()
+	r.setVCLConfigMap(vclConfigMap(0, "vcl 4.1;\nsub vcl_deliver { set resp.http.X = \"1\"; }\n"))
+	mustReconcile(t, r)
+	indexOf(t, commandNames(mock.GetCallHistory()), func(c string) bool { return strings.HasPrefix(c, "vcl.inline vcl_") }, "reload")
 }
 
-func TestGarbageCollect_SkipsActive(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
+func TestReconcile_BootstrapOrder(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(4, ""))
+	mustReconcile(t, r)
 
-	// Set up vcl.list where active VCL is managed
-	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, `active      auto/warm          - vcl_20240101_100000_001
-available   auto/warm          - vcl_20240101_100000_002`))
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 1, client, "test-cm", "default", logger)
-
-	if err := r.garbageCollect(); err != nil {
-		t.Fatalf("garbageCollect() failed: %v", err)
+	cmds := commandNames(mock.GetCallHistory())
+	maxVCL := indexOf(t, cmds, func(c string) bool { return c == "param.set max_vcl 18" }, "param.set max_vcl 18")
+	ph := indexOf(t, cmds, func(c string) bool { return c == "vcl.inline "+PlaceholderVCLName }, "placeholder load")
+	last := ph
+	for i := range 4 {
+		want := fmt.Sprintf("vcl.label gwvcl-%d %s", i, PlaceholderVCLName)
+		idx := indexOf(t, cmds, func(c string) bool { return c == want }, want)
+		if idx < last {
+			t.Errorf("%q out of order: %v", want, cmds)
+		}
+		last = idx
+	}
+	master := indexOf(t, cmds, func(c string) bool { return strings.HasPrefix(c, "vcl.inline vcl_") }, "master load")
+	use := indexOf(t, cmds, func(c string) bool { return strings.HasPrefix(c, "vcl.use vcl_") }, "vcl.use")
+	if !(maxVCL < ph && ph < last && last < master && master < use) {
+		t.Errorf("bootstrap order wrong (max_vcl %d, placeholder %d, last label %d, master %d, use %d): %v",
+			maxVCL, ph, last, master, use, cmds)
+	}
+	if !isClosed(r.Ready()) || !isClosed(r.SlotsReady()) {
+		t.Error("Ready/SlotsReady not closed")
+	}
+	labels, _, _ := mock.VCLState()
+	for i := range 4 {
+		if labels[SlotLabel(i)] != PlaceholderVCLName {
+			t.Errorf("%s -> %q", SlotLabel(i), labels[SlotLabel(i)])
+		}
 	}
 
-	history := mock.GetCallHistory()
-
-	// With keepCount=1 and 1 available managed VCL, should discard 0
-	// (active is skipped, then we have exactly 1 available which equals keepCount)
-	for _, cmd := range history {
-		if strings.HasPrefix(cmd, "vcl.discard vcl_20240101_100000_001") {
-			t.Error("should not discard active VCL")
+	// A second reconcile changes nothing.
+	mock.ClearCallHistory()
+	mustReconcile(t, r)
+	for _, c := range commandNames(mock.GetCallHistory()) {
+		if c != "vcl.list -j" {
+			t.Errorf("idle reconcile issued %q", c)
 		}
 	}
 }
 
-func TestGarbageCollect_SkipsLabels(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
+func TestReconcile_SlotAttachChangeDetach(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(4, ""))
 
-	// Set up vcl.list with labels
-	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, `active      auto/warm          - vcl_20240101_100000_001
-available  label/warm          - vcl_label -> vcl_20240101_100000_001 (1 return(vcl))
-available   auto/warm          - vcl_20240101_100000_002`))
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 0, client, "test-cm", "default", logger) // keepCount=0 to force discard
-
-	if err := r.garbageCollect(); err != nil {
-		t.Fatalf("garbageCollect() failed: %v", err)
+	// Attach.
+	v1 := routeDoc("v1")
+	name1 := routeVCLName(1, RouteVCLHash(v1))
+	r.setRouteConfigMap(routeConfigMap(map[int]string{1: v1}))
+	mustReconcile(t, r)
+	labels, _, _ := mock.VCLState()
+	if labels["gwvcl-1"] != name1 {
+		t.Fatalf("gwvcl-1 -> %q, want %q", labels["gwvcl-1"], name1)
+	}
+	if res := r.SlotResults()["default/p1"]; !res.Programmed || res.Slot != 1 || res.Hash != RouteVCLHash(v1) {
+		t.Errorf("result %+v", res)
+	}
+	cmds := commandNames(mock.GetCallHistory())
+	in := indexOf(t, cmds, func(c string) bool { return c == "vcl.inline "+name1 }, "route inline")
+	lb := indexOf(t, cmds, func(c string) bool { return c == "vcl.label gwvcl-1 "+name1 }, "route label")
+	use := indexOf(t, cmds, func(c string) bool { return strings.HasPrefix(c, "vcl.use vcl_") }, "vcl.use")
+	if !(use < in && in < lb) {
+		t.Errorf("slot programmed before master active or label before load: %v", cmds)
 	}
 
-	history := mock.GetCallHistory()
-
-	// Should only try to discard vcl_20240101_100000_002, not the label
-	for _, cmd := range history {
-		if strings.Contains(cmd, "vcl_label") {
-			t.Error("should not discard label VCL")
+	// Change the text.
+	mock.ClearCallHistory()
+	v2 := routeDoc("v2")
+	name2 := routeVCLName(1, RouteVCLHash(v2))
+	r.setRouteConfigMap(routeConfigMap(map[int]string{1: v2}))
+	mustReconcile(t, r)
+	cmds = commandNames(mock.GetCallHistory())
+	want := []string{"vcl.inline " + name2, "vcl.label gwvcl-1 " + name2, "vcl.discard " + name1}
+	var got []string
+	for _, c := range cmds {
+		if !strings.HasPrefix(c, "vcl.list") {
+			got = append(got, c)
 		}
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("change sequence = %v, want %v", got, want)
+	}
+	if strings.Contains(strings.Join(cmds, "|"), "vcl.use") {
+		t.Error("route VCL change reloaded the master")
+	}
+
+	// Detach.
+	mock.ClearCallHistory()
+	r.setRouteConfigMap(routeConfigMap(nil))
+	mustReconcile(t, r)
+	got = nil
+	for _, c := range commandNames(mock.GetCallHistory()) {
+		if !strings.HasPrefix(c, "vcl.list") {
+			got = append(got, c)
+		}
+	}
+	want = []string{"vcl.label gwvcl-1 " + PlaceholderVCLName, "vcl.discard " + name2}
+	if !slices.Equal(got, want) {
+		t.Errorf("detach sequence = %v, want %v", got, want)
+	}
+	if len(r.SlotResults()) != 0 {
+		t.Errorf("results after detach: %v", r.SlotResults())
+	}
+
+	// Route ConfigMap deleted: same as empty.
+	r.setRouteConfigMap(routeConfigMap(map[int]string{2: v1}))
+	mustReconcile(t, r)
+	r.setRouteConfigMap(nil)
+	mustReconcile(t, r)
+	labels, vcls, _ := mock.VCLState()
+	if labels["gwvcl-2"] != PlaceholderVCLName || len(routeVCLs(vcls)) != 0 {
+		t.Errorf("after ConfigMap delete: labels=%v vcls=%v", labels, vcls)
 	}
 }
 
-func TestGarbageCollect_SkipsNonManagedVCLs(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
-
-	// Set up vcl.list with non-managed VCLs (without vcl_ prefix)
-	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, `active      auto/warm          - boot
-available   auto/warm          - user_custom
-available   auto/warm          - vcl_20240101_100000_001`))
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 0, client, "test-cm", "default", logger) // keepCount=0 to force discard
-
-	if err := r.garbageCollect(); err != nil {
-		t.Fatalf("garbageCollect() failed: %v", err)
+func TestReconcile_SlotMove(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(4, ""))
+	doc := routeDoc("x")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{1: doc}))
+	mustReconcile(t, r)
+	r.setRouteConfigMap(routeConfigMap(map[int]string{2: doc}))
+	mustReconcile(t, r)
+	labels, vcls, _ := mock.VCLState()
+	if labels["gwvcl-1"] != PlaceholderVCLName || labels["gwvcl-2"] != routeVCLName(2, RouteVCLHash(doc)) {
+		t.Errorf("labels after move: %v", labels)
 	}
-
-	history := mock.GetCallHistory()
-
-	// Should only try to discard vcl_20240101_100000_001, not boot or user_custom
-	for _, cmd := range history {
-		if strings.Contains(cmd, "boot") || strings.Contains(cmd, "user_custom") {
-			t.Errorf("should not discard non-managed VCL: %s", cmd)
-		}
+	if rv := routeVCLs(vcls); len(rv) != 1 {
+		t.Errorf("route VCLs after move: %v", rv)
 	}
 }
 
-func TestRun_ConfigMapChange(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
+// A VCL discarded while busy stays listed as "discarded" and keeps its name:
+// going back to that document must load it under a new name, and the
+// lingering entry must not count as an old master or an orphan.
+func TestReconcile_DiscardedBusyVCLs(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	docA, docB := routeDoc("A"), routeDoc("B")
+	nameA := routeVCLName(0, RouteVCLHash(docA))
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: docA}))
+	mustReconcile(t, r)
+	_, _, firstMaster := mock.VCLState()
+	mock.HoldVCL(nameA)
+	mock.HoldVCL(firstMaster)
 
-	// Set up vcl.list for garbage collection
-	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, "active      auto/warm          - boot"))
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	// Create ConfigMap with initial VCL
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-cm",
-			Namespace:       "default",
-			ResourceVersion: "1",
-		},
-		Data: map[string]string{
-			"main.vcl": "vcl 4.1; # v1",
-		},
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: docB}))
+	mustReconcile(t, r)
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: docA}))
+	mustReconcile(t, r)
+	labels, _, _ := mock.VCLState()
+	if labels["gwvcl-0"] != nameA+"_2" {
+		t.Errorf("gwvcl-0 -> %q, want %q (renamed load)", labels["gwvcl-0"], nameA+"_2")
+	}
+	if res := r.SlotResults()["default/p0"]; !res.Programmed {
+		t.Errorf("result %+v", res)
 	}
 
-	client := fake.NewSimpleClientset(cm)
-	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
+	// Master reloads: the held first master is discarded but lingers; the
+	// keep count applies to live masters only and nothing retries the
+	// lingering one.
+	for i := range 3 {
+		r.setVCLConfigMap(vclConfigMap(2, fmt.Sprintf("vcl 4.1;\nsub vcl_deliver { set resp.http.N = \"%d\"; }\n", i)))
+		mustReconcile(t, r)
+	}
+	mock.ClearCallHistory()
+	mustReconcile(t, r)
+	for _, c := range commandNames(mock.GetCallHistory()) {
+		if c != "vcl.list -j" {
+			t.Errorf("idle reconcile with lingering discarded VCLs issued %q", c)
+		}
+	}
+	mock.ReleaseVCL(nameA)
+	mock.ReleaseVCL(firstMaster)
+	_, vcls, _ := mock.VCLState()
+	if got := len(masters(vcls)); got != 1+DefaultKeepCount {
+		t.Errorf("masters = %v", masters(vcls))
+	}
+}
+
+func TestReconcile_CompileFailureLeavesLabel(t *testing.T) {
+	r, mock := newTestReloader(t)
+	mock.SetVCLCompileError("BROKEN", "Message from VCC-compiler:\nExpected ';' got '}'\nRunning VCC-compiler failed, exited with 2\nVCL compilation failed")
+	r.setVCLConfigMap(vclConfigMap(4, ""))
+
+	good := routeDoc("good")
+	bad := routeDoc("BROKEN")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: bad, 1: good}))
+	mustReconcile(t, r)
+
+	labels, vcls, _ := mock.VCLState()
+	if labels["gwvcl-0"] != PlaceholderVCLName {
+		t.Errorf("failed slot 0 label -> %q, want placeholder", labels["gwvcl-0"])
+	}
+	if labels["gwvcl-1"] != routeVCLName(1, RouteVCLHash(good)) {
+		t.Errorf("slot 1 label -> %q", labels["gwvcl-1"])
+	}
+	res := r.SlotResults()["default/p0"]
+	if res.Programmed || !strings.Contains(res.Message, "VCC-compiler") || res.Slot != 0 || res.Hash != RouteVCLHash(bad) {
+		t.Errorf("slot 0 result %+v", res)
+	}
+	if !r.SlotResults()["default/p1"].Programmed {
+		t.Error("slot 1 not programmed")
+	}
+	if !isClosed(r.SlotsReady()) {
+		t.Error("a compile failure must not hold SlotsReady")
+	}
+	for _, v := range vcls {
+		if v == routeVCLName(0, RouteVCLHash(bad)) {
+			t.Error("failed route VCL is loaded")
+		}
+	}
+
+	// Replace the working slot 1 VCL with a broken one: the old one keeps
+	// serving.
+	bad1 := routeDoc("BROKEN again")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: bad, 1: bad1}))
+	mustReconcile(t, r)
+	labels, _, _ = mock.VCLState()
+	if labels["gwvcl-1"] != routeVCLName(1, RouteVCLHash(good)) {
+		t.Errorf("slot 1 lost its previous VCL after a failed update: %q", labels["gwvcl-1"])
+	}
+	if res := r.SlotResults()["default/p1"]; res.Programmed || res.Hash != RouteVCLHash(bad1) {
+		t.Errorf("slot 1 result %+v", res)
+	}
+
+	// A resync must not recompile documents already known to fail.
+	mock.ClearCallHistory()
+	mustReconcile(t, r)
+	for _, c := range commandNames(mock.GetCallHistory()) {
+		if strings.HasPrefix(c, "vcl.inline") {
+			t.Errorf("resync recompiled a known-bad document: %q", c)
+		}
+	}
+	if res := r.SlotResults()["default/p0"]; res.Programmed || res.Message == "" {
+		t.Errorf("memoised failure lost its message: %+v", res)
+	}
+}
+
+func TestReconcile_ManifestValidation(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	doc := routeDoc("a")
+	cm := routeConfigMap(map[int]string{0: doc, 5: doc})
+	// Slot 1 in the manifest with a document whose hash does not match.
+	m, _ := ParseRouteVCLManifest(cm.Data[ManifestKey])
+	m.Slots["1"] = RouteVCLSlot{Policy: "default/p1", Hash: RouteVCLHash("other")}
+	m.Slots["x"] = RouteVCLSlot{Policy: "default/px", Hash: RouteVCLHash(doc)}
+	cm.Data[ManifestKey] = mustJSON(m)
+	cm.Data[SlotKey(1)] = doc
+	r.setRouteConfigMap(cm)
+	mustReconcile(t, r)
+
+	res := r.SlotResults()
+	if !res["default/p0"].Programmed {
+		t.Errorf("slot 0: %+v", res["default/p0"])
+	}
+	if p := res["default/p5"]; p.Programmed || !strings.Contains(p.Message, "outside the pool") {
+		t.Errorf("slot 5: %+v", p)
+	}
+	if p := res["default/p1"]; p.Programmed || !strings.Contains(p.Message, "hash") {
+		t.Errorf("slot 1: %+v", p)
+	}
+	if p := res["default/px"]; p.Programmed || p.Slot != -1 {
+		t.Errorf("slot x: %+v", p)
+	}
+	labels, _, _ := mock.VCLState()
+	if labels["gwvcl-1"] != PlaceholderVCLName {
+		t.Errorf("hash-mismatched slot was programmed: %q", labels["gwvcl-1"])
+	}
+
+	// A malformed manifest changes nothing and still lets SlotsReady close.
+	r2, mock2 := newTestReloader(t)
+	r2.setVCLConfigMap(vclConfigMap(2, ""))
+	r2.setRouteConfigMap(&corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "gw-route-vcl"},
+		Data:       map[string]string{ManifestKey: "{not json"},
+	})
+	mustReconcile(t, r2)
+	if !isClosed(r2.SlotsReady()) {
+		t.Error("SlotsReady not closed with a malformed manifest")
+	}
+	labels, _, _ = mock2.VCLState()
+	if labels["gwvcl-0"] != PlaceholderVCLName || labels["gwvcl-1"] != PlaceholderVCLName {
+		t.Errorf("labels: %v", labels)
+	}
+}
+
+func TestReconcile_ShrinkAndGrow(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(4, ""))
+	d1, d3 := routeDoc("1"), routeDoc("3")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{1: d1, 3: d3}))
+	mustReconcile(t, r)
+
+	// Two more master reloads at pool 4 so there are old masters to pin
+	// labels 2 and 3.
+	r.setVCLConfigMap(vclConfigMap(4, "vcl 4.1;\nsub vcl_deliver { set resp.http.A = \"1\"; }\n"))
+	mustReconcile(t, r)
+	r.setVCLConfigMap(vclConfigMap(4, "vcl 4.1;\nsub vcl_deliver { set resp.http.A = \"2\"; }\n"))
+	mustReconcile(t, r)
+	_, vcls, _ := mock.VCLState()
+	if got := len(masters(vcls)); got != 3 {
+		t.Fatalf("masters before shrink = %d (%v), want active + 2 kept", got, vcls)
+	}
+
+	// Shrink to 2: slot 3 is in the manifest still (outside the pool now).
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	mustReconcile(t, r)
+	labels, vcls, active := mock.VCLState()
+	for _, l := range []string{"gwvcl-2", "gwvcl-3"} {
+		if _, ok := labels[l]; ok {
+			t.Errorf("%s survived the shrink", l)
+		}
+	}
+	if labels["gwvcl-1"] != routeVCLName(1, RouteVCLHash(d1)) {
+		t.Errorf("slot 1 lost its VCL in the shrink: %q", labels["gwvcl-1"])
+	}
+	if rv := routeVCLs(vcls); len(rv) != 1 {
+		t.Errorf("route VCLs after shrink: %v", rv)
+	}
+	if m := masters(vcls); len(m) != 1 || m[0] != active {
+		t.Errorf("old masters not discarded on shrink: %v (active %s)", m, active)
+	}
+	if res := r.SlotResults()["default/p3"]; res.Programmed {
+		t.Errorf("slot 3 outside the pool reported programmed: %+v", res)
+	}
+
+	// Grow to 8: labels 2..7 created on the placeholder, slot 3 programmed again.
+	mock.ClearCallHistory()
+	r.setVCLConfigMap(vclConfigMap(8, ""))
+	mustReconcile(t, r)
+	labels, _, _ = mock.VCLState()
+	for i := 2; i < 8; i++ {
+		if _, ok := labels[SlotLabel(i)]; !ok {
+			t.Errorf("%s missing after grow", SlotLabel(i))
+		}
+	}
+	if labels["gwvcl-3"] != routeVCLName(3, RouteVCLHash(d3)) {
+		t.Errorf("slot 3 after grow: %q", labels["gwvcl-3"])
+	}
+	cmds := commandNames(mock.GetCallHistory())
+	if indexOf(t, cmds, func(c string) bool { return c == "param.set max_vcl 26" }, "max_vcl 26") >
+		indexOf(t, cmds, func(c string) bool { return strings.HasPrefix(c, "vcl.inline vcl_") }, "master") {
+		t.Errorf("max_vcl set after the master: %v", cmds)
+	}
+
+	// Disable: everything route-VCL related goes away.
+	r.setVCLConfigMap(vclConfigMap(0, ""))
+	mustReconcile(t, r)
+	labels, vcls, active = mock.VCLState()
+	if len(labels) != 0 {
+		t.Errorf("labels left with pool 0: %v", labels)
+	}
+	if len(vcls) != 1 || vcls[0] != active {
+		t.Errorf("VCLs left with pool 0: %v (active %s)", vcls, active)
+	}
+}
+
+func TestReconcile_KeepsTwoOldMasters(t *testing.T) {
+	r, mock := newTestReloader(t)
+	for i := range 5 {
+		r.setVCLConfigMap(vclConfigMap(0, fmt.Sprintf("vcl 4.1;\nsub vcl_deliver { set resp.http.N = \"%d\"; }\n", i)))
+		mustReconcile(t, r)
+	}
+	_, vcls, active := mock.VCLState()
+	m := masters(vcls)
+	if len(m) != 1+DefaultKeepCount || m[len(m)-1] != active {
+		t.Errorf("masters = %v (active %s), want the active one plus %d", m, active, DefaultKeepCount)
+	}
+}
+
+func TestReconcile_SlotsReadyWithoutRouteConfigMap(t *testing.T) {
+	r, _ := newTestReloader(t)
+	r.SetRouteVCLConfigMap("gw-route-vcl") // watched, but does not exist
+	r.setVCLConfigMap(vclConfigMap(4, ""))
+	if isClosed(r.SlotsReady()) {
+		t.Fatal("SlotsReady closed before any reconcile")
+	}
+	mustReconcile(t, r)
+	if !isClosed(r.SlotsReady()) {
+		t.Error("SlotsReady not closed with a missing route VCL ConfigMap")
+	}
+}
+
+// vccError is a varnishd-style VCC failure payload for a vcl.inline.
+const vccError = "Message from VCC-compiler:\nExpected ';' got '}'\nRunning VCC-compiler failed, exited with 2\nVCL compilation failed"
+
+// fakeClock replaces the reloader's clock.
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) now() time.Time          { return c.t }
+func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func useFakeClock(r *Reloader) *fakeClock {
+	c := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	r.now = c.now
+	return c
+}
+
+// nonListCommands is the call history without vcl.list and inline bodies.
+func nonListCommands(mock *varnishadm.MockVarnishadm) []string {
+	var out []string
+	for _, c := range commandNames(mock.GetCallHistory()) {
+		if !strings.HasPrefix(c, "vcl.list") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func countPrefix(cmds []string, prefix string) int {
+	n := 0
+	for _, c := range cmds {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestReconcile_MasterCompileFailure(t *testing.T) {
+	r, mock := newTestReloader(t)
+	clock := useFakeClock(r)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	mustReconcile(t, r)
+	_, _, before := mock.VCLState()
+
+	mock.SetVCLCompileError("BROKEN-MASTER", vccError)
+	r.setVCLConfigMap(vclConfigMap(4, "vcl 4.1;\n# BROKEN-MASTER\n"))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("reconcile succeeded with a broken master")
+	}
+	_, _, after := mock.VCLState()
+	if after != before {
+		t.Errorf("active master changed after a failed load: %s -> %s", before, after)
+	}
+
+	// The failure is memoised: the retry (and later resyncs) do not
+	// recompile the same main.vcl, but still report the error.
+	mock.SetVCLCompileError("BROKEN-MASTER", "")
+	mock.ClearCallHistory()
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Error("memoised master failure not reported")
+	}
+	if n := countPrefix(nonListCommands(mock), "vcl.inline vcl_"); n != 0 {
+		t.Errorf("memoised master recompiled %d times", n)
+	}
+
+	// After the TTL the same main.vcl is compiled again (and now succeeds).
+	clock.advance(failureMemoTTL + time.Second)
+	mustReconcile(t, r)
+	if _, _, after = mock.VCLState(); after == before {
+		t.Error("master not reloaded after the memo expired")
+	}
+
+	// A changed main.vcl is tried right away, memo or not.
+	_, _, before = mock.VCLState()
+	mock.SetVCLCompileError("BROKEN-MASTER", vccError)
+	r.setVCLConfigMap(vclConfigMap(4, "vcl 4.1;\n# BROKEN-MASTER 2\n"))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("reconcile succeeded with a broken master")
+	}
+	mock.SetVCLCompileError("BROKEN-MASTER", "")
+	r.setVCLConfigMap(vclConfigMap(4, "vcl 4.1;\n# fixed\n"))
+	mustReconcile(t, r)
+	if _, _, after = mock.VCLState(); after == before {
+		t.Error("changed main.vcl not loaded while an older one is memoised")
+	}
+}
+
+// A transient master failure (not VCC) is not memoised.
+func TestReconcile_MasterTransientFailureNotMemoised(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(0, ""))
+	mustReconcile(t, r)
+	mock.SetVCLCompileError("NEW-MASTER", "Too many (12) VCLs already loaded")
+	r.setVCLConfigMap(vclConfigMap(0, "vcl 4.1;\n# NEW-MASTER\n"))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("reconcile succeeded")
+	}
+	mock.SetVCLCompileError("NEW-MASTER", "")
+	mustReconcile(t, r)
+}
+
+// A master that fails to compile must not freeze the slots: slots both the
+// desired and the active master dispatch to are still programmed, and the
+// broken master is not recompiled on every pass.
+func TestReconcile_FailingMasterStillProgramsSlots(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	mustReconcile(t, r)
+	_, _, active := mock.VCLState()
+
+	mock.SetVCLCompileError("BROKEN-MASTER", vccError)
+	r.setVCLConfigMap(vclConfigMap(4, "vcl 4.1;\n# BROKEN-MASTER\n"))
+	d1, d3 := routeDoc("one"), routeDoc("three")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{1: d1, 3: d3}))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("reconcile hid the master failure")
+	}
+	labels, _, nowActive := mock.VCLState()
+	if nowActive != active {
+		t.Fatalf("active master changed: %s -> %s", active, nowActive)
+	}
+	if labels["gwvcl-1"] != routeVCLName(1, RouteVCLHash(d1)) {
+		t.Errorf("slot 1 not programmed beside a failing master: %v", labels)
+	}
+	// Slot 3 exists only for the new (failed) master: its label is created
+	// but stays on the placeholder.
+	if labels["gwvcl-3"] != PlaceholderVCLName {
+		t.Errorf("gwvcl-3 -> %q, want placeholder", labels["gwvcl-3"])
+	}
+	if res := r.SlotResults()["default/p1"]; !res.Programmed {
+		t.Errorf("slot 1 result %+v", res)
+	}
+	if res := r.SlotResults()["default/p3"]; res.Programmed || !strings.Contains(res.Message, "waits for the master") {
+		t.Errorf("slot 3 result %+v", res)
+	}
+
+	// Next pass: the master is not recompiled; a slot change still lands.
+	mock.ClearCallHistory()
+	d1b := routeDoc("one-b")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{1: d1b, 3: d3}))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("memoised master failure not reported")
+	}
+	cmds := nonListCommands(mock)
+	if n := countPrefix(cmds, "vcl.inline vcl_"); n != 0 {
+		t.Errorf("broken master recompiled: %v", cmds)
+	}
+	labels, _, _ = mock.VCLState()
+	if labels["gwvcl-1"] != routeVCLName(1, RouteVCLHash(d1b)) {
+		t.Errorf("slot 1 change not applied beside a failing master: %v", labels)
+	}
+
+	// Fixed master: slot 3 gets programmed too.
+	mock.SetVCLCompileError("BROKEN-MASTER", "")
+	r.setVCLConfigMap(vclConfigMap(4, "vcl 4.1;\n# fixed\n"))
+	mustReconcile(t, r)
+	labels, _, _ = mock.VCLState()
+	if labels["gwvcl-3"] != routeVCLName(3, RouteVCLHash(d3)) {
+		t.Errorf("slot 3 after the master loaded: %v", labels)
+	}
+}
+
+// With no master ever loaded, a failing master returns before the slot pass
+// and SlotsReady stays open.
+func TestReconcile_FirstMasterFailure(t *testing.T) {
+	r, mock := newTestReloader(t)
+	mock.SetVCLCompileError("BROKEN-MASTER", vccError)
+	r.setVCLConfigMap(vclConfigMap(2, "vcl 4.1;\n# BROKEN-MASTER\n"))
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: routeDoc("x")}))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("reconcile succeeded")
+	}
+	if isClosed(r.Ready()) || isClosed(r.SlotsReady()) {
+		t.Error("Ready/SlotsReady closed without a master")
+	}
+}
+
+func TestReconcile_InvalidPoolSize(t *testing.T) {
+	// No master loaded yet: main.vcl is loaded as pool 0 so the gateway
+	// comes up.
+	r, mock := newTestReloader(t)
+	cm := vclConfigMap(0, "")
+	cm.Data[PoolSizeKey] = "lots"
+	r.setVCLConfigMap(cm)
+	mustReconcile(t, r)
+	if !isClosed(r.Ready()) || !isClosed(r.SlotsReady()) {
+		t.Error("first load with an invalid pool size did not come up")
+	}
+	labels, _, _ := mock.VCLState()
+	if len(labels) != 0 {
+		t.Errorf("labels created for an invalid pool size: %v", labels)
+	}
+
+	// Once a master is applied, an invalid value is ignored.
+	mock.ClearCallHistory()
+	cm = vclConfigMap(0, "vcl 4.1;\n# changed\n")
+	cm.Data[PoolSizeKey] = "-3"
+	r.setVCLConfigMap(cm)
+	mustReconcile(t, r)
+	if len(mock.GetCallHistory()) != 0 {
+		t.Errorf("invalid pool size issued commands: %v", mock.GetCallHistory())
+	}
+}
+
+// A non-VCC vcl.inline failure (max_vcl refusal, ENOMEM, ...) is retried on
+// the next pass, and the reconcile reports it so the backoff kicks in.
+func TestReconcile_TransientRouteFailureRetried(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	doc := routeDoc("TRANSIENT")
+	name := routeVCLName(0, RouteVCLHash(doc))
+	mock.SetVCLCompileError("TRANSIENT", "Too many (12) VCLs already loaded\nMaybe discard some? (Or increase max_vcl)")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: doc}))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("transient route VCL failure not reported for retry")
+	}
+	if res := r.SlotResults()["default/p0"]; res.Programmed || !strings.Contains(res.Message, "Too many") {
+		t.Errorf("result %+v", res)
+	}
+	if !isClosed(r.SlotsReady()) {
+		t.Error("a transient slot failure must not hold SlotsReady")
+	}
+
+	mock.ClearCallHistory()
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("still failing, but not reported")
+	}
+	if n := countPrefix(nonListCommands(mock), "vcl.inline "+name); n != 1 {
+		t.Errorf("transient failure not retried: %v", nonListCommands(mock))
+	}
+
+	mock.SetVCLCompileError("TRANSIENT", "")
+	mustReconcile(t, r)
+	labels, _, _ := mock.VCLState()
+	if labels["gwvcl-0"] != name || !r.SlotResults()["default/p0"].Programmed {
+		t.Errorf("slot 0 not programmed after the cause went away: %v", labels)
+	}
+}
+
+// A VCC failure is not recompiled within the TTL, is after it, and the memo
+// is cleared by a master change or a pool size change.
+func TestReconcile_CompileFailureMemo(t *testing.T) {
+	r, mock := newTestReloader(t)
+	clock := useFakeClock(r)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	bad := routeDoc("BROKEN")
+	inline := "vcl.inline " + routeVCLName(0, RouteVCLHash(bad))
+	mock.SetVCLCompileError("BROKEN", vccError)
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: bad}))
+	mustReconcile(t, r) // a VCC failure is not a reconcile error
+
+	recompiled := func(what string, want int) {
+		t.Helper()
+		if n := countPrefix(nonListCommands(mock), inline); n != want {
+			t.Errorf("%s: %d compiles of the bad document, want %d", what, n, want)
+		}
+		mock.ClearCallHistory()
+	}
+	mock.ClearCallHistory()
+	clock.advance(failureMemoTTL - time.Second)
+	mustReconcile(t, r)
+	recompiled("within the TTL", 0)
+
+	clock.advance(2 * time.Second)
+	mustReconcile(t, r)
+	recompiled("after the TTL", 1)
+
+	mustReconcile(t, r)
+	recompiled("re-memoised", 0)
+
+	r.setVCLConfigMap(vclConfigMap(2, "vcl 4.1;\n# new master\n"))
+	mustReconcile(t, r)
+	recompiled("after a master change", 1)
+
+	r.setVCLConfigMap(vclConfigMap(3, "vcl 4.1;\n# new master\n"))
+	mock.SetVCLCompileError("BROKEN", vccError) // keep failing
+	mustReconcile(t, r)
+	recompiled("after a pool change", 1)
+	if res := r.SlotResults()["default/p0"]; res.Programmed || !strings.Contains(res.Message, "VCC-compiler") {
+		t.Errorf("result %+v", res)
+	}
+}
+
+// A vcl.label refused because it would create a return(vcl) loop depends on
+// another slot's document: it is retried (not memoised, the compiled VCL is
+// kept) and succeeds once the other document changes.
+func TestReconcile_LabelLoopRetried(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	toSlot := func(label, tag string) string {
+		return GenerateRouteVCL("", "vcl 4.1;\nsub vcl_recv {\n    # "+tag+"\n    return (vcl("+label+"));\n}\n")
+	}
+	d0, d1 := toSlot("gwvcl-1", "a"), toSlot("gwvcl-0", "b")
+	name0, name1 := routeVCLName(0, RouteVCLHash(d0)), routeVCLName(1, RouteVCLHash(d1))
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: d0, 1: d1}))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("refused label not reported for retry")
+	}
+	labels, vcls, _ := mock.VCLState()
+	if labels["gwvcl-0"] != name0 || labels["gwvcl-1"] != PlaceholderVCLName {
+		t.Fatalf("labels %v", labels)
+	}
+	if !slices.Contains(vcls, name1) {
+		t.Errorf("compiled slot 1 VCL was discarded after the refused label: %v", vcls)
+	}
+	if res := r.SlotResults()["default/p1"]; res.Programmed || !strings.Contains(res.Message, "loop") {
+		t.Errorf("slot 1 result %+v", res)
+	}
+
+	// Next pass: the label is retried, the document is not recompiled.
+	mock.ClearCallHistory()
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("still refused, but not reported")
+	}
+	cmds := nonListCommands(mock)
+	if countPrefix(cmds, "vcl.label gwvcl-1 "+name1) != 1 || countPrefix(cmds, "vcl.inline") != 0 {
+		t.Errorf("retry pass = %v, want one vcl.label and no vcl.inline", cmds)
+	}
+
+	// Slot 0 stops returning to gwvcl-1: slot 1's label now succeeds.
+	d0b := routeDoc("plain")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: d0b, 1: d1}))
+	mustReconcile(t, r)
+	labels, _, _ = mock.VCLState()
+	if labels["gwvcl-1"] != name1 || !r.SlotResults()["default/p1"].Programmed {
+		t.Errorf("slot 1 not programmed after the loop went away: %v", labels)
+	}
+}
+
+// failLabel fails VCLLabel for one label with a transport error a number of
+// times, then defers to the mock.
+type failLabel struct {
+	*varnishadm.MockVarnishadm
+	label    string
+	failures int
+}
+
+func (f *failLabel) VCLLabel(label, name string) (varnishadm.VarnishResponse, error) {
+	if label == f.label && f.failures > 0 {
+		f.failures--
+		return varnishadm.VarnishResponse{}, errors.New("connection reset")
+	}
+	return f.MockVarnishadm.VCLLabel(label, name)
+}
+
+// A transport error between vcl.inline and vcl.label leaves an unlabelled
+// route VCL. The next pass adopts it (no recompile); if the document is no
+// longer wanted, discardOrphans removes it.
+func TestReconcile_TransportErrorBetweenInlineAndLabel(t *testing.T) {
+	mock := varnishadm.NewMock(6082, "secret", testLogger())
+	mock.SetStrictVCL(true)
+	flaky := &failLabel{MockVarnishadm: mock, label: "gwvcl-0"}
+	r := New(flaky, 0, fake.NewSimpleClientset(), "gw-vcl", "default", testLogger())
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	mustReconcile(t, r)
+
+	doc := routeDoc("orphan")
+	name := routeVCLName(0, RouteVCLHash(doc))
+	flaky.failures = 1
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: doc}))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("transport error not reported")
+	}
+	labels, vcls, _ := mock.VCLState()
+	if !slices.Contains(vcls, name) || labels["gwvcl-0"] != PlaceholderVCLName {
+		t.Fatalf("after the transport error: labels=%v vcls=%v", labels, vcls)
+	}
+
+	mock.ClearCallHistory()
+	mustReconcile(t, r)
+	cmds := nonListCommands(mock)
+	if countPrefix(cmds, "vcl.inline") != 0 || countPrefix(cmds, "vcl.label gwvcl-0 "+name) != 1 {
+		t.Errorf("adopting pass = %v, want the orphan labelled without a recompile", cmds)
+	}
+	if !r.SlotResults()["default/p0"].Programmed {
+		t.Error("slot 0 not programmed")
+	}
+
+	// Again, but the slot is detached before the next pass: the orphan goes.
+	doc2 := routeDoc("orphan-2")
+	name2 := routeVCLName(0, RouteVCLHash(doc2))
+	flaky.failures = 1
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: doc2}))
+	if err := r.reconcile(context.Background()); err == nil {
+		t.Fatal("transport error not reported")
+	}
+	r.setRouteConfigMap(routeConfigMap(nil))
+	mustReconcile(t, r)
+	labels, vcls, _ = mock.VCLState()
+	if rv := routeVCLs(vcls); len(rv) != 0 {
+		t.Errorf("route VCLs left after detach: %v (orphan %s)", rv, name2)
+	}
+	if labels["gwvcl-0"] != PlaceholderVCLName {
+		t.Errorf("gwvcl-0 -> %q", labels["gwvcl-0"])
+	}
+}
+
+// A placeholder discarded while busy keeps its name; re-enabling the pool
+// loads it under a free name, and every placeholder comparison accepts it.
+func TestReconcile_PlaceholderRenamedWhileBusy(t *testing.T) {
+	r, mock := newTestReloader(t)
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	mustReconcile(t, r)
+	mock.HoldVCL(PlaceholderVCLName)
+	r.setVCLConfigMap(vclConfigMap(0, ""))
+	mustReconcile(t, r)
+
+	r.setVCLConfigMap(vclConfigMap(2, ""))
+	mustReconcile(t, r)
+	ph2 := PlaceholderVCLName + "_2"
+	labels, _, _ := mock.VCLState()
+	if labels["gwvcl-0"] != ph2 || labels["gwvcl-1"] != ph2 {
+		t.Fatalf("labels %v, want both on %s", labels, ph2)
+	}
+
+	// Attach and detach slot 0: it goes back to the renamed placeholder, and
+	// an idle pass leaves it alone.
+	doc := routeDoc("x")
+	r.setRouteConfigMap(routeConfigMap(map[int]string{0: doc}))
+	mustReconcile(t, r)
+	r.setRouteConfigMap(routeConfigMap(nil))
+	mustReconcile(t, r)
+	labels, _, _ = mock.VCLState()
+	if labels["gwvcl-0"] != ph2 {
+		t.Errorf("gwvcl-0 -> %q after detach, want %s", labels["gwvcl-0"], ph2)
+	}
+	mock.ClearCallHistory()
+	mustReconcile(t, r)
+	if cmds := nonListCommands(mock); len(cmds) != 0 {
+		t.Errorf("idle pass with a renamed placeholder issued %v", cmds)
+	}
+
+	// Shrink with a slot attached repoints to the renamed placeholder;
+	// disabling discards it.
+	r.setRouteConfigMap(routeConfigMap(map[int]string{1: doc}))
+	mustReconcile(t, r)
+	r.setVCLConfigMap(vclConfigMap(1, ""))
+	mustReconcile(t, r)
+	r.setVCLConfigMap(vclConfigMap(0, ""))
+	mustReconcile(t, r)
+	mock.ReleaseVCL(PlaceholderVCLName)
+	labels, vcls, active := mock.VCLState()
+	if len(labels) != 0 || len(vcls) != 1 || vcls[0] != active {
+		t.Errorf("after disable: labels=%v vcls=%v", labels, vcls)
+	}
+}
+
+// One slot per policy is the contract; if the manifest lists a policy twice,
+// the programmed result wins over an invalid or failed one.
+func TestReconcile_DuplicatePolicyKeepsBestResult(t *testing.T) {
+	r, mock := newTestReloader(t)
+	mock.SetVCLCompileError("BROKEN", vccError)
+	r.setVCLConfigMap(vclConfigMap(4, ""))
+	good, bad := routeDoc("good"), routeDoc("BROKEN")
+	cm := routeConfigMap(map[int]string{0: bad, 1: good, 2: good})
+	m, _ := ParseRouteVCLManifest(cm.Data[ManifestKey])
+	// p-a: slot 0 fails to compile, slot 1 is programmed.
+	// p-b: slot 2 programmed, slot 3 has a hash mismatch (invalid).
+	// p-c: slots 5 and 7, both outside the pool (invalid).
+	m.Slots["0"] = RouteVCLSlot{Policy: "default/p-a", Hash: RouteVCLHash(bad)}
+	m.Slots["1"] = RouteVCLSlot{Policy: "default/p-a", Hash: RouteVCLHash(good)}
+	m.Slots["2"] = RouteVCLSlot{Policy: "default/p-b", Hash: RouteVCLHash(good)}
+	m.Slots["3"] = RouteVCLSlot{Policy: "default/p-b", Hash: RouteVCLHash("other")}
+	m.Slots["5"] = RouteVCLSlot{Policy: "default/p-c", Hash: RouteVCLHash(good)}
+	m.Slots["7"] = RouteVCLSlot{Policy: "default/p-c", Hash: RouteVCLHash(good)}
+	cm.Data[ManifestKey] = mustJSON(m)
+	cm.Data[SlotKey(3)] = good
+	r.setRouteConfigMap(cm)
+	mustReconcile(t, r)
+
+	res := r.SlotResults()
+	if p := res["default/p-a"]; !p.Programmed || p.Slot != 1 {
+		t.Errorf("p-a: %+v, want slot 1 programmed", p)
+	}
+	if p := res["default/p-b"]; !p.Programmed || p.Slot != 2 {
+		t.Errorf("p-b: %+v, want slot 2 programmed", p)
+	}
+	if p := res["default/p-c"]; p.Programmed || p.Slot != 5 {
+		t.Errorf("p-c: %+v, want the first invalid entry", p)
+	}
+}
+
+// flakyList fails VCLListJSON a number of times, then defers to the mock.
+type flakyList struct {
+	*varnishadm.MockVarnishadm
+	failures int
+}
+
+func (f *flakyList) VCLListJSON() ([]varnishadm.VCLEntry, error) {
+	if f.failures > 0 {
+		f.failures--
+		return nil, errors.New("connection reset")
+	}
+	return f.MockVarnishadm.VCLListJSON()
+}
+
+func TestLoop_RetriesAfterFailure(t *testing.T) {
+	mock := varnishadm.NewMock(6082, "secret", testLogger())
+	flaky := &flakyList{MockVarnishadm: mock, failures: 2}
+	r := New(flaky, 0, fake.NewSimpleClientset(), "gw-vcl", "default", testLogger())
+	r.retryInitial = 10 * time.Millisecond
+	r.retryMax = 20 * time.Millisecond
+	r.setVCLConfigMap(vclConfigMap(0, ""))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// Start the reloader in a goroutine
-	errCh := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
-		errCh <- r.Run(ctx)
+		r.loop(ctx)
+		close(done)
 	}()
+	select {
+	case <-r.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcile was not retried after transient failures")
+	}
+	cancel()
+	<-done
+}
 
-	// Wait for informer to sync
-	time.Sleep(100 * time.Millisecond)
+func TestRun_ConfigMapEvents(t *testing.T) {
+	mock := varnishadm.NewMock(6082, "secret", testLogger())
+	mock.SetStrictVCL(true)
+	client := fake.NewSimpleClientset(vclConfigMap(2, ""))
+	r := New(mock, 0, client, "gw-vcl", "default", testLogger())
+	r.SetRouteVCLConfigMap("gw-route-vcl")
 
-	// Update the ConfigMap
-	cm.Data["main.vcl"] = "vcl 4.1; # v2"
-	cm.ResourceVersion = "2"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.Run(ctx) }()
+
+	select {
+	case <-r.SlotsReady():
+	case <-time.After(5 * time.Second):
+		t.Fatal("SlotsReady not closed")
+	}
+
+	doc := routeDoc("run")
+	name := routeVCLName(0, RouteVCLHash(doc))
+	if _, err := client.CoreV1().ConfigMaps("default").Create(ctx, routeConfigMap(map[int]string{0: doc}), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		labels, _, _ := mock.VCLState()
+		return labels["gwvcl-0"] == name
+	}, "slot 0 programmed after route ConfigMap create")
+
+	if err := client.CoreV1().ConfigMaps("default").Delete(ctx, "gw-route-vcl", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		labels, _, _ := mock.VCLState()
+		return labels["gwvcl-0"] == PlaceholderVCLName
+	}, "slot 0 cleared after route ConfigMap delete")
+
+	cm := vclConfigMap(2, "vcl 4.1;\nsub vcl_deliver { set resp.http.V = \"2\"; }\n")
 	if _, err := client.CoreV1().ConfigMaps("default").Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, func() bool {
+		_, vcls, _ := mock.VCLState()
+		return len(masters(vcls)) == 2
+	}, "master reloaded after ConfigMap update")
 
-	// Wait for update to be processed
-	time.Sleep(200 * time.Millisecond)
-
-	// Cancel and wait for clean shutdown
 	cancel()
 	select {
 	case err := <-errCh:
-		if err != nil && err != context.Canceled {
-			t.Errorf("Run() returned unexpected error: %v", err)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("Run: %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Error("Run() did not exit within timeout")
-	}
-
-	// Verify reload was triggered
-	history := mock.GetCallHistory()
-	foundLoad := false
-	for _, cmd := range history {
-		if strings.HasPrefix(cmd, "vcl.inline vcl_") {
-			foundLoad = true
-			break
-		}
-	}
-	if !foundLoad {
-		t.Error("expected vcl.inline to be called after ConfigMap change")
+	case <-time.After(2 * time.Second):
+		t.Error("Run did not exit")
 	}
 }
 
-func TestNew_Defaults(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	mock := varnishadm.NewMock(6082, "secret", logger)
-	client := fake.NewSimpleClientset()
-
-	// Test default keepCount
-	r := New(mock, "/path/to/vcl", 0, client, "test-cm", "default", nil)
-	if r.keepCount != DefaultKeepCount {
-		t.Errorf("expected default keepCount %d, got %d", DefaultKeepCount, r.keepCount)
+func waitFor(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	t.Fatalf("timed out waiting for: %s", what)
+}
 
-	// Test negative keepCount
-	r = New(mock, "/path/to/vcl", -5, client, "test-cm", "default", logger)
-	if r.keepCount != DefaultKeepCount {
-		t.Errorf("expected default keepCount %d for negative input, got %d", DefaultKeepCount, r.keepCount)
+func TestNew_Defaults(t *testing.T) {
+	mock := varnishadm.NewMock(6082, "secret", testLogger())
+	for _, keep := range []int{0, -5} {
+		r := New(mock, keep, fake.NewSimpleClientset(), "gw-vcl", "default", nil)
+		if r.keepCount != DefaultKeepCount {
+			t.Errorf("keepCount(%d) = %d, want %d", keep, r.keepCount, DefaultKeepCount)
+		}
 	}
 }
 
 func TestGenerateVCLName(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	mock := varnishadm.NewMock(6082, "secret", logger)
-	client := fake.NewSimpleClientset()
-
-	r := New(mock, "/path/to/vcl", 3, client, "test-cm", "default", logger)
-
+	r, _ := newTestReloader(t)
 	name1 := r.generateVCLName()
-	time.Sleep(2 * time.Millisecond)
 	name2 := r.generateVCLName()
-
-	// Names should start with prefix
 	if !strings.HasPrefix(name1, vclPrefix) {
-		t.Errorf("expected name to start with %q, got %q", vclPrefix, name1)
+		t.Errorf("name %q lacks prefix %q", name1, vclPrefix)
 	}
-
-	// Names should be different (different timestamps)
-	if name1 == name2 {
-		t.Error("expected unique names, got duplicates")
-	}
-
-	// Names should be sortable (older name < newer name)
-	if name1 >= name2 {
-		t.Errorf("expected name1 < name2 for sorting, got %q >= %q", name1, name2)
+	if name1 == name2 || name1 >= name2 {
+		t.Errorf("names not unique and increasing: %q, %q", name1, name2)
 	}
 }
 
-func TestHandleConfigMapUpdate_ContentDeduplication(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	mock := varnishadm.NewMock(6082, "secret", logger)
-	mock.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, "active      auto/warm          - boot"))
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
-
-	// First update - should trigger reload
-	cm1 := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-cm",
-			Namespace:       "default",
-			ResourceVersion: "1",
-		},
-		Data: map[string]string{
-			"main.vcl": "vcl 4.1; # v1",
-		},
+func TestTrimMessage(t *testing.T) {
+	if got := trimMessage("  hello\n"); got != "hello" {
+		t.Errorf("trimMessage = %q", got)
 	}
-	r.handleConfigMapUpdate(cm1)
-
-	// Verify reload was called
-	history1 := mock.GetCallHistory()
-	initialCallCount := len(history1)
-	if initialCallCount == 0 {
-		t.Error("expected vcl.load to be called for first update")
+	long := strings.Repeat("é", 3000)
+	got := trimMessage(long)
+	if len(got) > maxResultMessage || !strings.HasSuffix(got, "(truncated)") {
+		t.Errorf("len %d, suffix %q", len(got), got[len(got)-20:])
 	}
-
-	// Second update - same content, different ResourceVersion - should NOT trigger reload
-	cm2 := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-cm",
-			Namespace:       "default",
-			ResourceVersion: "2",
-		},
-		Data: map[string]string{
-			"main.vcl": "vcl 4.1; # v1", // Same content
-		},
-	}
-	r.handleConfigMapUpdate(cm2)
-
-	// Verify reload was NOT called (history should be same length)
-	history2 := mock.GetCallHistory()
-	if len(history2) != initialCallCount {
-		t.Errorf("expected no new reload for unchanged content, but got %d new commands (was %d, now %d)",
-			len(history2)-initialCallCount, initialCallCount, len(history2))
-	}
-
-	// Third update - different content - should trigger reload
-	cm3 := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-cm",
-			Namespace:       "default",
-			ResourceVersion: "3",
-		},
-		Data: map[string]string{
-			"main.vcl": "vcl 4.1; # v2", // Different content
-		},
-	}
-	r.handleConfigMapUpdate(cm3)
-
-	// Verify reload was called (history should have grown)
-	history3 := mock.GetCallHistory()
-	if len(history3) <= initialCallCount {
-		t.Error("expected vcl.load to be called for changed content")
+	if !strings.HasPrefix(got, "é") || strings.ContainsRune(got, '�') {
+		t.Error("truncation split a rune")
 	}
 }
 
-// failingVarnishadm wraps MockVarnishadm to make VCLInline always fail
-type failingVarnishadm struct {
-	*varnishadm.MockVarnishadm
-}
-
-func (f *failingVarnishadm) VCLInline(name, vcl string) (varnishadm.VarnishResponse, error) {
-	return varnishadm.NewVarnishResponse(varnishadm.ClisSyntax, "VCL compilation failed: syntax error"), nil
-}
-
-// flakyVarnishadm wraps MockVarnishadm so VCLInline can be toggled to fail
-// on demand, letting tests simulate a transient reload failure followed by a
-// successful retry of the same ConfigMap object.
-type flakyVarnishadm struct {
-	*varnishadm.MockVarnishadm
-	fail bool
-}
-
-func (f *flakyVarnishadm) VCLInline(name, vcl string) (varnishadm.VarnishResponse, error) {
-	if f.fail {
-		return varnishadm.NewVarnishResponse(varnishadm.ClisSyntax, "VCL compilation failed: injected failure"), nil
-	}
-	return f.MockVarnishadm.VCLInline(name, vcl)
-}
-
-func TestVCLReloadFailure_NonFatal(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	baseMock := varnishadm.NewMock(6082, "secret", logger)
-	mock := &failingVarnishadm{MockVarnishadm: baseMock}
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
-
-	// Trigger a VCL reload that will fail due to compilation error.
-	// Varnish keeps the old VCL active in this case, so chaperone must not exit.
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-cm",
-			Namespace:       "default",
-			ResourceVersion: "1",
-		},
-		Data: map[string]string{
-			"main.vcl": "invalid vcl",
-		},
-	}
-	// handleConfigMapUpdate must return without panicking or blocking.
-	done := make(chan struct{})
-	go func() {
-		r.handleConfigMapUpdate(cm)
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		// good: reloader survived the failure
-	case <-time.After(500 * time.Millisecond):
-		t.Error("handleConfigMapUpdate blocked after VCL compilation failure")
-	}
-}
-
-// TestHandleConfigMapUpdate_RetriesAfterReloadFailure guards M-22: a
-// transient ReloadInline failure must not strand lastConfigMapRV at the
-// failed delivery's ResourceVersion, because the RV-dedup check runs before
-// the content check — if the RV were recorded regardless of outcome, every
-// subsequent resync/re-delivery of the same object (same RV) would be
-// skipped, leaving Varnish running stale VCL indefinitely with no retry.
-func TestHandleConfigMapUpdate_RetriesAfterReloadFailure(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	base := varnishadm.NewMock(6082, "secret", logger)
-	base.SetResponse("vcl.list", varnishadm.NewVarnishResponse(varnishadm.ClisOk, "active      auto/warm          - boot"))
-	mock := &flakyVarnishadm{MockVarnishadm: base, fail: true}
-
-	tmpDir := t.TempDir()
-	vclPath := filepath.Join(tmpDir, "main.vcl")
-
-	client := fake.NewSimpleClientset()
-	r := New(mock, vclPath, 3, client, "test-cm", "default", logger)
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-cm",
-			Namespace:       "default",
-			ResourceVersion: "5",
-		},
-		Data: map[string]string{
-			"main.vcl": "vcl 4.1; # v1",
-		},
-	}
-
-	// First delivery: ReloadInline fails (injected compilation error).
-	r.handleConfigMapUpdate(cm)
-
-	r.lastVCLMux.RLock()
-	rvAfterFailure := r.lastConfigMapRV
-	vclAfterFailure := r.lastVCL
-	r.lastVCLMux.RUnlock()
-
-	if rvAfterFailure == cm.ResourceVersion {
-		t.Fatalf("lastConfigMapRV must not advance to %q after a failed reload (would strand the dedup check and block retries)", cm.ResourceVersion)
-	}
-	if vclAfterFailure == cm.Data["main.vcl"] {
-		t.Fatal("lastVCL must not advance to the new content after a failed reload")
-	}
-
-	historyBeforeRetry := len(base.GetCallHistory())
-
-	// Second delivery: the SAME object (identical ResourceVersion "5"), as
-	// would happen on an informer resync. The reload now succeeds. Because
-	// lastConfigMapRV was never advanced above, this must NOT be skipped by
-	// the RV-dedup check - it must retry the reload.
-	mock.fail = false
-	r.handleConfigMapUpdate(cm)
-
-	history := base.GetCallHistory()
-	if len(history) <= historyBeforeRetry {
-		t.Fatalf("expected a retry to issue new varnishadm commands after the earlier failure; history: %v", history)
-	}
-
-	var foundInline bool
-	for _, cmd := range history[historyBeforeRetry:] {
-		if strings.HasPrefix(cmd, "vcl.inline vcl_") {
-			foundInline = true
+func TestParseSlotLabel(t *testing.T) {
+	for name, want := range map[string]int{"gwvcl-0": 0, "gwvcl-17": 17} {
+		if got, ok := parseSlotLabel(name); !ok || got != want {
+			t.Errorf("parseSlotLabel(%q) = %d, %v", name, got, ok)
 		}
 	}
-	if !foundInline {
-		t.Errorf("expected retry to call vcl.inline; history: %v", history)
+	for _, name := range []string{"gwvcl-placeholder", "gwvcl-", "gwvcl-01", "gwvcl--1", "vcl_1", "gwvcl-1x"} {
+		if _, ok := parseSlotLabel(name); ok {
+			t.Errorf("parseSlotLabel(%q) accepted", name)
+		}
+	}
+}
+
+// varnishadm.Server reports a refused command as an empty response and a
+// *CLIError, not as a response carrying the status. The reloader must treat
+// that like a non-200 reply, not like a transport failure: on a kind cluster
+// a route document that failed to compile was retried with backoff forever,
+// never memoised and never reported, because the error was taken for a lost
+// connection. These cases run with the mock in the server's error mode.
+func TestReconcile_ServerErrorSemantics(t *testing.T) {
+	newServerReloader := func(t *testing.T) (*Reloader, *varnishadm.MockVarnishadm) {
+		t.Helper()
+		r, mock := newTestReloader(t)
+		mock.SetServerErrorSemantics(true)
+		var ce *varnishadm.CLIError
+		if _, err := mock.Exec("no.such.command"); !errors.As(err, &ce) || ce.Status != varnishadm.ClisUnknown {
+			t.Fatalf("mock in server mode: refused command returned %v, want a *CLIError", err)
+		}
+		return r, mock
 	}
 
-	r.lastVCLMux.RLock()
-	rvAfterRetry := r.lastConfigMapRV
-	vclAfterRetry := r.lastVCL
-	r.lastVCLMux.RUnlock()
+	t.Run("route VCC failure is memoised and reported", func(t *testing.T) {
+		r, mock := newServerReloader(t)
+		dyn := newFakeDynamic(testVVP("default", "p0"), testVVP("default", "p1"))
+		r.SetStatusWriter(dyn, "gw-pod-0")
+		mock.SetVCLCompileError("BROKEN", vccError)
+		r.setVCLConfigMap(vclConfigMap(4, ""))
+		good, bad := routeDoc("good"), routeDoc("BROKEN")
+		r.setRouteConfigMap(routeConfigMap(map[int]string{0: bad, 1: good}))
+		mustReconcile(t, r) // a VCC failure is not a reconcile error
 
-	if rvAfterRetry != cm.ResourceVersion {
-		t.Errorf("expected lastConfigMapRV to advance to %q after a successful retry, got %q", cm.ResourceVersion, rvAfterRetry)
-	}
-	if vclAfterRetry != cm.Data["main.vcl"] {
-		t.Error("expected lastVCL to be updated after a successful retry")
+		if !isClosed(r.SlotsReady()) {
+			t.Error("a compile failure must not hold SlotsReady")
+		}
+		labels, _, _ := mock.VCLState()
+		if labels["gwvcl-0"] != PlaceholderVCLName || labels["gwvcl-1"] != routeVCLName(1, RouteVCLHash(good)) {
+			t.Errorf("labels %v", labels)
+		}
+		if res := r.SlotResults()["default/p0"]; res.Programmed || !strings.Contains(res.Message, "VCC-compiler") {
+			t.Errorf("slot 0 result %+v", res)
+		}
+		if !r.SlotResults()["default/p1"].Programmed {
+			t.Error("slot 1 not programmed")
+		}
+		if err := r.reporter.flush(context.Background()); err != nil {
+			t.Fatalf("status flush: %v", err)
+		}
+		entry := podResultFor(t, dyn, "p0", "gw-pod-0")
+		if entry["programmed"] != false || !strings.Contains(fmt.Sprint(entry["message"]), "VCC-compiler") {
+			t.Errorf("p0 status entry: %v", entry)
+		}
+
+		mock.ClearCallHistory()
+		mustReconcile(t, r)
+		if n := countPrefix(nonListCommands(mock), "vcl.inline "+routeVCLName(0, RouteVCLHash(bad))); n != 0 {
+			t.Errorf("memoised route VCL recompiled %d times", n)
+		}
+	})
+
+	t.Run("label refusal is recorded and retried", func(t *testing.T) {
+		r, mock := newServerReloader(t)
+		r.setVCLConfigMap(vclConfigMap(2, ""))
+		toSlot := func(label, tag string) string {
+			return GenerateRouteVCL("", "vcl 4.1;\nsub vcl_recv {\n    # "+tag+"\n    return (vcl("+label+"));\n}\n")
+		}
+		d0, d1 := toSlot("gwvcl-1", "a"), toSlot("gwvcl-0", "b")
+		name1 := routeVCLName(1, RouteVCLHash(d1))
+		r.setRouteConfigMap(routeConfigMap(map[int]string{0: d0, 1: d1}))
+		err := r.reconcile(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "vcl.label gwvcl-1") {
+			t.Fatalf("reconcile error = %v, want the refused label for retry", err)
+		}
+		if res := r.SlotResults()["default/p1"]; res.Programmed || !strings.Contains(res.Message, "loop") {
+			t.Errorf("slot 1 result %+v", res)
+		}
+		if !r.SlotResults()["default/p0"].Programmed {
+			t.Error("slot 0 not programmed")
+		}
+
+		mock.ClearCallHistory()
+		if err := r.reconcile(context.Background()); err == nil {
+			t.Fatal("still refused, but not reported")
+		}
+		cmds := nonListCommands(mock)
+		if countPrefix(cmds, "vcl.label gwvcl-1 "+name1) != 1 || countPrefix(cmds, "vcl.inline") != 0 {
+			t.Errorf("retry pass = %v, want one vcl.label and no vcl.inline", cmds)
+		}
+
+		r.setRouteConfigMap(routeConfigMap(map[int]string{0: routeDoc("plain"), 1: d1}))
+		mustReconcile(t, r)
+		if !r.SlotResults()["default/p1"].Programmed {
+			t.Error("slot 1 not programmed after the loop went away")
+		}
+	})
+
+	t.Run("master VCC failure keeps the previous master and is memoised", func(t *testing.T) {
+		r, mock := newServerReloader(t)
+		r.setVCLConfigMap(vclConfigMap(2, ""))
+		mustReconcile(t, r)
+		_, _, before := mock.VCLState()
+
+		mock.SetVCLCompileError("BROKEN-MASTER", vccError)
+		r.setVCLConfigMap(vclConfigMap(2, "vcl 4.1;\n# BROKEN-MASTER\n"))
+		err := r.reconcile(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "VCC-compiler") {
+			t.Fatalf("reconcile error = %v, want the VCC message", err)
+		}
+		if _, _, after := mock.VCLState(); after != before {
+			t.Errorf("active master changed after a failed load: %s -> %s", before, after)
+		}
+		if r.masterFailure == nil {
+			t.Fatal("master VCC failure not memoised")
+		}
+
+		mock.ClearCallHistory()
+		if err := r.reconcile(context.Background()); err == nil {
+			t.Error("memoised master failure not reported")
+		}
+		if n := countPrefix(nonListCommands(mock), "vcl.inline vcl_"); n != 0 {
+			t.Errorf("memoised master recompiled %d times", n)
+		}
+	})
+}
+
+func TestCLIOutcome(t *testing.T) {
+	ok := varnishadm.NewVarnishResponse(varnishadm.ClisOk, "fine")
+	refused := varnishadm.NewVarnishResponse(varnishadm.ClisCant, "VCL compilation failed")
+	for _, tc := range []struct {
+		name          string
+		resp          varnishadm.VarnishResponse
+		err           error
+		wantStatus    int
+		wantPayload   string
+		wantTransport bool
+	}{
+		{"ok", ok, nil, varnishadm.ClisOk, "fine", false},
+		{"mock refusal", refused, nil, varnishadm.ClisCant, "VCL compilation failed", false},
+		{"server refusal", varnishadm.VarnishResponse{}, &varnishadm.CLIError{Status: varnishadm.ClisParam, Payload: "nope"}, varnishadm.ClisParam, "nope", false},
+		{"wrapped server refusal", varnishadm.VarnishResponse{}, fmt.Errorf("x: %w", &varnishadm.CLIError{Status: varnishadm.ClisCant, Payload: "nope"}), varnishadm.ClisCant, "nope", false},
+		{"flattened refusal", varnishadm.VarnishResponse{}, errors.New("command failed: Message from VCC-compiler"), varnishadm.ClisCant, "Message from VCC-compiler", false},
+		{"transport", varnishadm.VarnishResponse{}, errors.New("command timed out"), 0, "command timed out", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, payload, transport := cliOutcome(tc.resp, tc.err)
+			if status != tc.wantStatus || payload != tc.wantPayload || transport != tc.wantTransport {
+				t.Errorf("cliOutcome = (%d, %q, %v), want (%d, %q, %v)", status, payload, transport, tc.wantStatus, tc.wantPayload, tc.wantTransport)
+			}
+		})
 	}
 }
