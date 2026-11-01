@@ -133,12 +133,26 @@ func (r *VarnishVCLPolicyReconciler) computeCondition(ctx context.Context, vvp *
 		return cond, err
 	}
 
-	enabledMsg, disabledMsg, err := r.routeVCLEnablement(ctx, &route)
+	en, err := r.routeVCLEnablement(ctx, &route)
 	if err != nil {
 		return vvpCondition{}, err
 	}
-	if enabledMsg == "" {
-		return vvpCondition{reason: gatewayparamsv1alpha1.VCLPolicyReasonDisabled, message: disabledMsg}, nil
+	if en.enabled == "" {
+		if en.notAttached != "" {
+			msg := en.notAttached
+			if en.disabled != "" {
+				msg += "; " + en.disabled
+			}
+			return vvpCondition{reason: gatewayparamsv1alpha1.VCLPolicyReasonRouteNotAttached, message: msg}, nil
+		}
+		return vvpCondition{reason: gatewayparamsv1alpha1.VCLPolicyReasonDisabled, message: en.disabled}, nil
+	}
+	disabledMsg := en.disabled
+	if en.notAttached != "" {
+		if disabledMsg != "" {
+			disabledMsg += "; "
+		}
+		disabledMsg += en.notAttached
 	}
 
 	conflict, err := r.checkConflict(ctx, vvp)
@@ -151,7 +165,7 @@ func (r *VarnishVCLPolicyReconciler) computeCondition(ctx context.Context, vvp *
 
 	msg := "Policy accepted"
 	if disabledMsg != "" {
-		msg += "; route VCL is not enabled for some parent Gateways: " + disabledMsg
+		msg += "; route VCL does not apply on some parent Gateways: " + disabledMsg
 	}
 	return vvpCondition{accepted: true, reason: gatewayparamsv1alpha1.VCLPolicyReasonAccepted, message: msg}, nil
 }
@@ -222,13 +236,26 @@ func (r *VarnishVCLPolicyReconciler) checkConfigMap(ctx context.Context, vvp *ga
 	return vvpCondition{}, true, nil
 }
 
-// routeVCLEnablement reports whether route VCL is enabled for at least one of
-// the route's parent Gateways. enabledMsg lists the parents with the feature
-// on and is empty when there are none; disabledMsg explains each parent that
-// does not have it on. Both are deterministic for a given input so that the
+// routeVCLEnablementResult describes where a route's policy can take effect.
+// Each field is a "; "-joined list, empty when there is nothing to report.
+type routeVCLEnablementResult struct {
+	// enabled lists parents with route VCL on that the route is attached to.
+	enabled string
+	// notAttached lists parents with route VCL on that the route is not
+	// attached to (no Accepted=True status.parents entry from us).
+	notAttached string
+	// disabled explains each parent that does not have route VCL on.
+	disabled string
+}
+
+// routeVCLEnablement reports whether route VCL is enabled for, and the route
+// attached to, at least one of the route's parent Gateways. Attachment is
+// the HTTPRoute controller's verdict in status.parents
+// (routeAcceptedByGateway), which already applies allowedRoutes and listener
+// matching. The lists are deterministic for a given input so that the
 // condition message only changes when the situation does.
-func (r *VarnishVCLPolicyReconciler) routeVCLEnablement(ctx context.Context, route *gatewayv1.HTTPRoute) (enabledMsg, disabledMsg string, err error) {
-	var enabled, disabled []string
+func (r *VarnishVCLPolicyReconciler) routeVCLEnablement(ctx context.Context, route *gatewayv1.HTTPRoute) (routeVCLEnablementResult, error) {
+	var enabled, notAttached, disabled []string
 	seen := make(map[types.NamespacedName]bool)
 
 	for _, ref := range route.Spec.ParentRefs {
@@ -249,19 +276,26 @@ func (r *VarnishVCLPolicyReconciler) routeVCLEnablement(ctx context.Context, rou
 
 		on, why, err := r.routeVCLEnabledForGateway(ctx, gwKey)
 		if err != nil {
-			return "", "", err
+			return routeVCLEnablementResult{}, err
 		}
-		if on {
-			enabled = append(enabled, fmt.Sprintf("Gateway %s", gwKey))
-		} else {
+		switch {
+		case !on:
 			disabled = append(disabled, fmt.Sprintf("Gateway %s: %s", gwKey, why))
+		case !routeAcceptedByGateway(route, gwKey):
+			notAttached = append(notAttached, fmt.Sprintf("Gateway %s: HTTPRoute %q is not attached (no Accepted=True parent status)", gwKey, route.Name))
+		default:
+			enabled = append(enabled, fmt.Sprintf("Gateway %s", gwKey))
 		}
 	}
 
 	if len(seen) == 0 {
-		return "", fmt.Sprintf("HTTPRoute %q has no parent Gateway", route.Name), nil
+		return routeVCLEnablementResult{disabled: fmt.Sprintf("HTTPRoute %q has no parent Gateway", route.Name)}, nil
 	}
-	return strings.Join(enabled, "; "), strings.Join(disabled, "; "), nil
+	return routeVCLEnablementResult{
+		enabled:     strings.Join(enabled, "; "),
+		notAttached: strings.Join(notAttached, "; "),
+		disabled:    strings.Join(disabled, "; "),
+	}, nil
 }
 
 // routeVCLEnabledForGateway resolves Gateway -> GatewayClass ->
@@ -489,6 +523,12 @@ func (r *VarnishVCLPolicyReconciler) findVVPsForGateway(ctx context.Context, obj
 
 // routeHasParentGateway reports whether route lists gw in its parentRefs.
 func routeHasParentGateway(route *gatewayv1.HTTPRoute, gw *gatewayv1.Gateway) bool {
+	return routeHasParentGatewayKey(route, client.ObjectKeyFromObject(gw))
+}
+
+// routeHasParentGatewayKey reports whether route lists the Gateway gwKey in
+// its parentRefs.
+func routeHasParentGatewayKey(route *gatewayv1.HTTPRoute, gwKey types.NamespacedName) bool {
 	for _, ref := range route.Spec.ParentRefs {
 		if ref.Group != nil && *ref.Group != gatewayv1.GroupName {
 			continue
@@ -500,7 +540,7 @@ func routeHasParentGateway(route *gatewayv1.HTTPRoute, gw *gatewayv1.Gateway) bo
 		if ref.Namespace != nil {
 			ns = string(*ref.Namespace)
 		}
-		if string(ref.Name) == gw.Name && ns == gw.Namespace {
+		if string(ref.Name) == gwKey.Name && ns == gwKey.Namespace {
 			return true
 		}
 	}
@@ -524,10 +564,11 @@ func (r *VarnishVCLPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// The primary resource passes spec changes and status.podResults
 	// changes (gateway pods reporting compile results), and ignores our own
 	// condition writes, which would otherwise re-trigger reconciles in a
-	// loop. On HTTPRoute, Gateway and GatewayClass GenerationChangedPredicate
-	// filters out the frequent status-only updates: only spec changes
-	// (parentRefs, gatewayClassName, parametersRef), creates and deletes
-	// affect a policy's conditions.
+	// loop. On Gateway and GatewayClass GenerationChangedPredicate filters
+	// out the frequent status-only updates: only spec changes
+	// (gatewayClassName, parametersRef), creates and deletes affect a
+	// policy's conditions. HTTPRoutes also pass status.parents changes
+	// (attachment).
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
 		For(&gatewayparamsv1alpha1.VarnishVCLPolicy{}, builder.WithPredicates(vvpGenerationOrPodResultsChanged())).
@@ -538,10 +579,12 @@ func (r *VarnishVCLPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.findSiblingVVPs),
 			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
+		// HTTPRoute: spec changes, and status.parents changes (attachment,
+		// written by the HTTPRoute controller, decides RouteNotAttached).
 		Watches(
 			&gatewayv1.HTTPRoute{},
 			handler.EnqueueRequestsFromMapFunc(r.findVVPsForHTTPRoute),
-			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+			builder.WithPredicates(routeGenerationOrParentsChanged()),
 		).
 		Watches(
 			&corev1.ConfigMap{},

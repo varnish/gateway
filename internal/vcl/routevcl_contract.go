@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Operator -> chaperone contract for per-HTTPRoute VCL (#94).
@@ -71,6 +73,26 @@ type RouteVCLManifest struct {
 	// Unassigned lists eligible policies that did not get a slot. The
 	// chaperone ignores it; the operator uses it for status and metrics.
 	Unassigned []RouteVCLUnassigned `json:"unassigned,omitempty"`
+	// Released lists slots whose occupant left and that are not free for
+	// another policy yet. The chaperone ignores it: a released slot is not
+	// in Slots, so its label is pointed at the placeholder and ghost drops
+	// it from routing. The operator keeps it out of the free list until the
+	// previous occupant's VCL can no longer be reached through it.
+	Released []RouteVCLReleased `json:"released,omitempty"`
+}
+
+// RouteVCLReleased is a slot in quarantine after its occupant left.
+type RouteVCLReleased struct {
+	// Slot is the slot number.
+	Slot int `json:"slot"`
+	// Policy is the previous occupant as "<namespace>/<name>".
+	Policy string `json:"policy"`
+	// Route is the previous occupant's HTTPRoute as "<namespace>/<name>".
+	Route string `json:"route"`
+	// Hash is the manifest hash the slot had when it was released.
+	Hash string `json:"hash"`
+	// ReleasedAt is when the operator released the slot.
+	ReleasedAt metav1.Time `json:"releasedAt"`
 }
 
 // RouteVCLUnassigned is an eligible policy that has no slot on the gateway.
