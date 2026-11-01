@@ -1242,3 +1242,151 @@ func TestParseSlotLabel(t *testing.T) {
 		}
 	}
 }
+
+// varnishadm.Server reports a refused command as an empty response and a
+// *CLIError, not as a response carrying the status. The reloader must treat
+// that like a non-200 reply, not like a transport failure: on a kind cluster
+// a route document that failed to compile was retried with backoff forever,
+// never memoised and never reported, because the error was taken for a lost
+// connection. These cases run with the mock in the server's error mode.
+func TestReconcile_ServerErrorSemantics(t *testing.T) {
+	newServerReloader := func(t *testing.T) (*Reloader, *varnishadm.MockVarnishadm) {
+		t.Helper()
+		r, mock := newTestReloader(t)
+		mock.SetServerErrorSemantics(true)
+		var ce *varnishadm.CLIError
+		if _, err := mock.Exec("no.such.command"); !errors.As(err, &ce) || ce.Status != varnishadm.ClisUnknown {
+			t.Fatalf("mock in server mode: refused command returned %v, want a *CLIError", err)
+		}
+		return r, mock
+	}
+
+	t.Run("route VCC failure is memoised and reported", func(t *testing.T) {
+		r, mock := newServerReloader(t)
+		dyn := newFakeDynamic(testVVP("default", "p0"), testVVP("default", "p1"))
+		r.SetStatusWriter(dyn, "gw-pod-0")
+		mock.SetVCLCompileError("BROKEN", vccError)
+		r.setVCLConfigMap(vclConfigMap(4, ""))
+		good, bad := routeDoc("good"), routeDoc("BROKEN")
+		r.setRouteConfigMap(routeConfigMap(map[int]string{0: bad, 1: good}))
+		mustReconcile(t, r) // a VCC failure is not a reconcile error
+
+		if !isClosed(r.SlotsReady()) {
+			t.Error("a compile failure must not hold SlotsReady")
+		}
+		labels, _, _ := mock.VCLState()
+		if labels["gwvcl-0"] != PlaceholderVCLName || labels["gwvcl-1"] != routeVCLName(1, RouteVCLHash(good)) {
+			t.Errorf("labels %v", labels)
+		}
+		if res := r.SlotResults()["default/p0"]; res.Programmed || !strings.Contains(res.Message, "VCC-compiler") {
+			t.Errorf("slot 0 result %+v", res)
+		}
+		if !r.SlotResults()["default/p1"].Programmed {
+			t.Error("slot 1 not programmed")
+		}
+		if err := r.reporter.flush(context.Background()); err != nil {
+			t.Fatalf("status flush: %v", err)
+		}
+		entry := podResultFor(t, dyn, "p0", "gw-pod-0")
+		if entry["programmed"] != false || !strings.Contains(fmt.Sprint(entry["message"]), "VCC-compiler") {
+			t.Errorf("p0 status entry: %v", entry)
+		}
+
+		mock.ClearCallHistory()
+		mustReconcile(t, r)
+		if n := countPrefix(nonListCommands(mock), "vcl.inline "+routeVCLName(0, RouteVCLHash(bad))); n != 0 {
+			t.Errorf("memoised route VCL recompiled %d times", n)
+		}
+	})
+
+	t.Run("label refusal is recorded and retried", func(t *testing.T) {
+		r, mock := newServerReloader(t)
+		r.setVCLConfigMap(vclConfigMap(2, ""))
+		toSlot := func(label, tag string) string {
+			return GenerateRouteVCL("", "vcl 4.1;\nsub vcl_recv {\n    # "+tag+"\n    return (vcl("+label+"));\n}\n")
+		}
+		d0, d1 := toSlot("gwvcl-1", "a"), toSlot("gwvcl-0", "b")
+		name1 := routeVCLName(1, RouteVCLHash(d1))
+		r.setRouteConfigMap(routeConfigMap(map[int]string{0: d0, 1: d1}))
+		err := r.reconcile(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "vcl.label gwvcl-1") {
+			t.Fatalf("reconcile error = %v, want the refused label for retry", err)
+		}
+		if res := r.SlotResults()["default/p1"]; res.Programmed || !strings.Contains(res.Message, "loop") {
+			t.Errorf("slot 1 result %+v", res)
+		}
+		if !r.SlotResults()["default/p0"].Programmed {
+			t.Error("slot 0 not programmed")
+		}
+
+		mock.ClearCallHistory()
+		if err := r.reconcile(context.Background()); err == nil {
+			t.Fatal("still refused, but not reported")
+		}
+		cmds := nonListCommands(mock)
+		if countPrefix(cmds, "vcl.label gwvcl-1 "+name1) != 1 || countPrefix(cmds, "vcl.inline") != 0 {
+			t.Errorf("retry pass = %v, want one vcl.label and no vcl.inline", cmds)
+		}
+
+		r.setRouteConfigMap(routeConfigMap(map[int]string{0: routeDoc("plain"), 1: d1}))
+		mustReconcile(t, r)
+		if !r.SlotResults()["default/p1"].Programmed {
+			t.Error("slot 1 not programmed after the loop went away")
+		}
+	})
+
+	t.Run("master VCC failure keeps the previous master and is memoised", func(t *testing.T) {
+		r, mock := newServerReloader(t)
+		r.setVCLConfigMap(vclConfigMap(2, ""))
+		mustReconcile(t, r)
+		_, _, before := mock.VCLState()
+
+		mock.SetVCLCompileError("BROKEN-MASTER", vccError)
+		r.setVCLConfigMap(vclConfigMap(2, "vcl 4.1;\n# BROKEN-MASTER\n"))
+		err := r.reconcile(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "VCC-compiler") {
+			t.Fatalf("reconcile error = %v, want the VCC message", err)
+		}
+		if _, _, after := mock.VCLState(); after != before {
+			t.Errorf("active master changed after a failed load: %s -> %s", before, after)
+		}
+		if r.masterFailure == nil {
+			t.Fatal("master VCC failure not memoised")
+		}
+
+		mock.ClearCallHistory()
+		if err := r.reconcile(context.Background()); err == nil {
+			t.Error("memoised master failure not reported")
+		}
+		if n := countPrefix(nonListCommands(mock), "vcl.inline vcl_"); n != 0 {
+			t.Errorf("memoised master recompiled %d times", n)
+		}
+	})
+}
+
+func TestCLIOutcome(t *testing.T) {
+	ok := varnishadm.NewVarnishResponse(varnishadm.ClisOk, "fine")
+	refused := varnishadm.NewVarnishResponse(varnishadm.ClisCant, "VCL compilation failed")
+	for _, tc := range []struct {
+		name          string
+		resp          varnishadm.VarnishResponse
+		err           error
+		wantStatus    int
+		wantPayload   string
+		wantTransport bool
+	}{
+		{"ok", ok, nil, varnishadm.ClisOk, "fine", false},
+		{"mock refusal", refused, nil, varnishadm.ClisCant, "VCL compilation failed", false},
+		{"server refusal", varnishadm.VarnishResponse{}, &varnishadm.CLIError{Status: varnishadm.ClisParam, Payload: "nope"}, varnishadm.ClisParam, "nope", false},
+		{"wrapped server refusal", varnishadm.VarnishResponse{}, fmt.Errorf("x: %w", &varnishadm.CLIError{Status: varnishadm.ClisCant, Payload: "nope"}), varnishadm.ClisCant, "nope", false},
+		{"flattened refusal", varnishadm.VarnishResponse{}, errors.New("command failed: Message from VCC-compiler"), varnishadm.ClisCant, "Message from VCC-compiler", false},
+		{"transport", varnishadm.VarnishResponse{}, errors.New("command timed out"), 0, "command timed out", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, payload, transport := cliOutcome(tc.resp, tc.err)
+			if status != tc.wantStatus || payload != tc.wantPayload || transport != tc.wantTransport {
+				t.Errorf("cliOutcome = (%d, %q, %v), want (%d, %q, %v)", status, payload, transport, tc.wantStatus, tc.wantPayload, tc.wantTransport)
+			}
+		})
+	}
+}

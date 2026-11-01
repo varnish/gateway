@@ -100,6 +100,20 @@ func (vr VarnishResponse) CheckOK(format string, args ...any) error {
 	return nil
 }
 
+// CLIError is the error Server.Exec (and every command built on it) returns
+// when varnishd answered with a non-200 status: the command reached varnishd
+// and was refused, as opposed to a transport failure (connection lost,
+// timeout), which is returned as a plain error. Use errors.As to tell the
+// two apart.
+type CLIError struct {
+	Status  int
+	Payload string
+}
+
+func (e *CLIError) Error() string {
+	return fmt.Sprintf("command failed: %s", e.Payload)
+}
+
 type varnishRequest struct {
 	command    string
 	responseCh chan varnishResult
@@ -513,7 +527,7 @@ func (v *Server) handleResult(cmd string, result varnishResult) (VarnishResponse
 	}
 	if result.resp.statusCode != ClisOk {
 		v.logger.Warn("Varnishadm command non-OK", "command", cmd, "status", result.resp.statusCode, "response", result.resp.payload)
-		return VarnishResponse{}, fmt.Errorf("command failed: %s", result.resp.payload)
+		return VarnishResponse{}, &CLIError{Status: result.resp.statusCode, Payload: result.resp.payload}
 	}
 	v.logger.Debug("Varnishadm command succeeded", "command", cmd, "status", result.resp.statusCode, "payload", result.resp.payload)
 	return result.resp, nil

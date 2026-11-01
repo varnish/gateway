@@ -116,13 +116,23 @@ rejects requests for `/admin/` on that route.
 The document is composed as one unit:
 
 ```
-preamble + gateway user VCL + your route VCL + postamble
+preamble + your route VCL + gateway user VCL + postamble
 ```
 
 So you write plain subroutines and `import` lines. Some rules follow from that:
 
 - Write `sub vcl_recv`, `sub vcl_backend_response`, `sub vcl_deliver` and so
-  on. Varnish joins them with the gateway's subroutines in declaration order.
+  on. Varnish joins same-named subroutines in declaration order, so in every
+  subroutine your code runs after the gateway preamble (ghost has already
+  picked the backend) and **before** the gateway user VCL.
+- A `return` ends the subroutine for everything after it. A `return` in your
+  `vcl_recv` skips the gateway user VCL's `vcl_recv` and the postamble, so
+  ghost's deferred `pass` does not happen either: `return (hash)` makes the
+  request cacheable even on a route without a cache policy. That is the same
+  rule the gateway user VCL already has toward the postamble. Without a
+  `return`, the gateway user VCL runs after your code and has the last word.
+  A gateway VCL that ends `vcl_recv` with `return (pass)` (the shipped
+  default) therefore still runs your `vcl_recv` first.
 - You do not need `vcl 4.1;`. If you include it, it is dropped.
 - `X-Gateway-Route` (`namespace/name`) and `X-Gateway-Listener`
   (`{proto}-{port}`) are set, as they are for the gateway VCL.

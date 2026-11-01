@@ -40,10 +40,12 @@ func (v *Varnishd) CLI() *CLI {
 
 var errCodeRe = regexp.MustCompile(`Command failed with error code (\d+)`)
 
-// exec runs varnishadm and maps its exit to a CLI status: exit 0 is 200, a
-// failed command reports "Command failed with error code N" on stderr. Any
-// other failure (cannot run varnishadm, cannot reach varnishd) is an error,
-// like a transport error from the real server.
+// exec runs varnishadm and maps its exit the way varnishadm.Server.Exec
+// reports a reply: exit 0 is a 200 response; a failed command ("Command
+// failed with error code N" on stderr) is an empty response and a
+// *varnishadm.CLIError carrying N and the output. Any other failure (cannot
+// run varnishadm, cannot reach varnishd) is a plain error, like a transport
+// error from the real server.
 func (c *CLI) exec(args ...string) (varnishadm.VarnishResponse, error) {
 	cmd := exec.Command("varnishadm", append([]string{"-n", c.v.workDir}, args...)...)
 	var stdout, stderr bytes.Buffer
@@ -58,7 +60,7 @@ func (c *CLI) exec(args ...string) (varnishadm.VarnishResponse, error) {
 		if m := errCodeRe.FindStringSubmatch(stderr.String() + stdout.String()); m != nil {
 			code, _ := strconv.Atoi(m[1])
 			payload := strings.TrimSpace(errCodeRe.ReplaceAllString(stdout.String(), ""))
-			return varnishadm.NewVarnishResponse(code, payload), nil
+			return varnishadm.VarnishResponse{}, &varnishadm.CLIError{Status: code, Payload: payload}
 		}
 	}
 	return varnishadm.VarnishResponse{}, fmt.Errorf("varnishadm(%s): %w: %s%s",
@@ -135,9 +137,6 @@ func (c *CLI) VCLListJSON() ([]varnishadm.VCLEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		return nil, fmt.Errorf("vcl.list -j failed with status %d: %s", resp.StatusCode(), resp.Payload())
-	}
 	return varnishadm.ParseVCLListJSON(resp.Payload())
 }
 
@@ -148,16 +147,10 @@ func (c *CLI) ParamShow(name string) (varnishadm.VarnishResponse, error) {
 	return c.exec("param.show", name)
 }
 
-// ParamSet returns an error on a non-200 reply, like varnishadm.Server.
+// ParamSet returns a *varnishadm.CLIError on a non-200 reply, like
+// varnishadm.Server.
 func (c *CLI) ParamSet(name, value string) (varnishadm.VarnishResponse, error) {
-	resp, err := c.exec("param.set", name, value)
-	if err != nil {
-		return resp, err
-	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		return resp, fmt.Errorf("param.set %s failed with status %d: %s", name, resp.StatusCode(), resp.Payload())
-	}
-	return resp, nil
+	return c.exec("param.set", name, value)
 }
 
 func (c *CLI) TLSCertList() (varnishadm.VarnishResponse, error) {

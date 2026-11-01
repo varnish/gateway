@@ -192,10 +192,21 @@ func TestGenerateRouteVCL_Composition(t *testing.T) {
 		t.Errorf("import std; appears %d times, want 1", c)
 	}
 
-	gw := strings.Index(out, `X-Gateway-User-VCL = "yes"`)
+	// Route VCL before gateway user VCL: a return in the gateway's
+	// vcl_recv (the shipped default is return (pass)) must not cut off the
+	// route's vcl_recv. Both come after ghost's recv() and before the
+	// postamble.
+	recv := strings.Index(out, "router.recv()")
+	rtRecv := strings.Index(out, `X-Route-VCL-Recv = "1"`)
 	rt := strings.Index(out, `X-Which-VCL = "route"`)
-	if gw < 0 || rt < 0 || gw > rt {
-		t.Errorf("expected gateway user VCL before route VCL (gw=%d route=%d)", gw, rt)
+	gw := strings.Index(out, `X-Gateway-User-VCL = "yes"`)
+	post := strings.LastIndex(out, postambleVCL)
+	if recv < 0 || rtRecv < 0 || rt < 0 || gw < 0 || recv >= rtRecv || rt >= gw || gw >= post {
+		t.Errorf("expected preamble, route VCL, gateway user VCL, postamble (recv=%d routeRecv=%d route=%d gw=%d post=%d)",
+			recv, rtRecv, rt, gw, post)
+	}
+	if want := Merge(Generate(), testRouteUserVCL, testGatewayUserVCL); out != want {
+		t.Error("GenerateRouteVCL(gw, route) should equal Merge(Generate(), route, gw)")
 	}
 	if !strings.HasSuffix(out, postambleVCL) {
 		t.Error("route VCL must end with the postamble")

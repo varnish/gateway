@@ -7,7 +7,7 @@ Every item states the mechanism and what to do instead.
 
 ## How it works, in one paragraph
 
-The gateway's master VCL runs first for every request. Ghost picks the backend and, if the matched route has a policy, sets the internal header `X-Ghost-VCL-Slot`. The master's dispatch block then does `return (vcl(gwvcl-N))`, which hands the request to the route VCL that the label `gwvcl-N` points at. A route VCL is the gateway preamble, the gateway user VCL, then the route's own VCL, then the postamble, compiled as one document.
+The gateway's master VCL runs first for every request. Ghost picks the backend and, if the matched route has a policy, sets the internal header `X-Ghost-VCL-Slot`. The master's dispatch block then does `return (vcl(gwvcl-N))`, which hands the request to the route VCL that the label `gwvcl-N` points at. A route VCL is the gateway preamble, then the route's own VCL, then the gateway user VCL, then the postamble, compiled as one document. The dispatch happens in the master's preamble, before the master's copy of the gateway user VCL, so for a request on a slotted route the gateway user VCL runs only inside the route VCL.
 
 ## Routing and flow control
 
@@ -41,7 +41,11 @@ Objects are not partitioned by route VCL. Two routes that produce the same hash 
 
 ### Gateway VCL is composed into every route VCL
 
-A route VCL document is `preamble + gateway user VCL + route VCL + postamble`, so a route owner cannot opt out of gateway-wide normalisation or security headers. The cost is duplication:
+A route VCL document is `preamble + route VCL + gateway user VCL + postamble`. Varnish joins same-named subroutines in that order, so in every subroutine the route's code runs first and the gateway user VCL runs after it and has the last word.
+
+A `return` ends the subroutine for everything after it. A gateway user VCL that ends `vcl_recv` with `return (pass)` (the shipped default in `deploy/03-gatewayclass.yaml`) therefore still lets the route's `vcl_recv` run. The other way round, a `return` in a route's `vcl_recv` skips the gateway user VCL's `vcl_recv` and the postamble, so ghost's deferred `pass` is skipped too: a route that does `return (hash)` is cached even without a cache policy. This is the rule the gateway user VCL already has toward the postamble. It also means gateway-wide normalisation or security headers in the gateway user VCL run for a route only when the route VCL does not `return` before them. That is not a security boundary (route VCL is code execution, see the [trust statement](varnishvclpolicy.md#trust-statement)); it is a convention between the gateway and route owners. **Instead:** keep gateway-wide logic that must always run in subroutines route owners leave alone, or ask route owners not to `return` from the subroutines it lives in.
+
+The cost of composing is duplication:
 
 - Gateway-level `vcl_init` objects, probes and backends in the gateway user VCL are instantiated **once per populated slot**, plus once in the master. Declare few of them, or prefer ghost-managed backends.
 - A change to the gateway user VCL changes every route VCL's hash, so **every route VCL is recompiled on every pod**. See the compile cost below.

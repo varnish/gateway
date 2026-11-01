@@ -299,3 +299,101 @@ func vclList(t *testing.T, v *varnishtest.Varnishd) map[string]string {
 	}
 	return res
 }
+
+// shippedGatewayUserVCL is the default gateway user VCL from
+// deploy/03-gatewayclass.yaml (ConfigMap varnish-user-vcl).
+const shippedGatewayUserVCL = `# Disable caching for all requests
+sub vcl_recv {
+    # pass all the things!
+    return (pass);
+}
+`
+
+// TestRouteVCLRunsBeforeReturningGatewayVCL is the scenario that failed on a
+// kind cluster: with the shipped gateway user VCL, whose vcl_recv ends in
+// return (pass), a route VCL's vcl_recv never ran because the gateway VCL
+// was composed first and its return ended vcl_recv. The route VCL is now
+// composed first, so its return (synth(403)) fires, while a route without a
+// slot is unaffected and still passed to the backend.
+func TestRouteVCLRunsBeforeReturningGatewayVCL(t *testing.T) {
+	v := varnishtest.Start(t)
+
+	const (
+		poolSize  = 4
+		routeSlot = 2
+		testHost  = "test.example.com"
+	)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "path=%s\n", r.URL.Path)
+	}))
+	t.Cleanup(backend.Close)
+	ghostPath := filepath.Join(t.TempDir(), "ghost.json")
+	writeTestGhostConfig(t, ghostPath, testHost, backend.Listener.Addr().(*net.TCPAddr), routeSlot)
+
+	master, err := generateMaster(ghostPath, poolSize, shippedGatewayUserVCL)
+	if err != nil {
+		t.Fatalf("generateMaster: %v", err)
+	}
+	route, err := generateRouteVCL(ghostPath, shippedGatewayUserVCL, `vcl 4.1;
+
+sub vcl_recv {
+    return (synth(403, "Forbidden by route VCL"));
+}
+
+sub vcl_synth {
+    set resp.http.X-Which-VCL = "route";
+}
+`)
+	if err != nil {
+		t.Fatalf("generateRouteVCL: %v", err)
+	}
+
+	if err := v.LoadVCL(PlaceholderVCLName, GeneratePlaceholder()); err != nil {
+		t.Fatalf("load placeholder: %v", err)
+	}
+	for slot := range poolSize {
+		if err := v.Label(SlotLabel(slot), PlaceholderVCLName); err != nil {
+			t.Fatalf("label %s: %v", SlotLabel(slot), err)
+		}
+	}
+	if err := v.LoadVCL("master", master); err != nil {
+		t.Fatalf("load master: %v", err)
+	}
+	if err := v.LoadVCL("route", route); err != nil {
+		t.Fatalf("load route VCL: %v", err)
+	}
+	if err := v.Label(SlotLabel(routeSlot), "route"); err != nil {
+		t.Fatalf("label %s -> route: %v", SlotLabel(routeSlot), err)
+	}
+	if err := v.Use("master"); err != nil {
+		t.Fatalf("vcl.use master: %v", err)
+	}
+	if err := v.Start(); err != nil {
+		t.Fatalf("start child: %v\n%s", err, v.Log())
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	get := func(path string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, "http://"+v.ListenAddr()+path, nil)
+		if err != nil {
+			t.Fatalf("http.NewRequest(%s): %v", path, err)
+		}
+		req.Host = testHost
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+
+	if resp := get("/slot"); resp.StatusCode != http.StatusForbidden || resp.Header.Get("X-Which-VCL") != "route" {
+		t.Errorf("GET /slot: status %d, X-Which-VCL %q; want 403 from the route VCL's vcl_recv",
+			resp.StatusCode, resp.Header.Get("X-Which-VCL"))
+	}
+	if resp := get("/plain"); resp.StatusCode != http.StatusOK || resp.Header.Get("X-Which-VCL") != "" {
+		t.Errorf("GET /plain: status %d, X-Which-VCL %q; want 200 from the master",
+			resp.StatusCode, resp.Header.Get("X-Which-VCL"))
+	}
+}

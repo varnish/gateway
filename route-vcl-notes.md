@@ -12,7 +12,7 @@ open are recorded here as *assumptions* so they can be reversed.
 | G2 | Labels | As decided. One labelled VCL per slot. |
 | G3 | Open, waits on #96 | Measured locally (see P1b below). Default and ceiling set from those numbers. |
 | G4 | Proposed | **Accepted as proposed.** Source: `VarnishVCLPolicy.spec.vclConfigMapRef` in the policy's own namespace. Delivery: a separate `{gateway}-route-vcl` ConfigMap, one key per slot. |
-| G5 | Unassigned | **Compose.** A route VCL is `preamble + gateway user VCL + route VCL + postamble`. Rationale: gateway VCL is where shared normalisation and security headers live, and a route owner must not be able to opt out of them simply by attaching a policy. Cost: a gateway-VCL change recompiles every route VCL. Reversible by changing one function in `internal/vcl`. |
+| G5 | Unassigned | **Compose.** A route VCL is `preamble + route VCL + gateway user VCL + postamble` (order swapped in P8; it was gateway user VCL first, which let a gateway `return` in `vcl_recv` starve the route VCL). Rationale: gateway VCL is where shared normalisation and security headers live, and a route owner must not be able to opt out of them simply by attaching a policy. Cost: a gateway-VCL change recompiles every route VCL. Reversible by changing one function in `internal/vcl`. |
 
 Other assumptions:
 
@@ -763,3 +763,106 @@ and built clean (strict).
   Needs the P8 in-pod measurement on 9.1.0.
 - `master_reloads_total` duplicates the old counters with a label; drop one
   if that is unwanted.
+
+## P8 — findings from the kind run
+
+An end-to-end run on a kind cluster found two bugs that no unit test caught,
+both because the test doubles disagreed with production.
+
+### Bug A: a VCC failure taken for a transport error
+
+`varnishadm.Server.Exec` returns an empty response and an error for any
+non-200 CLI reply; `MockVarnishadm` and the `internal/varnishtest` CLI adapter
+returned the response with its status and a nil error. The reloader was
+written against the mock and treated every `err != nil` as a lost connection,
+so on the real server a route document that failed to compile was retried
+every backoff, never memoised, never written to `podResults`, and the policy
+sat at `Programmed=False/Pending` instead of `CompileFailed`. Logged as
+`VCL reconcile failed ... varnishadm.VCLInline(route_1_...): command failed:
+Message from VCC-compiler: ...`, repeating. The master path had the same flaw
+(a VCC failure was not memoised and no reload-fail event was published), as
+did every `vcl.label` call.
+
+Fix, keeping `Server.Exec`'s contract:
+
+- `internal/varnishadm`: the non-OK error is now a typed
+  `*CLIError{Status, Payload}` whose `Error()` is still
+  `"command failed: <payload>"`, so log lines and the existing
+  `protocol_test.go` expectation are unchanged. Callers in `internal/tls` and
+  `cmd/chaperone` only test `err != nil` and are unaffected;
+  `internal/invalidation` does not use varnishadm (HTTP only). Nothing else
+  matched on the text.
+- `internal/vcl/reloader.go`: `cliOutcome(resp, err) (status, payload,
+  transport)` normalises both conventions: `errors.As` a `*CLIError` first,
+  then a plain error starting with `"command failed: "` (status reported as
+  `ClisCant`), anything else is transport. `cliErr` is built on it. Every VCL
+  CLI call goes through one of the two: placeholder and master `vcl.inline`,
+  route `vcl.inline`, all `vcl.label`, `vcl.use`, `vcl.discard`, and
+  `param.set max_vcl`. Result: route VCC failures are memoised and reported
+  with the compiler output, route label refusals are recorded as the slot
+  message and retried through `pass.retry` (results still published), a
+  master VCC failure keeps the previous master and is memoised with a
+  `vcl_reload_fail` event, and only transport errors abort a reconcile.
+- One behaviour change beyond the brief: a refused `vcl.label` while
+  **clearing** a slot back to the placeholder used to abort the whole slot
+  pass (results unpublished); it now goes into `pass.retry` and the pass
+  continues. A transport error there still aborts.
+- `internal/varnishtest/adm.go`: the CLI adapter now mirrors `Server.Exec`
+  exactly (empty response + `*CLIError` for a failed command; `ParamSet` no
+  longer adds its own error). `TestReloaderAgainstVarnishd` step 7 (syntax
+  error in slot 0) therefore runs the real error path; with the old reloader
+  and the new adapter it fails with the exact cluster log line, with the fix
+  it passes (log: `route VCL failed to compile ... status=106`).
+- `MockVarnishadm.SetServerErrorSemantics(bool)` (default false, existing
+  tests untouched) makes `Exec`, and every command built on it, return the
+  typed error for non-OK replies. `TestReconcile_ServerErrorSemantics` runs
+  three cases with it on: route VCC failure memoised, reported in
+  `SlotResults` and in `podResults` via the fake dynamic client, `SlotsReady`
+  closed; label loop refusal reported and retried without recompiling; master
+  VCC failure keeps the previous master and is memoised. All three fail
+  against the pre-fix reloader. `TestCLIOutcome` covers the classification
+  table.
+
+### Bug B: a returning gateway `vcl_recv` starved the route VCL
+
+`GenerateRouteVCL` composed `preamble + gateway user VCL + route VCL +
+postamble`. VCL concatenates same-named subroutines in document order, so the
+shipped default gateway VCL (`deploy/03-gatewayclass.yaml`,
+`sub vcl_recv { return (pass); }`) ended `vcl_recv` before the route's
+`vcl_recv` could run. Seen on the cluster: the route's `vcl_deliver` header
+appeared, its `vcl_recv` `return (synth(403))` never fired.
+
+Fix: compose `preamble + route VCL + gateway user VCL + postamble`
+(`GenerateRouteVCL` and the test-only `generateRouteVCL`). Route subroutines
+run first, the gateway VCL runs after them and has the last word unless the
+route returns. A `return` in a route `vcl_recv` now skips the gateway VCL's
+`vcl_recv` and the postamble (so ghost's deferred pass is skipped on
+`return (hash)`), the same rule the gateway VCL has toward the postamble.
+
+This weakens G5's rationale: a route owner can now skip the gateway VCL in a
+subroutine by returning early. The master's dispatch runs in its preamble,
+before the master's copy of the gateway VCL, so for a slotted route the gateway
+VCL runs only inside the route VCL. That was never a security boundary (route
+VCL is code execution, per the trust statement), and the alternative (gateway
+first) silently breaks route VCL under the default install. The docs say so.
+
+- Merge order also decides import order: route imports now come before the
+  gateway's (deduplicated). No effect on the existing header assertion.
+- Composed documents change, so every route VCL hash changes once on upgrade
+  and every populated slot recompiles once. Nothing to migrate.
+- Tests: `TestGenerateRouteVCL_Composition` now asserts preamble's
+  `router.recv()` < route `vcl_recv` code, route < gateway < postamble, and
+  equality with `Merge(Generate(), route, gw)`. New real-varnishd test
+  `TestRouteVCLRunsBeforeReturningGatewayVCL` (sibling of
+  `TestGeneratedVCLCompiles`): shipped gateway VCL + a route VCL whose
+  `vcl_recv` returns `synth(403)`; `/slot` gets 403 from the route VCL,
+  `/plain` gets 200 from the master. With the old order it fails with
+  `GET /slot: status 200`, which is the cluster symptom.
+  `TestGeneratedVCLCompiles` did not depend on the order (its gateway VCL has
+  only `vcl_deliver`).
+- Docs: `docs/guides/route-vcl.md` ("What goes in the document"),
+  `docs/reference/varnishvclpolicy.md` (overview paragraph),
+  `docs/reference/route-vcl-caveats.md` (one-paragraph summary and the compose
+  caveat, with what to do instead), `docs/concepts/vcl-merging.md` (new short
+  "Route VCL" section), CHANGELOG entry and the G5 row above.
+  `mkdocs build --strict` is clean.

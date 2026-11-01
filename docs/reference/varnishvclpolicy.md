@@ -9,7 +9,7 @@
 
 ## Overview
 
-**VarnishVCLPolicy (VVP)** attaches a VCL document to an HTTPRoute. Requests matched by that route will run the attached VCL, composed with the gateway's own VCL. Gateway-wide VCL (`GatewayClassParameters.spec.userVCLConfigMapRef`) stays in force. A route owner cannot opt out of it.
+**VarnishVCLPolicy (VVP)** attaches a VCL document to an HTTPRoute. Requests matched by that route will run the attached VCL, composed with the gateway's own VCL as `preamble + route VCL + gateway user VCL + postamble`. Route VCL subroutines run before the gateway VCL's (`GatewayClassParameters.spec.userVCLConfigMapRef`), which runs after them and has the last word. A `return` in a route subroutine ends that subroutine for the gateway VCL and the postamble too: a route `vcl_recv` that does `return (hash)` skips the gateway VCL's `vcl_recv` and ghost's deferred `pass`, the same rule the gateway VCL has toward the postamble. See [composition](route-vcl-caveats.md#gateway-vcl-is-composed-into-every-route-vcl).
 
 The feature is off by default. It has to be turned on per GatewayClass with [`spec.routeVCL.enabled`](gatewayclassparameters.md#specroutevcl).
 
