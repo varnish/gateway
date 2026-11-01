@@ -366,3 +366,53 @@ Accepted as-is, must be documented in P7/P8:
 - A pod restart waits for every slot to compile before starting the child:
   64 populated slots ~14 s on this host, more under a CPU limit. Readiness
   probe timing may need a look.
+
+### P5 review fixes
+
+- **Failure memo** only holds genuine VCC failures (`vcl.inline` payload
+  contains `VCC-compiler` or `VCL compilation failed`, which is what
+  varnishd 9 prints and what the real-varnishd test sees). Any other
+  `vcl.inline` refusal (max_vcl, ENOMEM, child-side failure) and every
+  `vcl.label` refusal is not memoised: the slot reports the message, the
+  reconcile returns an error so the 5-30 s backoff retries it, and
+  `SlotsReady` is not held. A refused label keeps the compiled VCL loaded
+  (`discardOrphans` now spares loads of wanted documents) and the next pass
+  only retries `vcl.label` (`loadedAs`). Memo entries expire after 5 min
+  (`failureMemoTTL`; `Reloader.now`/`memoTTL` are injectable) and the route
+  memo is cleared when a master is applied or the pool size changes.
+- **Failing master** is memoised by main.vcl content under the same TTL (no
+  recompile / `PublishVCLReloadFail` every retry; a changed main.vcl is tried
+  at once). The pass then continues: slots below
+  `min(pool, activeMasterPool)` are reconciled (`activeMasterPool` = pool of
+  the last applied master, 0 before the first), slots from there up to pool
+  report "waits for the master VCL ..."; old-master discard and shrink are
+  skipped; the master error is returned at the end. With no master active at
+  all the reconcile still returns early and `SlotsReady` stays open.
+- **Invalid pool size** before any master was applied: logged, main.vcl is
+  loaded as pool 0 (so a pool-0 main.vcl comes up; one generated for a pool
+  fails to compile and says so). Once a master is applied the ConfigMap is
+  ignored as before. `cmd/chaperone` logs "waiting for route VCL slot pass"
+  with the elapsed time every 10 s.
+- **Placeholder** is loaded under `freeName(gwvcl-placeholder)`, i.e.
+  `gwvcl-placeholder_2`, ... while a discarded-but-busy placeholder still
+  holds the name (chosen up front from `vcl.list` rather than after a failed
+  `vcl.inline`, same as route VCLs). Labels point at the live one;
+  `isPlaceholderName` is used wherever the slot/shrink code compared with
+  `PlaceholderVCLName`; pool 0 discards every unlabelled placeholder load.
+- **Duplicate policy** in the manifest: one slot per policy per gateway is
+  the contract (operator enforces it). If it happens anyway the chaperone
+  logs a warning and reports programmed over valid-but-failed over invalid
+  (ties: first in slot/key order).
+- **Status writer**: the in-memory "written" cache is gone. Every flush runs
+  `write()` (GET + compare + UpdateStatus only on difference) for every
+  entry; flushes run when the results change (an identical 30 s reconcile no
+  longer nudges), after a failure (10 s) and every 60 s (`statusResyncPeriod`),
+  so a recreated policy or one whose podResults were dropped gets its entry
+  back. Each entry is re-read under the lock right before its write and
+  skipped if superseded. A policy that leaves this pod's results gets one
+  final entry `{slot: <last slot>, hash: "", programmed: false, message:
+  "not in manifest on this pod"}` (chosen over deleting the entry: same
+  get/UpdateStatus path, and the operator still sees which pods had it). P6
+  GC can treat such entries as stale.
+- Mock: strict mode refuses `vcl.label L T` with status 300 ("would create a
+  loop") when T, followed through `return (vcl(...))` labels, returns to L.

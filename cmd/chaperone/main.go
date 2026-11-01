@@ -578,12 +578,21 @@ func run() error {
 		// pod does not answer programmed slots with the placeholder's 503
 		// while their route VCLs are still compiling.
 		slotsStart := time.Now()
-		select {
-		case <-vclReloader.SlotsReady():
-			slog.Info("route VCL slots loaded", "waited", time.Since(slotsStart).Round(time.Millisecond))
-		case <-gctx.Done():
-			return nil
+		slotsTick := time.NewTicker(10 * time.Second)
+	waitSlots:
+		for {
+			select {
+			case <-vclReloader.SlotsReady():
+				slog.Info("route VCL slots loaded", "waited", time.Since(slotsStart).Round(time.Millisecond))
+				break waitSlots
+			case <-slotsTick.C:
+				slog.Info("waiting for route VCL slot pass", "elapsed", time.Since(slotsStart).Round(time.Second))
+			case <-gctx.Done():
+				slotsTick.Stop()
+				return nil
+			}
 		}
+		slotsTick.Stop()
 
 		// Step 3: Start the child process
 		slog.Debug("starting Varnish child process")
