@@ -120,14 +120,44 @@ type VarnishVCLPolicyAncestorStatus struct {
 }
 
 // VarnishVCLPolicyStatus defines the observed state of VarnishVCLPolicy.
-//
-// Only conditions are reported for now. Slot assignment and per-pod compile
-// results will be added here once policies are delivered to the data plane
-// (route VCL phase P6).
 type VarnishVCLPolicyStatus struct {
 	// Ancestors is the list of ancestor objects that this policy is relevant for.
 	// +optional
 	Ancestors []VarnishVCLPolicyAncestorStatus `json:"ancestors,omitempty"`
+
+	// PodResults holds one entry per gateway pod that has the policy's VCL
+	// in its route VCL manifest, written by that pod's chaperone after each
+	// attempt to compile and label the VCL.
+	// +optional
+	// +listType=map
+	// +listMapKey=podName
+	PodResults []VarnishVCLPolicyPodResult `json:"podResults,omitempty"`
+}
+
+// VarnishVCLPolicyPodResult is one gateway pod's result for a policy's VCL.
+type VarnishVCLPolicyPodResult struct {
+	// PodName is the gateway pod that reported this result.
+	PodName string `json:"podName"`
+
+	// Slot is the VCL slot the policy occupies on the pod's gateway, or -1
+	// when the slot in the route VCL manifest was not a number.
+	Slot int32 `json:"slot"`
+
+	// Hash is the SHA-256 (hex) of the route VCL document this result refers
+	// to, as listed in the route VCL manifest.
+	Hash string `json:"hash"`
+
+	// Programmed is true when the document compiled and its slot label points
+	// at it, so matching requests run it.
+	Programmed bool `json:"programmed"`
+
+	// Message explains a false Programmed: the VCL compiler output, or why
+	// the manifest entry was skipped.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// LastUpdate is when the pod last changed this entry.
+	LastUpdate metav1.Time `json:"lastUpdate"`
 }
 
 // VarnishVCLPolicyList contains a list of VarnishVCLPolicy.

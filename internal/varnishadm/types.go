@@ -5,19 +5,21 @@ import (
 	"time"
 )
 
-// VCLEntry represents a single VCL configuration entry from vcl.list
+// VCLEntry is one entry of `vcl.list -j`.
 type VCLEntry struct {
-	Name        string // VCL configuration name
-	Status      string // "active", "available"
-	Temperature string // "auto/warm", "label/warm", etc.
-	Labels      int    // number of labels in parentheses
-	LabelTarget string // for label entries (e.g., "vcl-api-orig" from "label-api -> vcl-api-orig")
-	Returns     int    // number of return statements for labels
+	Name        string // VCL or label name
+	Status      string // "active" or "available"
+	State       string // "auto", "cold", "warm" or "label"
+	Temperature string // "warm", "cold", "cooling", ...
+	Busy        int    // in-flight references in the child (0 when no child)
+	Labels      int    // number of labels pointing at this VCL
+	LabelTarget string // for State == "label": the VCL the label points at
+	LabelRefs   int    // for State == "label": VCLs that return(vcl) to this label
 }
 
-// VCLListResult contains the parsed result of vcl.list command
-type VCLListResult struct {
-	Entries []VCLEntry // slice of VCL entries
+// IsLabel reports whether the entry is a label rather than a loaded VCL.
+func (e VCLEntry) IsLabel() bool {
+	return e.State == "label"
 }
 
 // TLSCertEntry represents a single TLS certificate entry from tls.cert.list

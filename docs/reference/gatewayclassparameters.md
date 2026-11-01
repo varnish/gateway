@@ -165,8 +165,8 @@ Chaperone reads these environment variables. The operator sets most of them auto
 | Variable            | Chaperone default             | Description                                                                                                                                          |
 | ------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `WORK_DIR`          | `/var/run/varnish`            | Chaperone working directory (secrets, runtime files)                                                                                                 |
-| `VCL_PATH`          | `/var/run/varnish/main.vcl`   | Path to VCL file (watched for changes). The operator sets `/etc/varnish/main.vcl`, mounted from the gateway's ConfigMap.                             |
 | `CONFIGMAP_NAME`    | `gateway-vcl`                 | Name of the ConfigMap that holds `routing.json` and `main.vcl`. Chaperone watches this directly via the Kubernetes informer rather than a file path. |
+| `ROUTE_VCL_CONFIGMAP_NAME` | `$GATEWAY_NAME-route-vcl` | ConfigMap with per-HTTPRoute VCL documents and their slot manifest. Empty when `GATEWAY_NAME` is unset (never watched). A missing ConfigMap means no route VCL. |
 | `GHOST_CONFIG_PATH` | `/var/run/varnish/ghost.json` | Generated ghost config output                                                                                                                        |
 
 ### Runtime

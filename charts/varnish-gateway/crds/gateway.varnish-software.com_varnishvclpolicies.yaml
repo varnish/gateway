@@ -106,12 +106,7 @@ spec:
             - vclConfigMapRef
             type: object
           status:
-            description: |-
-              VarnishVCLPolicyStatus defines the observed state of VarnishVCLPolicy.
-
-              Only conditions are reported for now. Slot assignment and per-pod compile
-              results will be added here once policies are delivered to the data plane
-              (route VCL phase P6).
+            description: VarnishVCLPolicyStatus defines the observed state of VarnishVCLPolicy.
             properties:
               ancestors:
                 description: Ancestors is the list of ancestor objects that this policy
@@ -213,6 +208,54 @@ spec:
                   - controllerName
                   type: object
                 type: array
+              podResults:
+                description: |-
+                  PodResults holds one entry per gateway pod that has the policy's VCL
+                  in its route VCL manifest, written by that pod's chaperone after each
+                  attempt to compile and label the VCL.
+                items:
+                  description: VarnishVCLPolicyPodResult is one gateway pod's result
+                    for a policy's VCL.
+                  properties:
+                    hash:
+                      description: |-
+                        Hash is the SHA-256 (hex) of the route VCL document this result refers
+                        to, as listed in the route VCL manifest.
+                      type: string
+                    lastUpdate:
+                      description: LastUpdate is when the pod last changed this entry.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        Message explains a false Programmed: the VCL compiler output, or why
+                        the manifest entry was skipped.
+                      type: string
+                    podName:
+                      description: PodName is the gateway pod that reported this result.
+                      type: string
+                    programmed:
+                      description: |-
+                        Programmed is true when the document compiled and its slot label points
+                        at it, so matching requests run it.
+                      type: boolean
+                    slot:
+                      description: |-
+                        Slot is the VCL slot the policy occupies on the pod's gateway, or -1
+                        when the slot in the route VCL manifest was not a number.
+                      format: int32
+                      type: integer
+                  required:
+                  - hash
+                  - lastUpdate
+                  - podName
+                  - programmed
+                  - slot
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - podName
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec
