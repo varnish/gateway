@@ -119,6 +119,7 @@ sub vcl_pipe {
     # Strip them here. Deliberately no return statement: user VCL appended
     # after this must still run.
     unset bereq.http.X-Ghost-Pass;
+    unset bereq.http.X-Ghost-VCL-Slot;
     unset bereq.http.X-Ghost-Forced-TTL;
     unset bereq.http.X-Ghost-Default-TTL;
     unset bereq.http.X-Ghost-Grace;
