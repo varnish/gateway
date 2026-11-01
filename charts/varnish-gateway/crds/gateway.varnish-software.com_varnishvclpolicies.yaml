@@ -23,6 +23,9 @@ spec:
     - jsonPath: .status.ancestors[0].conditions[?(@.type=="Accepted")].status
       name: Accepted
       type: string
+    - jsonPath: .status.ancestors[0].conditions[?(@.type=="Programmed")].status
+      name: Programmed
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -33,7 +36,8 @@ spec:
           VarnishVCLPolicy attaches a VCL document to an HTTPRoute. Requests matched
           by the route are handled by that VCL, composed with the gateway's own VCL.
 
-          API preview: not yet wired to the data plane.
+          API preview: wired end to end, not yet load-tested or conformance-verified
+          with the feature on.
 
           Attaching VCL to an HTTPRoute is equivalent to granting code execution
           inside the gateway pod. The feature is off unless the GatewayClassParameters
@@ -140,9 +144,9 @@ spec:
                       type: object
                     conditions:
                       description: |-
-                        Conditions describe the status of the policy. Only Accepted is set in
-                        this version; Programmed is reserved for when the VCL is delivered to
-                        the data plane.
+                        Conditions describe the status of the policy: Accepted (the policy is
+                        valid and route VCL is enabled) and Programmed (the VCL runs on every
+                        gateway pod).
                       items:
                         description: Condition contains details for one aspect of
                           the current state of this API Resource.
@@ -255,6 +259,30 @@ spec:
                 type: array
                 x-kubernetes-list-map-keys:
                 - podName
+                x-kubernetes-list-type: map
+              slots:
+                description: |-
+                  Slots lists the VCL slot the policy occupies on each parent Gateway
+                  that assigned it one. A slot is stable: it is kept while the policy
+                  stays eligible, even when its document changes.
+                items:
+                  description: VarnishVCLPolicySlot is the slot a policy occupies
+                    on one Gateway.
+                  properties:
+                    gateway:
+                      description: Gateway is the Gateway as "<namespace>/<name>".
+                      type: string
+                    slot:
+                      description: Slot is the slot number on that Gateway (0-based).
+                      format: int32
+                      type: integer
+                  required:
+                  - gateway
+                  - slot
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - gateway
                 x-kubernetes-list-type: map
             type: object
         required:

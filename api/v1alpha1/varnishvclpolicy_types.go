@@ -4,9 +4,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// API preview: VarnishVCLPolicy is not yet wired to the data plane. The
-// operator validates policies and reports the Accepted condition, but no route
-// VCL is compiled or delivered to gateway pods yet.
+// API preview: VarnishVCLPolicy is wired end to end (operator assigns slots,
+// gateway pods compile and label the VCL, the operator reports Programmed),
+// but it has not yet been load-tested or conformance-verified with the
+// feature on.
 
 const (
 	// DefaultRouteVCLKey is the ConfigMap key read when
@@ -27,9 +28,9 @@ const (
 	// references resolve, and route VCL is enabled for its target.
 	VCLPolicyConditionAccepted = "Accepted"
 
-	// VCLPolicyConditionProgrammed will report whether the route VCL has
-	// compiled and been labelled on every gateway pod. It is not set yet; the
-	// data-plane phases of the route VCL work set it.
+	// VCLPolicyConditionProgrammed reports whether the route VCL holds a
+	// slot on every parent Gateway with route VCL enabled, and has compiled
+	// and been labelled on every live pod of those Gateways.
 	VCLPolicyConditionProgrammed = "Programmed"
 
 	// VCLPolicyReasonAccepted is used with Accepted=True.
@@ -51,12 +52,34 @@ const (
 	// parent Gateways belongs to a GatewayClass whose GatewayClassParameters
 	// set routeVCL.enabled=true.
 	VCLPolicyReasonDisabled = "Disabled"
+
+	// VCLPolicyReasonProgrammed is used with Programmed=True: every live
+	// pod of every route-VCL-enabled parent Gateway reports the current
+	// document compiled and labelled.
+	VCLPolicyReasonProgrammed = "Programmed"
+	// VCLPolicyReasonPending is used with Programmed=False while some live
+	// pods have not reported the current document yet.
+	VCLPolicyReasonPending = "Pending"
+	// VCLPolicyReasonCompileFailed is used with Programmed=False when a live
+	// pod reports that the current document failed to compile or label.
+	VCLPolicyReasonCompileFailed = "CompileFailed"
+	// VCLPolicyReasonNoSlotAvailable is used with Programmed=False when a
+	// parent Gateway could not give the policy a slot (pool exhausted, pool
+	// shrunk below the policy's slot, or the route VCL ConfigMap is full).
+	VCLPolicyReasonNoSlotAvailable = "NoSlotAvailable"
+	// VCLPolicyReasonNotProgrammed is used with Programmed=Unknown when no
+	// parent Gateway lists the policy in its route VCL manifest yet.
+	VCLPolicyReasonNotProgrammed = "NotProgrammed"
+	// VCLPolicyReasonNotAccepted is used with Programmed=False when the
+	// policy is not Accepted.
+	VCLPolicyReasonNotAccepted = "NotAccepted"
 )
 
 // VarnishVCLPolicy attaches a VCL document to an HTTPRoute. Requests matched
 // by the route are handled by that VCL, composed with the gateway's own VCL.
 //
-// API preview: not yet wired to the data plane.
+// API preview: wired end to end, not yet load-tested or conformance-verified
+// with the feature on.
 //
 // Attaching VCL to an HTTPRoute is equivalent to granting code execution
 // inside the gateway pod. The feature is off unless the GatewayClassParameters
@@ -68,6 +91,7 @@ const (
 // +kubebuilder:resource:shortName=vvp
 // +kubebuilder:printcolumn:name="Target Name",type=string,JSONPath=`.spec.targetRef.name`
 // +kubebuilder:printcolumn:name="Accepted",type=string,JSONPath=`.status.ancestors[0].conditions[?(@.type=="Accepted")].status`
+// +kubebuilder:printcolumn:name="Programmed",type=string,JSONPath=`.status.ancestors[0].conditions[?(@.type=="Programmed")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 type VarnishVCLPolicy struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -112,9 +136,9 @@ type VarnishVCLPolicyAncestorStatus struct {
 	// ControllerName is the name of the controller that wrote this status.
 	ControllerName string `json:"controllerName"`
 
-	// Conditions describe the status of the policy. Only Accepted is set in
-	// this version; Programmed is reserved for when the VCL is delivered to
-	// the data plane.
+	// Conditions describe the status of the policy: Accepted (the policy is
+	// valid and route VCL is enabled) and Programmed (the VCL runs on every
+	// gateway pod).
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
@@ -125,6 +149,14 @@ type VarnishVCLPolicyStatus struct {
 	// +optional
 	Ancestors []VarnishVCLPolicyAncestorStatus `json:"ancestors,omitempty"`
 
+	// Slots lists the VCL slot the policy occupies on each parent Gateway
+	// that assigned it one. A slot is stable: it is kept while the policy
+	// stays eligible, even when its document changes.
+	// +optional
+	// +listType=map
+	// +listMapKey=gateway
+	Slots []VarnishVCLPolicySlot `json:"slots,omitempty"`
+
 	// PodResults holds one entry per gateway pod that has the policy's VCL
 	// in its route VCL manifest, written by that pod's chaperone after each
 	// attempt to compile and label the VCL.
@@ -132,6 +164,15 @@ type VarnishVCLPolicyStatus struct {
 	// +listType=map
 	// +listMapKey=podName
 	PodResults []VarnishVCLPolicyPodResult `json:"podResults,omitempty"`
+}
+
+// VarnishVCLPolicySlot is the slot a policy occupies on one Gateway.
+type VarnishVCLPolicySlot struct {
+	// Gateway is the Gateway as "<namespace>/<name>".
+	Gateway string `json:"gateway"`
+
+	// Slot is the slot number on that Gateway (0-based).
+	Slot int32 `json:"slot"`
 }
 
 // VarnishVCLPolicyPodResult is one gateway pod's result for a policy's VCL.
