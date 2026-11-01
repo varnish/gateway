@@ -900,3 +900,25 @@ compose order (bug B).
 Still owed by P8: an in-pod re-measurement of compile cost under the default
 100m CPU request (the kind node has no CPU limit), and the load/churn numbers
 recorded below once the run completes.
+
+### Load / churn run on kind (branch fdfe880, pool 64, 32 populated slots)
+
+`p8/run-load.sh`: 32 HTTPRoutes, each with its own VarnishVCLPolicy and
+document (distinct `vcl_deliver` header and a `synth(403)` path), one
+gateway replica, two echo backends, `wrk -t2 -c16 -d45s` on four routes at
+once through the MetalLB address while `kubectl rollout restart` of the
+gateway Deployment runs at t=10 s. Kind node without CPU limits, so these
+numbers bound behaviour rather than predict a throttled pod.
+
+| Measurement | Result |
+| --- | --- |
+| 32 policies applied → all `Programmed=True` | 21 s (operator + chaperone round trips) |
+| Restarted pod: initial slot pass for 32 slots | 10.3 s (default throttle 4/s burst 8; matches ~0.2 s compile + throttle spacing) |
+| Rolling restart, request to ready | 13 s |
+| Throughput during the run, 4 workers | ~30.3k req/s each, ~120k req/s aggregate |
+| Latency (per worker) | p50 ~490 µs, p99 1.7 ms |
+| Non-2xx / socket errors across ~5.4 M requests, restart included | 0 / 0 (the Deployment surge pod took over before the old one drained) |
+| Routes answering with a wrong or missing route VCL header, before and after restart | 0 of 32 |
+
+Still owed: the same in a pod with the default 100m CPU request on a real
+node, and a run at 64 and 256 populated slots.
