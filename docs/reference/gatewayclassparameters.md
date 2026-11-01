@@ -172,6 +172,8 @@ Chaperone reads these environment variables. The operator sets most of them auto
 | `CONFIGMAP_NAME`    | `gateway-vcl`                 | Name of the ConfigMap that holds `routing.json` and `main.vcl`. Chaperone watches this directly via the Kubernetes informer rather than a file path. |
 | `ROUTE_VCL_CONFIGMAP_NAME` | `$GATEWAY_NAME-route-vcl` | ConfigMap with per-HTTPRoute VCL documents and their slot manifest. Empty when `GATEWAY_NAME` is unset (never watched). A missing ConfigMap means no route VCL. |
 | `GHOST_CONFIG_PATH` | `/var/run/varnish/ghost.json` | Generated ghost config output                                                                                                                        |
+| `ROUTE_VCL_COMPILE_RATE` | `4` | Route VCL compiles per second (token bucket on `vcl.inline` of route VCLs; the master and placeholder are never throttled). A float; `0` disables throttling. See [route VCL caveats](route-vcl-caveats.md#compile-cost-and-startup). |
+| `ROUTE_VCL_COMPILE_BURST` | `8` | Bucket size of the route VCL compile throttle. The bucket starts full, so a pod's first slot pass is not delayed by it. An integer; values below 1 are treated as 1 while the rate is above 0. |
 
 ### Runtime
 

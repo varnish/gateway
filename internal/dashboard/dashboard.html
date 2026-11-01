@@ -408,6 +408,42 @@
     font-weight: 700;
   }
 
+  /* ─── ROUTE VCL ─── */
+  .rvcl-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  .rvcl-summary b { color: var(--text); font-family: var(--font-mono); font-weight: 500; }
+  .rvcl-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .rvcl-table th {
+    text-align: left;
+    padding: 6px 10px;
+    color: var(--text-muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+  }
+  .rvcl-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    font-family: var(--font-mono);
+    vertical-align: top;
+    word-break: break-all;
+  }
+  .rvcl-state { font-weight: 700; }
+  .rvcl-state.ok { color: var(--green); }
+  .rvcl-state.err { color: var(--rose); }
+  .rvcl-msg {
+    white-space: pre-wrap;
+    color: var(--rose);
+    max-width: 480px;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+
   /* ─── EVENT LOG ─── */
   .event-log {
     max-height: 320px;
@@ -1074,6 +1110,18 @@
       </div>
     </div>
 
+    <!-- ROUTE VCL -->
+    <div class="panel panel-full" id="routeVclPanel" style="display:none">
+      <div class="panel-head">
+        <span class="panel-title">Route VCL</span>
+        <span class="panel-badge" id="routeVclCount">0</span>
+      </div>
+      <div class="panel-body">
+        <div class="rvcl-summary" id="routeVclSummary"></div>
+        <div id="routeVclSlots"><div class="empty">No route VCL assigned</div></div>
+      </div>
+    </div>
+
     <!-- SERVICES -->
     <div class="panel panel-full">
       <div class="panel-head">
@@ -1244,6 +1292,8 @@
     ghost_reload_fail: { label: 'Ghost Fail',    c: 'err' },
     vcl_reload:        { label: 'VCL Reload',    c: 'ok' },
     vcl_reload_fail:   { label: 'VCL Fail',      c: 'err' },
+    route_vcl_reload:      { label: 'Route VCL',      c: 'ok' },
+    route_vcl_reload_fail: { label: 'Route VCL Fail', c: 'err' },
     tls_reload:        { label: 'TLS Reload',    c: 'ok' },
     tls_reload_fail:   { label: 'TLS Fail',      c: 'err' },
     endpoints_changed: { label: 'Endpoints',     c: 'inf' },
@@ -1355,6 +1405,41 @@
     prevServices = newSvcs;
   }
 
+  function updateRouteVCL(r) {
+    const panel = document.getElementById('routeVclPanel');
+    // Hidden until route VCL is enabled (pool > 0) on this gateway.
+    if (!r || !r.poolSize) { panel.style.display = 'none'; return; }
+    panel.style.display = '';
+    const slots = r.slots || [];
+    const programmed = slots.filter(s => s.state === 'programmed').length;
+    const failed = slots.length - programmed;
+    document.getElementById('routeVclCount').textContent = slots.length;
+    document.getElementById('routeVclSummary').innerHTML = `
+      <span>Pool size <b>${r.poolSize}</b></span>
+      <span>Programmed <b>${programmed}</b></span>
+      <span>Compile failed <b>${failed}</b></span>
+      <span>Placeholder <b>${Math.max(0, r.poolSize - slots.filter(s => s.slot >= 0 && s.slot < r.poolSize).length)}</b></span>
+      <span>Master VCL <b>${esc(r.masterVcl) || '--'}</b></span>`;
+    const el = document.getElementById('routeVclSlots');
+    if (!slots.length) {
+      el.innerHTML = '<div class="empty">No route VCL assigned; every slot serves the placeholder</div>';
+      return;
+    }
+    el.innerHTML = `<table class="rvcl-table">
+      <thead><tr><th>Slot</th><th>Policy</th><th>Route</th><th>VCL</th><th>State</th><th>Error</th></tr></thead>
+      <tbody>${slots.map(s => {
+        const ok = s.state === 'programmed';
+        return `<tr>
+          <td>${s.slot < 0 ? '?' : s.slot}</td>
+          <td>${esc(s.policy)}</td>
+          <td>${esc(s.route) || '--'}</td>
+          <td>${esc(s.vclName) || 'placeholder'}</td>
+          <td><span class="rvcl-state ${ok ? 'ok' : 'err'}">${ok ? 'programmed' : 'compile failed'}</span></td>
+          <td>${s.message ? `<div class="rvcl-msg">${esc(s.message)}</div>` : ''}</td>
+        </tr>`;
+      }).join('')}</tbody></table>`;
+  }
+
   function addEvent(event) {
     const log = document.getElementById('eventLog');
     if (eventCounter === 0) log.innerHTML = '';
@@ -1383,6 +1468,7 @@
     eventCounter = events.length;
     document.getElementById('eventCount').textContent = eventCounter;
     events.slice().reverse().forEach(ev => {
+      if (ev.type === 'route_vcl_slots') return; // state snapshot, not a log line
       const info = evTypes[ev.type] || { label: ev.type, c: 'inf' };
       const row = document.createElement('div');
       row.className = 'ev';
@@ -1424,6 +1510,7 @@
       updateMetrics(snap);
       updateVHosts(snap.vhosts);
       updateServices(snap.services);
+      updateRouteVCL(snap.routeVcl);
     });
 
     Object.keys(evTypes).forEach(function(type) {
@@ -1442,6 +1529,7 @@
       updateMetrics(snap);
       updateVHosts(snap.vhosts);
       updateServices(snap.services);
+      updateRouteVCL(snap.routeVcl);
       loadEvents(snap.events);
       connect();
     })

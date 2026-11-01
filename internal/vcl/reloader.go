@@ -1,7 +1,9 @@
 package vcl
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -93,6 +95,8 @@ type SlotResult struct {
 	Policy     string // "<namespace>/<name>" from the manifest
 	Slot       int    // -1 when the manifest key is not a slot number
 	Hash       string // manifest hash the result refers to
+	Route      string // "<namespace>/<name>" of the HTTPRoute, from the manifest
+	VCLName    string // route VCL the slot label points at ("" = placeholder or unknown)
 	Programmed bool
 	Message    string
 }
@@ -138,6 +142,14 @@ type Reloader struct {
 
 	resultsMu sync.Mutex
 	results   map[string]SlotResult // keyed by policy
+
+	// throttle rate-limits route VCL compiles (never the master or the
+	// placeholder). nil = unthrottled.
+	throttle *compileThrottle
+
+	// lastSlotsEvent is the last route VCL snapshot published to the
+	// dashboard, so an unchanged pass publishes nothing.
+	lastSlotsEvent string
 
 	// vclSeq is a monotonic counter appended to generated VCL names so two
 	// reloads within the same millisecond can't collide on the same name.
@@ -194,6 +206,14 @@ func New(
 // Empty (the default) never watches one: every slot is empty.
 func (r *Reloader) SetRouteVCLConfigMap(name string) {
 	r.routeConfigMapName = name
+}
+
+// SetCompileThrottle limits route VCL compiles (vcl.inline) to perSecond with
+// the given burst. perSecond <= 0 disables throttling. The bucket starts full,
+// so the first burst compiles (a pod's initial slot pass) are not delayed.
+// Call before Run.
+func (r *Reloader) SetCompileThrottle(perSecond float64, burst int) {
+	r.throttle = newCompileThrottle(perSecond, burst)
 }
 
 // SetStatusWriter enables writing this pod's per-slot results into
@@ -365,6 +385,34 @@ func (r *Reloader) loop(ctx context.Context) {
 	}
 }
 
+// publishSlots sends the route VCL state to the dashboard (state tracker and
+// metrics) when it differs from the last one sent.
+func (r *Reloader) publishSlots(pool int, master string, results map[string]SlotResult) {
+	if r.dashBus == nil {
+		return
+	}
+	st := dashboard.RouteVCLState{PoolSize: pool, MasterVCL: master, Slots: []dashboard.RouteVCLSlot{}}
+	for _, res := range results {
+		state := dashboard.RouteVCLFailed
+		if res.Programmed {
+			state = dashboard.RouteVCLProgrammed
+		}
+		st.Slots = append(st.Slots, dashboard.RouteVCLSlot{
+			Slot: res.Slot, Policy: res.Policy, Route: res.Route,
+			VCLName: res.VCLName, State: state, Message: res.Message,
+		})
+	}
+	slices.SortFunc(st.Slots, func(a, b dashboard.RouteVCLSlot) int {
+		return cmp.Or(cmp.Compare(a.Slot, b.Slot), strings.Compare(a.Policy, b.Policy))
+	})
+	raw, err := json.Marshal(st)
+	if err != nil || string(raw) == r.lastSlotsEvent {
+		return
+	}
+	r.lastSlotsEvent = string(raw)
+	dashboard.PublishRouteVCLSlots(r.dashBus, st)
+}
+
 // reconcile converges varnishd on the latest ConfigMap snapshots.
 func (r *Reloader) reconcile(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -456,7 +504,7 @@ func (r *Reloader) reconcile(ctx context.Context) error {
 	}
 
 	// 5. Slots.
-	pass, err := r.reconcileSlots(st, pool, slotPool, routeCM)
+	pass, err := r.reconcileSlots(ctx, st, pool, slotPool, routeCM)
 	if err != nil {
 		return errors.Join(masterErr, err)
 	}
@@ -470,6 +518,7 @@ func (r *Reloader) reconcile(ctx context.Context) error {
 		if r.reporter != nil {
 			r.reporter.update(pass.results)
 		}
+		r.publishSlots(pool, st.active, pass.results)
 	}
 	if isClosed(r.firstLoadDone) {
 		r.slotsOnce.Do(func() {
@@ -822,6 +871,7 @@ func (r *Reloader) discard(name string, refusalLevel slog.Level) bool {
 // desiredSlot is a valid manifest entry for a slot inside the pool.
 type desiredSlot struct {
 	policy string
+	route  string
 	hash   string
 	doc    string
 }
@@ -871,7 +921,7 @@ func (s *resultSet) set(res SlotResult, valid bool) {
 // route VCL, or the placeholder. limit is pool, or less while the master for
 // pool failed to load (slots from limit on are reported as waiting). A
 // non-nil error is a CLI transport failure; the reconcile is retried.
-func (r *Reloader) reconcileSlots(st *vclState, pool, limit int, routeCM *corev1.ConfigMap) (*slotPass, error) {
+func (r *Reloader) reconcileSlots(ctx context.Context, st *vclState, pool, limit int, routeCM *corev1.ConfigMap) (*slotPass, error) {
 	results := &resultSet{m: make(map[string]SlotResult), rank: make(map[string]int)}
 	desired := make(map[int]desiredSlot)
 	if routeCM != nil {
@@ -935,6 +985,8 @@ func (r *Reloader) reconcileSlots(st *vclState, pool, limit int, routeCM *corev1
 		base := routeVCLName(slot, d.hash)
 		wanted[base] = true
 		res := SlotResult{Policy: d.policy, Slot: slot, Hash: d.hash}
+		res.Route = d.route
+		res.VCLName = cur
 		if matchesRouteVCL(cur, base) {
 			res.Programmed = true
 			results.set(res, true)
@@ -946,10 +998,16 @@ func (r *Reloader) reconcileSlots(st *vclState, pool, limit int, routeCM *corev1
 			continue
 		}
 		name := st.loadedAs(base)
+		var compiled time.Duration // 0 = nothing compiled in this pass
 		if name == "" {
+			compileResult := ""
 			name = st.freeName(base)
+			if err := r.throttle.wait(ctx); err != nil {
+				return nil, fmt.Errorf("waiting to compile route VCL %s: %w", name, err)
+			}
 			start := time.Now()
 			resp, err := r.varnishadm.VCLInline(name, d.doc)
+			compileTook := time.Since(start)
 			if err != nil {
 				return nil, fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
 			}
@@ -959,16 +1017,19 @@ func (r *Reloader) reconcileSlots(st *vclState, pool, limit int, routeCM *corev1
 				failErr := fmt.Errorf("route VCL %s (slot %d, %s): %s", name, slot, d.policy, res.Message)
 				if isCompileFailure(resp.Payload()) {
 					r.compileFailures[base] = failureMemo{msg: res.Message, at: r.now()}
+					compileResult = dashboard.RouteVCLCompileError
 					r.logger.Warn("route VCL failed to compile, slot keeps its previous VCL",
 						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", resp.StatusCode())
 				} else {
 					retry = append(retry, failErr)
+					compileResult = dashboard.RouteVCLOtherError
 					r.logger.Warn("route VCL could not be loaded, slot keeps its previous VCL, will retry",
 						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", resp.StatusCode(), "error", res.Message)
 				}
-				dashboard.PublishVCLReloadFail(r.dashBus, failErr)
+				dashboard.PublishRouteVCLReloadFail(r.dashBus, slot, failErr, compileResult, compileTook)
 				continue
 			}
+			compiled = compileTook
 			r.logger.Info("route VCL compiled", "slot", slot, "name", name, "policy", d.policy,
 				"duration", time.Since(start).Round(time.Millisecond))
 		}
@@ -987,13 +1048,14 @@ func (r *Reloader) reconcileSlots(st *vclState, pool, limit int, routeCM *corev1
 			retry = append(retry, failErr)
 			r.logger.Warn("route VCL could not be labelled, slot keeps its previous VCL, will retry",
 				"slot", slot, "name", name, "policy", d.policy, "error", res.Message)
-			dashboard.PublishVCLReloadFail(r.dashBus, failErr)
+			dashboard.PublishRouteVCLReloadFail(r.dashBus, slot, failErr, dashboard.RouteVCLOtherError, 0)
 			continue
 		}
 		res.Programmed = true
+		res.VCLName = name
 		results.set(res, true)
 		r.logger.Info("route VCL slot programmed", "slot", slot, "name", name, "policy", d.policy, "previous", cur)
-		dashboard.PublishVCLReload(r.dashBus, name)
+		dashboard.PublishRouteVCLReload(r.dashBus, slot, name, compiled)
 		if strings.HasPrefix(cur, routeVCLPrefix) {
 			r.discard(cur, slog.LevelWarn)
 		}
@@ -1024,7 +1086,7 @@ func (r *Reloader) memoisedFailure(base string) (string, bool) {
 // validateSlot checks one manifest entry. On success it returns the slot's
 // desired document; otherwise the result explains why the slot is skipped.
 func validateSlot(key string, entry RouteVCLSlot, pool int, data map[string]string) (SlotResult, desiredSlot, bool) {
-	res := SlotResult{Policy: entry.Policy, Slot: -1, Hash: entry.Hash}
+	res := SlotResult{Policy: entry.Policy, Slot: -1, Hash: entry.Hash, Route: entry.Route}
 	slot, err := strconv.Atoi(key)
 	if err != nil || slot < 0 || strconv.Itoa(slot) != key {
 		res.Message = fmt.Sprintf("invalid slot %q in route VCL manifest", key)
@@ -1048,7 +1110,7 @@ func validateSlot(key string, entry RouteVCLSlot, pool int, data map[string]stri
 		res.Message = fmt.Sprintf("hash of %s is %s, manifest says %s", SlotKey(slot), got, entry.Hash)
 		return res, desiredSlot{}, false
 	}
-	return res, desiredSlot{policy: entry.Policy, hash: entry.Hash, doc: doc}, true
+	return res, desiredSlot{policy: entry.Policy, route: entry.Route, hash: entry.Hash, doc: doc}, true
 }
 
 func isHexHash(h string) bool {

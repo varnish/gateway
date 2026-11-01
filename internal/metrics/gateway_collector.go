@@ -15,9 +15,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
 	"github.com/varnish/gateway/internal/vcl"
 )
 
@@ -44,6 +46,7 @@ type gatewayCollector struct {
 	infoDesc               *prometheus.Desc
 	routeVCLSlotsDesc      *prometheus.Desc
 	routeVCLUnassignedDesc *prometheus.Desc
+	routeVCLPoliciesDesc   *prometheus.Desc
 }
 
 // RegisterGatewayMetrics builds the Gateway API inventory collector and
@@ -106,6 +109,11 @@ func RegisterGatewayMetrics(reg prometheus.Registerer, reader client.Reader, con
 			"Eligible VarnishVCLPolicies that did not get a route VCL slot on a managed Gateway (pool exhausted, pool shrunk, or ConfigMap full).",
 			[]string{"gateway_namespace", "gateway_name"}, nil,
 		),
+		routeVCLPoliciesDesc: prometheus.NewDesc(
+			"varnish_gateway_route_vcl_policies",
+			"VarnishVCLPolicies managed by this operator, by whether their Programmed condition is true.",
+			[]string{"programmed"}, nil,
+		),
 	}
 	reg.MustRegister(c)
 }
@@ -122,6 +130,7 @@ func (c *gatewayCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.infoDesc
 	ch <- c.routeVCLSlotsDesc
 	ch <- c.routeVCLUnassignedDesc
+	ch <- c.routeVCLPoliciesDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -136,6 +145,41 @@ func (c *gatewayCollector) Collect(ch chan<- prometheus.Metric) {
 	// Gateway does not exist — see httproute_controller processParentRef).
 	managed := c.collectGateways(ctx, ch)
 	c.collectHTTPRoutes(ctx, ch, managed)
+	c.collectVCLPolicies(ctx, ch)
+}
+
+// collectVCLPolicies counts VarnishVCLPolicies by Programmed condition. A
+// policy counts as programmed when an ancestor under our controller name has
+// Programmed=True; everything else (False, Unknown, no status yet) counts as
+// not programmed. Nothing is emitted when the kind is not served (CRD not
+// installed): Helm does not upgrade CRDs, so that is a normal state.
+func (c *gatewayCollector) collectVCLPolicies(ctx context.Context, ch chan<- prometheus.Metric) {
+	var list gatewayparamsv1alpha1.VarnishVCLPolicyList
+	if err := c.reader.List(ctx, &list); err != nil {
+		if !apimeta.IsNoMatchError(err) && !runtime.IsNotRegisteredError(err) {
+			c.warn("list VarnishVCLPolicies", err)
+		}
+		return
+	}
+	var programmed, other int
+	for i := range list.Items {
+		ok := false
+		for _, anc := range list.Items[i].Status.Ancestors {
+			if string(anc.ControllerName) != c.controllerName {
+				continue
+			}
+			if apimeta.IsStatusConditionTrue(anc.Conditions, gatewayparamsv1alpha1.VCLPolicyConditionProgrammed) {
+				ok = true
+			}
+		}
+		if ok {
+			programmed++
+		} else {
+			other++
+		}
+	}
+	ch <- prometheus.MustNewConstMetric(c.routeVCLPoliciesDesc, prometheus.GaugeValue, float64(programmed), "true")
+	ch <- prometheus.MustNewConstMetric(c.routeVCLPoliciesDesc, prometheus.GaugeValue, float64(other), "false")
 }
 
 // collectGateways emits per-Gateway metrics and returns the set of Gateways
