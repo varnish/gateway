@@ -101,7 +101,7 @@ func RegisterGatewayMetrics(reg prometheus.Registerer, reader client.Reader, con
 		),
 		routeVCLSlotsDesc: prometheus.NewDesc(
 			"varnish_gateway_route_vcl_slots",
-			"Route VCL slots of a managed Gateway, used (holding a VarnishVCLPolicy) or free. Both are 0 when route VCL is off.",
+			"Route VCL slots of a managed Gateway: used (holding a VarnishVCLPolicy), released (in quarantine after their policy left) or free. All are 0 when route VCL is off.",
 			[]string{"gateway_namespace", "gateway_name", "state"}, nil,
 		),
 		routeVCLUnassignedDesc: prometheus.NewDesc(
@@ -311,15 +311,31 @@ func (c *gatewayCollector) collectRouteVCL(ctx context.Context, ch chan<- promet
 		manifest = m
 	}
 
+	inPool := func(key string) bool {
+		n, err := strconv.Atoi(key)
+		return err == nil && n >= 0 && n < pool && strconv.Itoa(n) == key
+	}
 	used := 0
 	for key := range manifest.Slots {
-		n, err := strconv.Atoi(key)
-		if err == nil && n >= 0 && n < pool && strconv.Itoa(n) == key {
+		if inPool(key) {
 			used++
 		}
 	}
+	// Released slots are in quarantine: not held by a policy, but not
+	// assignable yet either, so they are neither used nor free.
+	released := 0
+	for _, r := range manifest.Released {
+		if inPool(strconv.Itoa(int(r.Slot))) {
+			released++
+		}
+	}
+	free := pool - used - released
+	if free < 0 {
+		free = 0
+	}
 	ch <- prometheus.MustNewConstMetric(c.routeVCLSlotsDesc, prometheus.GaugeValue, float64(used), ns, name, "used")
-	ch <- prometheus.MustNewConstMetric(c.routeVCLSlotsDesc, prometheus.GaugeValue, float64(pool-used), ns, name, "free")
+	ch <- prometheus.MustNewConstMetric(c.routeVCLSlotsDesc, prometheus.GaugeValue, float64(released), ns, name, "released")
+	ch <- prometheus.MustNewConstMetric(c.routeVCLSlotsDesc, prometheus.GaugeValue, float64(free), ns, name, "free")
 	ch <- prometheus.MustNewConstMetric(c.routeVCLUnassignedDesc, prometheus.GaugeValue, float64(len(manifest.Unassigned)), ns, name)
 }
 

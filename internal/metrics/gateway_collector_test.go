@@ -187,6 +187,9 @@ func TestGatewayCollector_RouteVCL(t *testing.T) {
   "unassigned": [
     {"policy": "default/d", "route": "default/rd", "reason": "NoSlotAvailable"},
     {"policy": "default/e", "route": "default/re", "reason": "NoSlotAvailable"}
+  ],
+  "released": [
+    {"slot": 1, "policy": "default/f", "route": "default/rf", "hash": "w", "releasedAt": "2026-01-01T00:00:00Z"}
   ]
 }`
 	gw := func(name string) *gatewayv1.Gateway {
@@ -201,7 +204,8 @@ func TestGatewayCollector_RouteVCL(t *testing.T) {
 			Spec:       gatewayv1.GatewayClassSpec{ControllerName: testController},
 		},
 		// on: pool of 4, slots 0 and 2 used (9 is outside the pool and
-		// does not count), 2 policies unassigned.
+		// does not count), slot 1 released (quarantined), 2 policies
+		// unassigned.
 		gw("on"),
 		&corev1.ConfigMap{
 			ObjectMeta: metav1.ObjectMeta{Name: "on-vcl", Namespace: "default"},
@@ -241,7 +245,8 @@ func TestGatewayCollector_RouteVCL(t *testing.T) {
 		want   float64
 	}{
 		{"varnish_gateway_route_vcl_slots", lbl("on", "used"), 2},
-		{"varnish_gateway_route_vcl_slots", lbl("on", "free"), 2},
+		{"varnish_gateway_route_vcl_slots", lbl("on", "released"), 1},
+		{"varnish_gateway_route_vcl_slots", lbl("on", "free"), 1},
 		{"varnish_gateway_route_vcl_unassigned", lbl("on", ""), 2},
 		{"varnish_gateway_route_vcl_slots", lbl("off", "used"), 0},
 		{"varnish_gateway_route_vcl_slots", lbl("off", "free"), 0},
