@@ -26,7 +26,7 @@ type VarnishadmInterface interface {
 	VCLLabel(label, name string) (VarnishResponse, error)
 	VCLDiscard(name string) (VarnishResponse, error)
 	VCLList() (VarnishResponse, error)
-	VCLListStructured() (*VCLListResult, error)
+	VCLListJSON() ([]VCLEntry, error)
 
 	// Parameter commands
 	ParamShow(name string) (VarnishResponse, error)

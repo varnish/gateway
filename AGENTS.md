@@ -574,7 +574,6 @@ NAMESPACE=default \
 VARNISH_ADMIN_PORT=6082 \
 VARNISH_HTTP_ADDR=localhost:8080 \
 VARNISH_LISTEN="http-8080=:8080,http" \
-VCL_PATH=/tmp/main.vcl \
 ROUTING_CONFIG_PATH=/tmp/routing.json \
 GHOST_CONFIG_PATH=/tmp/ghost.json \
 WORK_DIR=/tmp/varnish \

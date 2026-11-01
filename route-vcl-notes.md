@@ -196,3 +196,173 @@ worse under a pod CPU limit; deltas are the portable numbers.
   skips cleanly with varnishd off PATH). **P8 should add a CI job** with
   varnishd 9.1 installed and the ghost VMOD built (`cargo build --release`)
   that runs `go test ./internal/vcl/...` so the compile test actually runs.
+
+## Review of P2–P4 (read-only pass before P5 landed)
+
+Acted on:
+
+- VVP controller no longer writes sibling status from one reconcile
+  (`reevaluateSiblings` removed). A second watch on VarnishVCLPolicy maps
+  create/retarget/delete to same-target siblings so each policy writes its own
+  status with normal retry. `checkConflict` now returns a List error instead
+  of failing open to "no conflict", and compares group+kind+name.
+- `generatePreamble` errors if the dispatch sentinel is missing while a pool
+  size > 0 is requested (a master with no dispatch would silently keep every
+  slotted route in the master).
+- The preamble gained a `vcl_pipe` that strips every internal `X-Ghost-*`
+  header; `vcl_backend_fetch` does not run for pipe.
+
+Accepted as-is, must be documented in P7/P8:
+
+- **Route VCL can poison or purge other routes' cache objects.** The object
+  cache is global: a route VCL can set `req.http.host`/`req.url` to another
+  route's values, pick its own backend, and have the response cached under the
+  other route's key; it can `std.ban()` anything; it can `return (vcl(...))`
+  into another slot (second hop fails, but the attempt is not blocked).
+  Partitioning by `hash_data(slot)` in the route preamble would separate the
+  hash space but break master-side PURGE for route objects; #94 lists
+  per-route cache partitioning as a non-goal, so this stays a documented
+  consequence of G1.
+- The older policy wins a conflict even when it is itself Invalid /
+  ConfigMapNotFound / Disabled (parity with VarnishCachePolicy).
+- Accepted-condition messages name Gateways/GatewayClasses from the route's
+  parentRefs, including ones in other namespaces. HTTPRoute status already
+  exposes parent acceptance, so this adds little; left as is.
+- Gateway user VCL is compiled into every route VCL (compose), so gateway
+  level `vcl_init` objects, probes and backends are instantiated once per
+  populated slot. P7 doc line.
+
+## P5 — chaperone multi-VCL lifecycle and label pool (#100)
+
+### Operator -> chaperone contract (as implemented, `internal/vcl/routevcl_contract.go`)
+
+- `{gateway}-vcl` ConfigMap: `MainVCLKey` (`main.vcl`) = `GenerateMaster(N, gatewayUserVCL)`
+  and `PoolSizeKey` (`route-vcl-pool-size`) = decimal N, written in the same
+  update. Absent, empty or `"0"` = feature off (master-only, today's
+  behaviour). Non-numeric, negative or > 1024 (sanity cap, operator ceiling is
+  256) is logged as an error and the ConfigMap version is ignored.
+- `{gateway}-route-vcl` ConfigMap (`GATEWAY_NAME + RouteVCLConfigMapSuffix`;
+  chaperone env `ROUTE_VCL_CONFIGMAP_NAME` overrides; empty when
+  `GATEWAY_NAME` is unset = never watched): `ManifestKey` (`manifest.json`) =
+  `vcl.RouteVCLManifest{Slots: map["<slot>"]RouteVCLSlot{Policy, Generation, Hash}}`
+  and `SlotKey(n)` (`slot-<n>.vcl`) = the full `GenerateRouteVCL` document.
+  Missing ConfigMap = empty manifest. **P6 must compute `Hash` with
+  `vcl.RouteVCLHash(doc)`** (lowercase hex SHA-256 of the document bytes): the
+  chaperone verifies it and refuses a slot whose document does not match.
+- `ParseRouteVCLManifest` / `ParsePoolSize` are exported for P6 tests.
+- Manifest entries the chaperone skips (reported `programmed:false` with a
+  message, label untouched): slot key not a canonical non-negative integer
+  (reported with `slot: -1`), slot >= N, hash not 64 lowercase hex, document
+  key missing, hash mismatch. A manifest that is not valid JSON changes
+  nothing (logged) and still lets `SlotsReady` close.
+
+### Reconciler (`internal/vcl/reloader.go`)
+
+- One goroutine. The two informers (field-selected to one ConfigMap each)
+  only store the latest object (route CM delete stores nil, vcl CM delete is
+  ignored) and nudge a 1-buffered channel. Failed reconciles retry after
+  5 s doubling to 30 s, plus every event and the 30 s informer resync.
+- Every reconcile starts from `vcl.list -j` (`VarnishadmInterface.VCLListJSON`,
+  parser `varnishadm.ParseVCLListJSON`); the text parser, `VCLListStructured`
+  and `VCLListResult` are gone. Order: (1) if N > 0: `param.set max_vcl 2N+10`
+  (only when the value changes), load the placeholder if absent, label every
+  missing `gwvcl-i` to it (existing labels never moved here); (2) master
+  `vcl.inline vcl_<ts>_<ms>_<seq6>` + `vcl.use` when main.vcl differs from
+  the last applied one or no `vcl_*` is active; compile failure = previous
+  master stays, reconcile returns an error (retried with backoff); (3)
+  discard inactive masters beyond `DefaultKeepCount` (now **2**), or all of
+  them when labels >= N exist; (4) shrink: for each `gwvcl-i`, i >= N, repoint
+  to placeholder, discard its route VCL, discard the label (refusal = info,
+  next reconcile); N == 0 also discards the placeholder; (5) slot pass; (6)
+  discard orphan `route_*` VCLs (no label).
+- Order deviation from the brief's test list: bootstrap is
+  `max_vcl, placeholder, labels, master, use` (C.1's order), asserted in
+  `TestReconcile_BootstrapOrder`.
+- Route VCL load name `route_<slot>_<hash[:12]>`; if that name is still
+  taken by a discarded-but-busy VCL, `_2`, `_3`, ... is appended. A label
+  pointing at the base name or any `_k` variant counts as programmed.
+- Compile (or label) failures are memoised per load name in memory: the same
+  document is not recompiled on every resync (it cannot succeed); the slot is
+  reported with the memoised message. The memo forgets names no longer in the
+  manifest and is lost on restart. A transport error (CLI unreachable) is not
+  memoised; it fails the reconcile.
+- `Ready()` = first master active. `SlotsReady()` = first full slot pass
+  after that (closed immediately with N == 0 / no route CM / bad manifest;
+  a compile failure does not hold it). `cmd/chaperone` waits on both before
+  `start` and logs the slot wait.
+- Dashboard: route VCL loads/failures reuse `PublishVCLReload` /
+  `PublishVCLReloadFail` (so `chaperone_vcl_reloads_total` and its failure
+  counter now include route VCLs; P7 may want separate counters).
+- `New()` lost the `vclPath` argument (file-based `Reload()`/`ReloadInline()`
+  are gone; nothing used them). Chaperone no longer reads `VCL_PATH`; the
+  operator still sets it in `resources.go` (left alone so this phase does not
+  roll every gateway; P6 can drop it with its own pod template change). Docs
+  table updated.
+
+### Per-pod status (`internal/vcl/status.go`)
+
+- `VarnishVCLPolicyStatus.PodResults []VarnishVCLPolicyPodResult`
+  (`+listType=map`, `+listMapKey=podName`): `podName, slot, hash, programmed,
+  message?, lastUpdate`. One entry per pod per policy.
+- Written by a separate goroutine (latest-wins hand-off from the reconciler,
+  so the API server never delays VCL work): dynamic client, GVR
+  `vcl.VarnishVCLPolicyGVR`, get / replace-own-entry / UpdateStatus, up to 5
+  attempts on conflict, skipped when the stored entry already matches
+  (slot/hash/programmed/message), failures retried every 10 s. A missing
+  policy or a `policy` that is not `<ns>/<name>` is skipped (logged).
+- RBAC: `varnishvclpolicies` get + `varnishvclpolicies/status`
+  get/update/patch in `deploy/02-chaperone-rbac.yaml` and the chart's
+  `chaperone-rbac.yaml`. `internal/controller/resources.go` has no per-gateway
+  role (it binds the shared ClusterRole `varnish-gateway-chaperone`), so
+  nothing to change there or in `resources_test.go`.
+- The VVP controller writes `Status.Ancestors` on the fetched object, which
+  keeps `podResults` intact. **P6 must keep doing that** (never assign a
+  fresh `VarnishVCLPolicyStatus{}`), and decide on GC of entries for pods
+  that no longer exist and for gateways the policy left (the chaperone only
+  forgets policies that leave its manifest; it never deletes their entry).
+  `Programmed` should be derived from podResults whose `hash` equals the
+  current manifest hash.
+
+### Varnish facts learned in P5 (9.0.0, real varnishd)
+
+- `vcl.list -j` entries: `status` (`active`/`available`/`discarded`),
+  `state` (`auto`/`cold`/`warm`/`label`), `temperature`, `busy` (absent
+  without a child), `name`, `labels` (absent when 0), and for labels
+  `label: {name, refs}` (`refs` = VCLs that `return(vcl)` to it, absent when
+  0). A failed `vcl.load` exits varnishadm with `Command failed with error
+  code 106`; refusals (`Cannot discard labeled VCL program`, `... other VCLs
+  depend on it`) are 300; unknown name is 106.
+- **A discarded master stays listed** (`status: discarded`, `state: cold`,
+  `temperature: busy`, `busy: N`) while idle keep-alive sessions still hold
+  it; its label refs still show in `label.refs` but do **not** block
+  discarding those labels. Discarded route VCLs were freed immediately in the
+  test. The reconciler treats `discarded` entries as gone except that their
+  names stay taken (hence the `_k` rename).
+- `internal/varnishtest`: `Start` sets `Pdeathsig: SIGKILL`; `v.CLI()`
+  implements `VarnishadmInterface` over the `varnishadm` tool (temp file +
+  `vcl.load` for `VCLInline`, status codes parsed from its stderr). Only
+  tests import the package.
+
+### Tests
+
+- Unit (`reloader_test.go`, strict `MockVarnishadm` that models varnishd's
+  VCL state, refusals, label refs and busy-discarded VCLs; `status_test.go`
+  with `k8s.io/client-go/dynamic/fake`, newly vendored).
+- `TestReloaderAgainstVarnishd`: attach/change/move/detach, grow 4->8 with
+  slot 7, shrink 8->2, syntax error in slot 0 beside a working slot 1, all
+  checked via `vcl.list -j`, HTTP through ghost, and the fake dynamic
+  client's VVP status. ~2.4 s. Skips like P4's test.
+
+### For P6
+
+- Write both `main.vcl` and `route-vcl-pool-size` in one update; never a
+  master for N without the key. Changing N recompiles the master.
+- Route VCL documents depend on the gateway user VCL (G5 compose), so a
+  gateway VCL change changes every hash and recompiles every slot
+  (~0.2 s each, serial, on every pod).
+- Slot numbers in routing.json (ghost) and the manifest are independent
+  writes; a slotted route whose VCL is not yet labelled answers 503 from the
+  placeholder until the slot pass lands (by design; F in #100).
+- A pod restart waits for every slot to compile before starting the child:
+  64 populated slots ~14 s on this host, more under a CPU limit. Readiness
+  probe timing may need a look.

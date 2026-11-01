@@ -119,18 +119,16 @@ func (v *Server) VCLList() (VarnishResponse, error) {
 	return v.Exec("vcl.list")
 }
 
-// VCLListStructured lists all VCL configurations and returns parsed results
-func (v *Server) VCLListStructured() (*VCLListResult, error) {
-	resp, err := v.Exec("vcl.list")
+// VCLListJSON runs `vcl.list -j` and returns the parsed entries.
+func (v *Server) VCLListJSON() ([]VCLEntry, error) {
+	resp, err := v.Exec("vcl.list -j")
 	if err != nil {
 		return nil, err
 	}
-
 	if resp.statusCode != ClisOk {
-		return nil, fmt.Errorf("vcl.list command failed with status %d: %s", resp.statusCode, resp.payload)
+		return nil, fmt.Errorf("vcl.list -j failed with status %d: %s", resp.statusCode, resp.payload)
 	}
-
-	return parseVCLList(resp.payload)
+	return ParseVCLListJSON(resp.payload)
 }
 
 // Parameter commands
