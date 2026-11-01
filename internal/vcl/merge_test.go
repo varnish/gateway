@@ -238,3 +238,28 @@ sub vcl_recv {
 		t.Errorf("expected 1 import, got %d", len(parts.imports))
 	}
 }
+
+func TestMerge_MultipleUserDocs(t *testing.T) {
+	generated := "vcl 4.1;\n\nimport ghost;\nimport std;\n\nsub vcl_init {\n}\n"
+	first := "vcl 4.0;\nimport std;\nimport cookie;\n\nsub vcl_recv {\n    set req.http.first = \"1\";\n}\n"
+	second := "import cookie;\nimport directors;\nsub vcl_recv {\n    set req.http.second = \"1\";\n}"
+
+	got := Merge(generated, first, "", second)
+	want := "vcl 4.1;\n\n" +
+		"import ghost;\nimport std;\nimport cookie;\nimport directors;\n\n" +
+		"sub vcl_init {\n}\n" +
+		"sub vcl_recv {\n    set req.http.first = \"1\";\n}\n" +
+		"sub vcl_recv {\n    set req.http.second = \"1\";\n}\n" +
+		postambleVCL
+	if got != want {
+		t.Errorf("Merge with several user docs:\n%s\nwant:\n%s", got, want)
+	}
+
+	// Only empty user docs: same as no user VCL.
+	if Merge(generated, "", "") != generated+postambleVCL {
+		t.Error("all-empty user docs should yield generated + postamble")
+	}
+	if Merge(generated) != generated+postambleVCL {
+		t.Error("no user docs should yield generated + postamble")
+	}
+}
