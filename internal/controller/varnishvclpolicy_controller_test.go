@@ -438,16 +438,39 @@ func TestVVPReconcile_ConflictOldestWinsAndPromotion(t *testing.T) {
 	r := newVVPTestReconciler(append(vvpEnabledWorld(), older, newer)...)
 	ctx := context.Background()
 
-	// Reconciling only the newer one also evaluates the older sibling.
 	reconcileVVP(t, r, "newer")
+	reconcileVVP(t, r, "older")
 	assertVVPAccepted(t, r, "newer", metav1.ConditionFalse, gatewayparamsv1alpha1.VCLPolicyReasonConflicted)
 	assertVVPAccepted(t, r, "older", metav1.ConditionTrue, gatewayparamsv1alpha1.VCLPolicyReasonAccepted)
 
+	// The winner's delete event maps to its same-target siblings, whose own
+	// reconcile then promotes them.
+	if got := requestNames(t, r.findSiblingVVPs(ctx, older)); len(got) != 1 || got[0] != vvpTestNS+"/newer" {
+		t.Fatalf("findSiblingVVPs(older) = %v, want [%s/newer]", got, vvpTestNS)
+	}
 	if err := r.Delete(ctx, older); err != nil {
 		t.Fatalf("Delete(older): %v", err)
 	}
-	reconcileVVP(t, r, "older") // NotFound path re-evaluates siblings.
+	reconcileVVP(t, r, "older") // NotFound path is a no-op.
+	reconcileVVP(t, r, "newer")
 	assertVVPAccepted(t, r, "newer", metav1.ConditionTrue, gatewayparamsv1alpha1.VCLPolicyReasonAccepted)
+}
+
+// Siblings are matched on the full target (group, kind, name) within the
+// namespace, never across namespaces, and never the policy itself.
+func TestFindSiblingVVPs(t *testing.T) {
+	now := time.Now()
+	self := newVVP("self", "my-route", "vcl", now)
+	same := newVVP("same", "my-route", "vcl", now)
+	otherRoute := newVVP("other-route", "other", "vcl", now)
+	otherNS := newVVP("other-ns", "my-route", "vcl", now)
+	otherNS.Namespace = "other"
+	r := newVVPTestReconciler(append(vvpEnabledWorld(), self, same, otherRoute, otherNS)...)
+
+	got := requestNames(t, r.findSiblingVVPs(context.Background(), self))
+	if len(got) != 1 || got[0] != vvpTestNS+"/same" {
+		t.Errorf("findSiblingVVPs = %v, want [%s/same]", got, vvpTestNS)
+	}
 }
 
 // Equal creation timestamps fall back to name order, as for VCP.
@@ -458,6 +481,7 @@ func TestVVPReconcile_ConflictTiebreakByName(t *testing.T) {
 		newVVP("a", "my-route", "vcl", now))...)
 
 	reconcileVVP(t, r, "b")
+	reconcileVVP(t, r, "a")
 	assertVVPAccepted(t, r, "a", metav1.ConditionTrue, gatewayparamsv1alpha1.VCLPolicyReasonAccepted)
 	assertVVPAccepted(t, r, "b", metav1.ConditionFalse, gatewayparamsv1alpha1.VCLPolicyReasonConflicted)
 }

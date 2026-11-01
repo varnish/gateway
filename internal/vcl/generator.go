@@ -45,6 +45,12 @@ func generatePreamble(ghostConfigPath string, slotPoolSize int) (string, error) 
 		return "", err
 	}
 	preamble := fmt.Sprintf(preambleVCL, ghostConfigPath)
+	// A master without its dispatch block would silently route every slotted
+	// request in the master, so a pool that needs dispatch must find the
+	// sentinel. Fail loudly instead of emitting a wrong document.
+	if slotPoolSize > 0 && !strings.Contains(preamble, dispatchSentinel) {
+		return "", fmt.Errorf("vcl.generatePreamble: dispatch sentinel %q missing from preamble.vcl", strings.TrimSpace(dispatchSentinel))
+	}
 	return strings.Replace(preamble, dispatchSentinel, dispatchBlock(slotPoolSize), 1), nil
 }
 

@@ -113,6 +113,20 @@ sub vcl_backend_fetch {
     unset bereq.http.X-Ghost-VCL-Slot;
 }
 
+sub vcl_pipe {
+    # vcl_backend_fetch does not run for piped requests, so strip the internal
+    # signalling headers here too; nothing internal may reach a backend.
+    unset bereq.http.X-Ghost-Pass;
+    unset bereq.http.X-Ghost-VCL-Slot;
+    unset bereq.http.X-Ghost-Filter-Context;
+    unset bereq.http.X-Ghost-Redirect-Config;
+    unset bereq.http.X-Ghost-Default-TTL;
+    unset bereq.http.X-Ghost-Forced-TTL;
+    unset bereq.http.X-Ghost-Grace;
+    unset bereq.http.X-Ghost-Keep;
+    unset bereq.http.X-Ghost-Cache-Key-Extra;
+}
+
 sub vcl_backend_response {
     # Store host and URL on cached object for ban lurker.
     # The ban expression matches against these headers for efficient background invalidation.

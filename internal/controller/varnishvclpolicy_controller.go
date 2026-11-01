@@ -57,10 +57,9 @@ func (r *VarnishVCLPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	var vvp gatewayparamsv1alpha1.VarnishVCLPolicy
 	if err := r.Get(ctx, req.NamespacedName, &vvp); err != nil {
 		if apierrors.IsNotFound(err) {
-			// The deleted policy may have been the winner of a conflict.
-			// Its target is no longer knowable, so re-evaluate every
-			// sibling in the namespace to promote a Conflicted loser.
-			r.reevaluateSiblings(ctx, req.Namespace, "")
+			// Deleted. If it was the winner of a conflict, the sibling
+			// watch (findSiblingVVPs) has already enqueued the losers
+			// from the delete event, so there is nothing to do here.
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("r.Get(%s): %w", req.NamespacedName, err)
@@ -78,8 +77,9 @@ func (r *VarnishVCLPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	// Creating, retargeting or deleting this policy can change which of its
-	// siblings wins a conflict.
-	r.reevaluateSiblings(ctx, vvp.Namespace, vvp.Name)
+	// siblings wins a conflict. Those siblings are enqueued by the
+	// findSiblingVVPs watch rather than written here, so every policy
+	// writes only its own status and failed writes get the normal retry.
 
 	log.Debug("VarnishVCLPolicy reconciliation complete", "accepted", cond.accepted, "reason", cond.reason)
 	return ctrl.Result{RequeueAfter: cond.requeueAfter}, nil
@@ -122,7 +122,11 @@ func (r *VarnishVCLPolicyReconciler) computeCondition(ctx context.Context, vvp *
 		return vvpCondition{reason: gatewayparamsv1alpha1.VCLPolicyReasonDisabled, message: disabledMsg}, nil
 	}
 
-	if conflict := r.checkConflict(ctx, vvp); conflict != "" {
+	conflict, err := r.checkConflict(ctx, vvp)
+	if err != nil {
+		return vvpCondition{}, err
+	}
+	if conflict != "" {
 		return vvpCondition{reason: gatewayparamsv1alpha1.VCLPolicyReasonConflicted, message: conflict}, nil
 	}
 
@@ -272,14 +276,15 @@ func (r *VarnishVCLPolicyReconciler) routeVCLEnabledForGateway(ctx context.Conte
 }
 
 // checkConflict reports whether an older policy in the same namespace targets
-// the same HTTPRoute. The oldest policy wins (creation timestamp, then name),
-// matching VarnishCachePolicy. It returns an empty string when there is no
-// conflict.
-func (r *VarnishVCLPolicyReconciler) checkConflict(ctx context.Context, vvp *gatewayparamsv1alpha1.VarnishVCLPolicy) string {
+// the same HTTPRoute. The oldest policy wins (creation timestamp, then name)
+// regardless of its own validity, matching VarnishCachePolicy. It returns an
+// empty string when there is no conflict. A List failure is returned as an
+// error rather than treated as "no conflict", so a transient API error can
+// never promote a Conflicted loser.
+func (r *VarnishVCLPolicyReconciler) checkConflict(ctx context.Context, vvp *gatewayparamsv1alpha1.VarnishVCLPolicy) (string, error) {
 	var list gatewayparamsv1alpha1.VarnishVCLPolicyList
 	if err := r.List(ctx, &list, client.InNamespace(vvp.Namespace)); err != nil {
-		r.Logger.Error("failed to list VarnishVCLPolicies for conflict check", "namespace", vvp.Namespace, "error", err)
-		return ""
+		return "", fmt.Errorf("r.List(VarnishVCLPolicy, %s): %w", vvp.Namespace, err)
 	}
 
 	for i := range list.Items {
@@ -287,14 +292,21 @@ func (r *VarnishVCLPolicyReconciler) checkConflict(ctx context.Context, vvp *gat
 		if other.Name == vvp.Name {
 			continue
 		}
-		if other.Spec.TargetRef.Kind != vvp.Spec.TargetRef.Kind || other.Spec.TargetRef.Name != vvp.Spec.TargetRef.Name {
+		if !sameVVPTarget(other, vvp) {
 			continue
 		}
 		if vvpIsOlder(other, vvp) {
-			return fmt.Sprintf("Conflicts with VarnishVCLPolicy %q (older policy takes precedence)", other.Name)
+			return fmt.Sprintf("Conflicts with VarnishVCLPolicy %q (older policy takes precedence)", other.Name), nil
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// sameVVPTarget reports whether two policies name the same target object.
+func sameVVPTarget(a, b *gatewayparamsv1alpha1.VarnishVCLPolicy) bool {
+	return a.Spec.TargetRef.Group == b.Spec.TargetRef.Group &&
+		a.Spec.TargetRef.Kind == b.Spec.TargetRef.Kind &&
+		a.Spec.TargetRef.Name == b.Spec.TargetRef.Name
 }
 
 // vvpIsOlder reports whether a takes precedence over b in a conflict.
@@ -305,35 +317,25 @@ func vvpIsOlder(a, b *gatewayparamsv1alpha1.VarnishVCLPolicy) bool {
 	return a.CreationTimestamp.Equal(&b.CreationTimestamp) && a.Name < b.Name
 }
 
-// reevaluateSiblings recomputes and persists the Accepted condition for the
-// other policies in the namespace, writing only those whose condition changed.
-// skipName, when non-empty, is the policy the primary reconcile just handled.
-func (r *VarnishVCLPolicyReconciler) reevaluateSiblings(ctx context.Context, namespace, skipName string) {
+// findSiblingVVPs maps a VarnishVCLPolicy event (create, spec change or
+// delete) to the other policies in its namespace that name the same target,
+// so a conflict winner appearing, retargeting or disappearing re-evaluates
+// the losers through their own reconcile (with normal retry on failure).
+// On an update controller-runtime calls this for both the old and the new
+// object, so a retarget enqueues the siblings of both targets.
+func (r *VarnishVCLPolicyReconciler) findSiblingVVPs(ctx context.Context, obj client.Object) []reconcile.Request {
+	vvp, ok := obj.(*gatewayparamsv1alpha1.VarnishVCLPolicy)
+	if !ok {
+		return nil
+	}
 	var list gatewayparamsv1alpha1.VarnishVCLPolicyList
-	if err := r.List(ctx, &list, client.InNamespace(namespace)); err != nil {
-		r.Logger.Error("failed to list VarnishVCLPolicies for sibling re-evaluation", "namespace", namespace, "error", err)
-		return
+	if err := r.List(ctx, &list, client.InNamespace(vvp.Namespace)); err != nil {
+		r.Logger.Error("failed to list VarnishVCLPolicies for sibling lookup", "vvp", client.ObjectKeyFromObject(vvp), "error", err)
+		return nil
 	}
-
-	for i := range list.Items {
-		sibling := &list.Items[i]
-		if skipName != "" && sibling.Name == skipName {
-			continue
-		}
-		cond, err := r.computeCondition(ctx, sibling)
-		if err != nil {
-			// Transient API error; the sibling is reconciled on its own
-			// events or its next requeue.
-			continue
-		}
-		if vvpConditionMatches(sibling, cond) {
-			continue
-		}
-		setVVPAccepted(sibling, cond)
-		if err := r.Status().Update(ctx, sibling); err != nil {
-			r.Logger.Error("failed to update sibling VarnishVCLPolicy status", "vvp", sibling.Name, "error", err)
-		}
-	}
+	return vvpRequests(list.Items, func(p *gatewayparamsv1alpha1.VarnishVCLPolicy) bool {
+		return p.Name != vvp.Name && sameVVPTarget(p, vvp)
+	})
 }
 
 // vvpConditionMatches reports whether the policy's Accepted condition already
@@ -489,14 +491,20 @@ func (r *VarnishVCLPolicyReconciler) findAllVVPs(ctx context.Context, _ client.O
 // SetupWithManager sets up the VarnishVCLPolicy controller with the Manager.
 func (r *VarnishVCLPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// GenerationChangedPredicate on the primary resource ignores our own
-	// status writes (and those made by reevaluateSiblings), which would
-	// otherwise re-trigger reconciles in a loop. On HTTPRoute, Gateway and
-	// GatewayClass it filters out the frequent status-only updates: only
-	// spec changes (parentRefs, gatewayClassName, parametersRef), creates and
-	// deletes affect a policy's condition.
+	// status writes, which would otherwise re-trigger reconciles in a loop.
+	// On HTTPRoute, Gateway and GatewayClass it filters out the frequent
+	// status-only updates: only spec changes (parentRefs, gatewayClassName,
+	// parametersRef), creates and deletes affect a policy's condition.
 	return ctrl.NewControllerManagedBy(mgr).
 		WithOptions(controller.Options{RateLimiter: defaultRateLimiter()}).
 		For(&gatewayparamsv1alpha1.VarnishVCLPolicy{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		// Second source on the same kind: a policy's create, retarget or
+		// delete enqueues its same-target siblings (conflict re-evaluation).
+		Watches(
+			&gatewayparamsv1alpha1.VarnishVCLPolicy{},
+			handler.EnqueueRequestsFromMapFunc(r.findSiblingVVPs),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		Watches(
 			&gatewayv1.HTTPRoute{},
 			handler.EnqueueRequestsFromMapFunc(r.findVVPsForHTTPRoute),
