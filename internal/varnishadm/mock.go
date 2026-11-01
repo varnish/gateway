@@ -42,6 +42,10 @@ type MockVarnishadm struct {
 	held            map[string]bool   // see HoldVCL
 	compileErrors   map[string]string // VCL body substring -> CLI error payload
 
+	// serverErrors makes Exec return non-200 replies as a *CLIError, like
+	// Server.Exec does. See SetServerErrorSemantics.
+	serverErrors bool
+
 	// TLS certificate state tracking
 	tlsCertsCommitted map[string]TLSCertEntry // committed certificates (current state)
 	tlsCertsStaged    map[string]TLSCertEntry // staged certificates (transaction state)
@@ -148,11 +152,30 @@ func (m *MockVarnishadm) Run(ctx context.Context) error {
 	return nil
 }
 
+// SetServerErrorSemantics makes Exec (and every command built on it) report
+// a non-200 reply the way Server.Exec does: an empty response and a
+// *CLIError carrying the status and payload. The default (false) returns the
+// response with its status code and a nil error.
+func (m *MockVarnishadm) SetServerErrorSemantics(on bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.serverErrors = on
+}
+
 // Exec executes a command and returns a mock response
 func (m *MockVarnishadm) Exec(cmd string) (VarnishResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	resp, err := m.exec(cmd)
+	if err == nil && m.serverErrors && resp.statusCode != ClisOk {
+		return VarnishResponse{}, &CLIError{Status: resp.statusCode, Payload: resp.payload}
+	}
+	return resp, err
+}
+
+// exec produces the reply to cmd. m.mu must be held.
+func (m *MockVarnishadm) exec(cmd string) (VarnishResponse, error) {
 	// Add to call history
 	m.callHistory = append(m.callHistory, cmd)
 

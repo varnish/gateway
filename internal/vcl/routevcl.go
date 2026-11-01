@@ -99,12 +99,22 @@ func generateMaster(ghostConfigPath string, slotPoolSize int, gatewayUserVCL str
 }
 
 // GenerateRouteVCL returns the VCL loaded behind a slot label: preamble (no
-// dispatch block), gateway user VCL, route VCL, postamble (gate G5: compose).
+// dispatch block), route VCL, gateway user VCL, postamble (gate G5: compose).
 // The preamble's trust-boundary unsets are part of it on purpose: the jump
 // from the master rolls req back to the client's headers, so they must be
 // stripped again before ghost runs.
+//
+// The route VCL comes before the gateway user VCL. VCL concatenates
+// same-named subroutines in document order and a return ends the
+// subroutine, so whichever document comes first can cut the other off. The
+// gateway VCL commonly ends vcl_recv with a return (the shipped default is
+// `sub vcl_recv { return (pass); }`); placed first, it kept every route
+// vcl_recv from running. Route first, the route's code runs in every
+// subroutine and the gateway VCL still runs after it (and keeps the last
+// word) unless the route returns, the same rule the gateway VCL already has
+// toward the postamble.
 func GenerateRouteVCL(gatewayUserVCL, routeVCL string) string {
-	return Merge(mustGeneratePreamble(DefaultGhostConfigPath, 0), gatewayUserVCL, routeVCL)
+	return Merge(mustGeneratePreamble(DefaultGhostConfigPath, 0), routeVCL, gatewayUserVCL)
 }
 
 // generateRouteVCL is GenerateRouteVCL with a custom ghost config path (tests).
@@ -113,7 +123,7 @@ func generateRouteVCL(ghostConfigPath, gatewayUserVCL, routeVCL string) (string,
 	if err != nil {
 		return "", err
 	}
-	return Merge(preamble, gatewayUserVCL, routeVCL), nil
+	return Merge(preamble, routeVCL, gatewayUserVCL), nil
 }
 
 // GeneratePlaceholder returns a standalone VCL with no VMOD imports that

@@ -676,14 +676,45 @@ func (s *vclState) slotLabelsFrom(from int) []int {
 	return out
 }
 
+// cliFailedPrefix is the text of a varnishadm.CLIError. cliOutcome falls back
+// to matching it for implementations that flatten the typed error.
+const cliFailedPrefix = "command failed: "
+
+// cliOutcome normalises the two ways a VarnishadmInterface reports that
+// varnishd refused a command: varnishadm.Server returns a *CLIError (an empty
+// response and a non-nil error), the mock by default returns the response
+// with its status code and a nil error. Both come out as a non-OK status
+// with the reply payload and transport false. Only an error that is not a
+// refusal (connection lost, timeout, server stopped) is a transport failure;
+// then payload is the error text.
+//
+// Every VCL CLI call in the reloader goes through this (or cliErr), so a VCC
+// failure is memoised and reported whichever implementation is plugged in,
+// and only transport failures abort a reconcile.
+func cliOutcome(resp varnishadm.VarnishResponse, err error) (status int, payload string, transport bool) {
+	if err == nil {
+		return resp.StatusCode(), resp.Payload(), false
+	}
+	var ce *varnishadm.CLIError
+	if errors.As(err, &ce) {
+		return ce.Status, ce.Payload, false
+	}
+	if msg := err.Error(); strings.HasPrefix(msg, cliFailedPrefix) {
+		// Status unknown; anything but ClisOk will do.
+		return varnishadm.ClisCant, strings.TrimPrefix(msg, cliFailedPrefix), false
+	}
+	return 0, err.Error(), true
+}
+
 // cliErr turns a CLI call result into an error: transport errors and non-200
-// replies alike.
+// replies alike, for call sites that treat both the same.
 func cliErr(op string, resp varnishadm.VarnishResponse, err error) error {
-	if err != nil {
+	status, payload, transport := cliOutcome(resp, err)
+	if transport {
 		return fmt.Errorf("%s: %w", op, err)
 	}
-	if resp.StatusCode() != varnishadm.ClisOk {
-		return fmt.Errorf("%s: status %d: %s", op, resp.StatusCode(), strings.TrimSpace(resp.Payload()))
+	if status != varnishadm.ClisOk {
+		return fmt.Errorf("%s: status %d: %s", op, status, strings.TrimSpace(payload))
 	}
 	return nil
 }
@@ -695,8 +726,9 @@ func (r *Reloader) ensurePool(st *vclState, pool int) error {
 	// Route VCLs count against max_vcl (labels do not); replaced generations
 	// linger until discarded, hence 2x plus headroom for masters.
 	if want := 2*pool + 10; r.maxVCLSet != want {
-		if _, err := r.varnishadm.ParamSet("max_vcl", strconv.Itoa(want)); err != nil {
-			return fmt.Errorf("varnishadm.ParamSet(max_vcl, %d): %w", want, err)
+		resp, err := r.varnishadm.ParamSet("max_vcl", strconv.Itoa(want))
+		if err := cliErr(fmt.Sprintf("varnishadm.ParamSet(max_vcl, %d)", want), resp, err); err != nil {
+			return err
 		}
 		r.maxVCLSet = want
 	}
@@ -748,22 +780,21 @@ func (r *Reloader) loadMaster(master string, pool int) error {
 	name := r.generateVCLName()
 	r.logger.Debug("loading master VCL", "name", name)
 	resp, err := r.varnishadm.VCLInline(name, master)
-	if err != nil {
+	status, payload, transport := cliOutcome(resp, err)
+	if transport {
 		return fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
 	}
-	if err := resp.CheckOK("VCL compilation failed"); err != nil {
-		r.logger.Error("VCL reload failed - keeping previous VCL", "name", name, "error", err)
+	if status != varnishadm.ClisOk {
+		err := fmt.Errorf("VCL compilation failed: %s", payload)
+		r.logger.Error("VCL reload failed - keeping previous VCL", "name", name, "status", status, "error", err)
 		dashboard.PublishVCLReloadFail(r.dashBus, err)
-		if isCompileFailure(resp.Payload()) {
+		if isCompileFailure(payload) {
 			r.masterFailure = &masterFailureMemo{content: master, err: err, at: r.now()}
 		}
 		return err
 	}
 	resp, err = r.varnishadm.VCLUse(name)
-	if err == nil {
-		err = resp.CheckOK("VCL activation failed")
-	}
-	if err != nil {
+	if err := cliErr("VCL activation failed", resp, err); err != nil {
 		// Best-effort cleanup of the loaded-but-inactive VCL. If vcl.use
 		// actually succeeded and only the reply was lost, the discard is
 		// refused ("active") and the next reconcile sees the truth in
@@ -972,8 +1003,15 @@ func (r *Reloader) reconcileSlots(ctx context.Context, st *vclState, pool, limit
 				continue
 			}
 			resp, err := r.varnishadm.VCLLabel(label, ph)
-			if err := cliErr("vcl.label "+label, resp, err); err != nil {
-				return nil, err
+			if status, payload, transport := cliOutcome(resp, err); transport {
+				return nil, fmt.Errorf("varnishadm.VCLLabel(%s, %s): %w", label, ph, err)
+			} else if status != varnishadm.ClisOk {
+				// Not expected (the placeholder returns to no label), but
+				// a refusal must not hide the other slots' results.
+				failErr := fmt.Errorf("clearing slot %d: vcl.label %s %s: status %d: %s", slot, label, ph, status, trimMessage(payload))
+				retry = append(retry, failErr)
+				r.logger.Warn("route VCL slot could not be cleared, will retry", "slot", slot, "previous", cur, "error", failErr)
+				continue
 			}
 			r.logger.Info("route VCL slot cleared", "slot", slot, "previous", cur)
 			if strings.HasPrefix(cur, routeVCLPrefix) {
@@ -1008,23 +1046,24 @@ func (r *Reloader) reconcileSlots(ctx context.Context, st *vclState, pool, limit
 			start := time.Now()
 			resp, err := r.varnishadm.VCLInline(name, d.doc)
 			compileTook := time.Since(start)
-			if err != nil {
+			status, payload, transport := cliOutcome(resp, err)
+			if transport {
 				return nil, fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
 			}
-			if resp.StatusCode() != varnishadm.ClisOk {
-				res.Message = trimMessage(resp.Payload())
+			if status != varnishadm.ClisOk {
+				res.Message = trimMessage(payload)
 				results.set(res, true)
 				failErr := fmt.Errorf("route VCL %s (slot %d, %s): %s", name, slot, d.policy, res.Message)
-				if isCompileFailure(resp.Payload()) {
+				if isCompileFailure(payload) {
 					r.compileFailures[base] = failureMemo{msg: res.Message, at: r.now()}
 					compileResult = dashboard.RouteVCLCompileError
 					r.logger.Warn("route VCL failed to compile, slot keeps its previous VCL",
-						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", resp.StatusCode())
+						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", status)
 				} else {
 					retry = append(retry, failErr)
 					compileResult = dashboard.RouteVCLOtherError
 					r.logger.Warn("route VCL could not be loaded, slot keeps its previous VCL, will retry",
-						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", resp.StatusCode(), "error", res.Message)
+						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", status, "error", res.Message)
 				}
 				dashboard.PublishRouteVCLReloadFail(r.dashBus, slot, failErr, compileResult, compileTook)
 				continue
@@ -1034,15 +1073,16 @@ func (r *Reloader) reconcileSlots(ctx context.Context, st *vclState, pool, limit
 				"duration", time.Since(start).Round(time.Millisecond))
 		}
 		resp, err := r.varnishadm.VCLLabel(label, name)
-		if err != nil {
+		status, payload, transport := cliOutcome(resp, err)
+		if transport {
 			return nil, fmt.Errorf("varnishadm.VCLLabel(%s, %s): %w", label, name, err)
 		}
-		if resp.StatusCode() != varnishadm.ClisOk {
+		if status != varnishadm.ClisOk {
 			// E.g. "would create a loop": the document returns to a label
 			// that leads back here. That depends on other slots' documents,
 			// so it is not memoised: the compiled VCL stays loaded and the
 			// label is retried on every pass.
-			res.Message = trimMessage(resp.Payload())
+			res.Message = trimMessage(payload)
 			results.set(res, true)
 			failErr := fmt.Errorf("route VCL %s (slot %d, %s): vcl.label %s: %s", name, slot, d.policy, label, res.Message)
 			retry = append(retry, failErr)
