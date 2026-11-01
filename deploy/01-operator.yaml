@@ -154,6 +154,12 @@ spec:
           image: ghcr.io/varnish/gateway-operator:latest
           args:
             - --leader-elect=true
+          env:
+            # Data-plane image. Kept in sync with the operator tag by
+            # `make deploy-update`, so kind/local flows run the locally built
+            # chaperone instead of the published :latest.
+            - name: GATEWAY_IMAGE
+              value: ghcr.io/varnish/gateway-chaperone:latest
           ports:
             - name: metrics
               containerPort: 8080
