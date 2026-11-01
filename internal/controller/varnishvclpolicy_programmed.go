@@ -170,7 +170,10 @@ func programStateForGateway(gw vvpParentGateway, policy string, manifest vcl.Rou
 	programmed := 0
 	for _, pod := range gw.livePods {
 		res, ok := results[pod]
-		if !ok || res.Hash != entry.Hash {
+		// Slot and hash must both match: after a slot move the same
+		// document (same hash) reported for the old slot says nothing
+		// about the label of the new one.
+		if !ok || int(res.Slot) != n || res.Hash != entry.Hash {
 			continue
 		}
 		if !res.Programmed {
@@ -203,9 +206,9 @@ func mapKeys[V any](m map[string]V) func(func(string) bool) {
 //
 // For every parent Gateway with route VCL enabled, the Gateway's route VCL
 // manifest decides: a slot means the policy is Programmed there once every
-// live pod of the Gateway reports that slot's hash with programmed=true;
-// CompileFailed when a live pod reports the current hash with
-// programmed=false; Pending otherwise. Unassigned means NoSlotAvailable; no
+// live pod of the Gateway reports that slot number and hash with
+// programmed=true; CompileFailed when a live pod reports the current slot
+// and hash with programmed=false; Pending otherwise. Unassigned means NoSlotAvailable; no
 // entry at all means NotProgrammed. Across Gateways: all programmed is True,
 // else CompileFailed, NoSlotAvailable, Pending in that order; NotProgrammed
 // (Unknown) only when no Gateway has done anything with the policy yet.
@@ -215,8 +218,29 @@ func (r *VarnishVCLPolicyReconciler) computeProgrammed(ctx context.Context, vvp 
 		return vvpProgrammed{}, err
 	}
 	live := make(map[string]bool)
+	parentSet := make(map[types.NamespacedName]bool, len(parents))
 	for _, p := range parents {
+		parentSet[p.key] = true
 		for _, pod := range p.livePods {
+			live[pod] = true
+		}
+	}
+	// Gateways that still list the policy (typically a released slot after
+	// a retarget) are no longer parents, but their pods' entries are what
+	// the Gateway controller checks before freeing the slot: keep them.
+	holders, err := r.manifestHolderGateways(ctx, vvpKey(vvp))
+	if err != nil {
+		return vvpProgrammed{}, err
+	}
+	for _, gk := range holders {
+		if parentSet[gk] {
+			continue
+		}
+		pods, err := gatewayLivePods(ctx, r.Client, &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: gk.Name, Namespace: gk.Namespace}})
+		if err != nil {
+			return vvpProgrammed{}, err
+		}
+		for _, pod := range pods {
 			live[pod] = true
 		}
 	}
@@ -382,6 +406,26 @@ func vvpGenerationOrPodResultsChanged() predicate.Predicate {
 	}
 }
 
+// routeGenerationOrParentsChanged passes HTTPRoute creates, deletes, spec
+// changes and status.parents changes. Attachment (status.parents Accepted)
+// is part of a policy's Accepted condition, and it is written by the
+// HTTPRoute controller without a generation bump.
+func routeGenerationOrParentsChanged() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldR, ok1 := e.ObjectOld.(*gatewayv1.HTTPRoute)
+			newR, ok2 := e.ObjectNew.(*gatewayv1.HTTPRoute)
+			if !ok1 || !ok2 {
+				return true
+			}
+			if oldR.Generation != newR.Generation {
+				return true
+			}
+			return !equality.Semantic.DeepEqual(oldR.Status.Parents, newR.Status.Parents)
+		},
+	}
+}
+
 // vvpRequestsForPolicyKeys converts "<namespace>/<name>" strings into
 // deduplicated reconcile requests.
 func vvpRequestsForPolicyKeys(keys []string) []reconcile.Request {
@@ -402,8 +446,8 @@ func vvpRequestsForPolicyKeys(keys []string) []reconcile.Request {
 	return out
 }
 
-// manifestPolicyKeys returns every policy named in a manifest, slotted or
-// unassigned.
+// manifestPolicyKeys returns every policy named in a manifest: slotted,
+// unassigned or holding a released slot.
 func manifestPolicyKeys(m vcl.RouteVCLManifest) []string {
 	var keys []string
 	for _, k := range slices.Sorted(mapKeys(m.Slots)) {
@@ -411,6 +455,49 @@ func manifestPolicyKeys(m vcl.RouteVCLManifest) []string {
 	}
 	for _, u := range m.Unassigned {
 		keys = append(keys, u.Policy)
+	}
+	for _, rl := range m.Released {
+		keys = append(keys, rl.Policy)
+	}
+	return keys
+}
+
+// manifestHolderGateways returns the Gateways whose route VCL manifest lists
+// policy in Slots or Released. Manifests that do not parse are skipped.
+func (r *VarnishVCLPolicyReconciler) manifestHolderGateways(ctx context.Context, policy string) ([]types.NamespacedName, error) {
+	var cms corev1.ConfigMapList
+	if err := r.List(ctx, &cms, client.MatchingLabels{LabelManagedBy: ManagedByValue}); err != nil {
+		return nil, fmt.Errorf("r.List(ConfigMaps managed-by=%s): %w", ManagedByValue, err)
+	}
+	var out []types.NamespacedName
+	for i := range cms.Items {
+		cm := &cms.Items[i]
+		if !isRouteVCLConfigMap(cm) {
+			continue
+		}
+		m, err := vcl.ParseRouteVCLManifest(cm.Data[vcl.ManifestKey])
+		if err != nil {
+			continue
+		}
+		if slices.Contains(manifestPolicyHolders(m), policy) {
+			out = append(out, types.NamespacedName{
+				Namespace: cm.Namespace,
+				Name:      strings.TrimSuffix(cm.Name, vcl.RouteVCLConfigMapSuffix),
+			})
+		}
+	}
+	return out, nil
+}
+
+// manifestPolicyHolders returns the policies that hold or held a slot in a
+// manifest (Slots and Released; not Unassigned).
+func manifestPolicyHolders(m vcl.RouteVCLManifest) []string {
+	var keys []string
+	for _, s := range m.Slots {
+		keys = append(keys, s.Policy)
+	}
+	for _, rl := range m.Released {
+		keys = append(keys, rl.Policy)
 	}
 	return keys
 }

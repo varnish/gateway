@@ -79,6 +79,10 @@ type GatewayReconciler struct {
 	Scheme *runtime.Scheme
 	Config Config
 	Logger *slog.Logger
+
+	// clock returns the current time for route VCL slot release; nil means
+	// time.Now. Tests inject a fake clock.
+	clock func() time.Time
 }
 
 // Reconcile handles Gateway reconciliation.
@@ -116,7 +120,8 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	// 5. Reconcile child resources
-	if err := r.reconcileResources(ctx, &gateway); err != nil {
+	requeueAfter, err := r.reconcileResources(ctx, &gateway)
+	if err != nil {
 		// Conflict errors are transient — just requeue without poisoning Gateway status.
 		// Setting Invalid status on conflicts causes the Gateway to appear broken until
 		// the next successful reconcile, which can cascade into conformance test timeouts.
@@ -141,8 +146,10 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, fmt.Errorf("r.updateGatewayStatus: %w", err)
 	}
 
-	log.Debug("gateway reconciliation complete")
-	return ctrl.Result{}, nil
+	log.Debug("gateway reconciliation complete", "requeueAfter", requeueAfter)
+	// requeueAfter is non-zero while route VCL slots are released and
+	// waiting to become free; nothing else would trigger the reconcile.
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // cleanupOrphanedCRBs lists all ClusterRoleBindings created by this operator and deletes
@@ -185,7 +192,9 @@ func (r *GatewayReconciler) cleanupOrphanedCRBs(ctx context.Context) error {
 }
 
 // reconcileResources creates or updates all child resources for a Gateway.
-func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gatewayv1.Gateway) error {
+// The returned duration asks for a requeue (released route VCL slots waiting
+// to become free); 0 means none.
+func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gatewayv1.Gateway) (time.Duration, error) {
 	// Fetch GatewayClassParameters for extra args, logging config, and extra pod specs
 	var varnishdExtraArgs []string
 	var logging *gatewayparamsv1alpha1.VarnishLogging
@@ -196,7 +205,13 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	var pdbSpec *gatewayparamsv1alpha1.PodDisruptionBudget
 	var topologySpread []corev1.TopologySpreadConstraint
 	var imageOverride string
-	params := r.getGatewayClassParameters(ctx, gateway)
+	// A lookup error fails the reconcile (retry) instead of continuing with
+	// nil params: that would compute pool size 0 and an infra hash without
+	// the class's settings, tearing down route VCL and rolling the pods.
+	_, params, err := resolveGatewayClassParameters(ctx, r.Client, string(gateway.Spec.GatewayClassName))
+	if err != nil {
+		return 0, err
+	}
 	if params != nil {
 		imageOverride = params.Spec.Image
 		varnishdExtraArgs = params.Spec.VarnishdExtraArgs
@@ -219,7 +234,10 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	// slot pool, user VCL). With route VCL off the pool is 0 and this is
 	// exactly Merge(Generate(), userVCL).
 	poolSize := routeVCLPoolSize(params)
-	userVCL := r.userVCLFromParams(ctx, params)
+	userVCL, err := r.userVCLFromParams(ctx, params)
+	if err != nil {
+		return 0, err
+	}
 	vclContent := vcl.GenerateMaster(poolSize, userVCL)
 
 	// Parse image pull secrets
@@ -287,15 +305,16 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 
 	for _, desired := range resources {
 		if err := r.reconcileResource(ctx, gateway, desired); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	// The route VCL ConfigMap is always present (empty manifest when the
 	// feature is off) and is written after "{gateway}-vcl", so a pool that
 	// grows has its labels before the slots that need them are listed.
-	if err := r.reconcileRouteVCLConfigMap(ctx, gateway, poolSize, userVCL); err != nil {
-		return err
+	requeueAfter, err := r.reconcileRouteVCLConfigMap(ctx, gateway, poolSize, userVCL)
+	if err != nil {
+		return 0, err
 	}
 
 	// If the PDB was toggled off (or never set), make sure no stale one remains.
@@ -304,11 +323,11 @@ func (r *GatewayReconciler) reconcileResources(ctx context.Context, gateway *gat
 	// than leave it behind via owner-reference GC.
 	if pdbSpec == nil {
 		if err := r.deletePodDisruptionBudgetIfExists(ctx, gateway); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
-	return nil
+	return requeueAfter, nil
 }
 
 // deletePodDisruptionBudgetIfExists deletes the Gateway's PodDisruptionBudget
@@ -1204,15 +1223,20 @@ func resolveGatewayClassParameters(ctx context.Context, c client.Reader, classNa
 
 // getUserVCL returns user-provided VCL from GatewayClassParameters.
 // It traverses: Gateway -> GatewayClass -> GatewayClassParameters -> ConfigMap
+// Lookup errors are logged and yield "".
 func (r *GatewayReconciler) getUserVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
-	return r.userVCLFromParams(ctx, r.getGatewayClassParameters(ctx, gateway))
+	return r.getUserVCLFromParamsLogged(ctx, r.getGatewayClassParameters(ctx, gateway))
 }
 
 // userVCLFromParams returns the user VCL referenced by already-resolved
-// GatewayClassParameters ("" when params is nil or has no reference).
-func (r *GatewayReconciler) userVCLFromParams(ctx context.Context, params *gatewayparamsv1alpha1.GatewayClassParameters) string {
+// GatewayClassParameters ("" when params is nil or has no reference). A
+// missing ConfigMap or key is the user's doing and yields "" with a log
+// line; any other lookup failure is returned so the reconcile retries
+// instead of rewriting main.vcl and every route VCL slot without the user
+// VCL.
+func (r *GatewayReconciler) userVCLFromParams(ctx context.Context, params *gatewayparamsv1alpha1.GatewayClassParameters) (string, error) {
 	if params == nil || params.Spec.UserVCLConfigMapRef == nil {
-		return ""
+		return "", nil
 	}
 
 	cmRef := params.Spec.UserVCLConfigMapRef
@@ -1221,9 +1245,12 @@ func (r *GatewayReconciler) userVCLFromParams(ctx context.Context, params *gatew
 		Name:      cmRef.Name,
 		Namespace: cmRef.Namespace,
 	}, &cm); err != nil {
-		r.Logger.Error("failed to get user VCL ConfigMap",
-			"namespace", cmRef.Namespace, "name", cmRef.Name, "error", err)
-		return ""
+		if apierrors.IsNotFound(err) {
+			r.Logger.Error("user VCL ConfigMap not found",
+				"namespace", cmRef.Namespace, "name", cmRef.Name)
+			return "", nil
+		}
+		return "", fmt.Errorf("r.Get(user VCL ConfigMap %s/%s): %w", cmRef.Namespace, cmRef.Name, err)
 	}
 
 	// 7. Return VCL from ConfigMap (default key is "user.vcl")
@@ -1236,21 +1263,33 @@ func (r *GatewayReconciler) userVCLFromParams(ctx context.Context, params *gatew
 	if !ok {
 		r.Logger.Warn("user VCL ConfigMap missing expected key",
 			"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
-		return ""
+		return "", nil
 	}
 
 	r.Logger.Debug("loaded user VCL from ConfigMap",
 		"namespace", cmRef.Namespace, "name", cmRef.Name, "key", key)
 
-	return userVCL
+	return userVCL, nil
 }
 
 // generateVCL returns the master VCL for a Gateway: ghost preamble (with the
 // route VCL dispatch for the class's slot pool) merged with user VCL. It is
-// what reconcileResources writes to main.vcl.
+// what reconcileResources writes to main.vcl (which, unlike this helper,
+// fails on lookup errors instead of falling back to no user VCL).
 func (r *GatewayReconciler) generateVCL(ctx context.Context, gateway *gatewayv1.Gateway) string {
 	params := r.getGatewayClassParameters(ctx, gateway)
-	return vcl.GenerateMaster(routeVCLPoolSize(params), r.userVCLFromParams(ctx, params))
+	return vcl.GenerateMaster(routeVCLPoolSize(params), r.getUserVCLFromParamsLogged(ctx, params))
+}
+
+// getUserVCLFromParamsLogged is userVCLFromParams with errors logged and
+// mapped to "".
+func (r *GatewayReconciler) getUserVCLFromParamsLogged(ctx context.Context, params *gatewayparamsv1alpha1.GatewayClassParameters) string {
+	userVCL, err := r.userVCLFromParams(ctx, params)
+	if err != nil {
+		r.Logger.Error("failed to get user VCL", "error", err)
+		return ""
+	}
+	return userVCL
 }
 
 // parseImagePullSecrets parses the comma-separated ImagePullSecrets config

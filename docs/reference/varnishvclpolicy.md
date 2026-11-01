@@ -13,6 +13,8 @@
 
 The feature is off by default. It has to be turned on per GatewayClass with [`spec.routeVCL.enabled`](gatewayclassparameters.md#specroutevcl).
 
+Read [Route VCL: caveats and limits](route-vcl-caveats.md) before enabling it: one jump per request, restarts and ESI subrequests stay in the master, the cache is shared, and every route VCL is recompiled when the gateway VCL changes.
+
 ## Trust statement
 
 **Attaching VCL to an HTTPRoute is equivalent to granting code execution inside the gateway pod.** Submitted VCL is not inspected before it reaches varnishd. A route VCL can:
@@ -73,14 +75,15 @@ Short name: `kubectl get vvp`.
 
 Each Gateway with route VCL enabled has a fixed pool of VCL slots ([`routeVCL.slotPoolSize`](gatewayclassparameters.md#specroutevcl), default 64). An accepted policy occupies one slot on every parent Gateway of its route that has the feature on. The slot number is what ghost tags a matched request with, and what the master VCL dispatches on.
 
-- **Slots are stable.** A policy keeps its slot for as long as it stays accepted and attached, including when its VCL document changes. Only the document in the slot is replaced (and recompiled on each pod).
+- **Slots are stable.** A policy keeps its slot for as long as it stays accepted and attached, including when its VCL document changes. Only the document in the slot is replaced (and recompiled on each pod). An edit to the policy does not cost it its slot while the operator re-validates it; only an explicit `Accepted=False` for the new generation does. If the policy's ConfigMap or key disappears while it holds a slot, the slot keeps its previous document until the policy is marked not accepted.
+- **Attachment.** Only a route that is actually attached to the Gateway gets a slot there: its `status.parents` must have an `Accepted=True` entry for that Gateway from this controller. A route that lists the Gateway but is refused (for example by the listener's `allowedRoutes`) does not.
 - **Assignment order.** A policy without a slot gets the lowest free slot. When several policies need one in the same pass, the oldest (creation timestamp, then namespace/name) goes first. Slots that are already held are honoured before any new ones are handed out.
-- **Release.** A policy that is deleted, retargeted, no longer accepted, or whose route leaves the Gateway frees its slot. The slot can go to another policy in the same pass.
+- **Release.** A policy that is deleted, retargeted, no longer accepted, or whose route leaves the Gateway gives up its slot, but the slot is not handed to another policy straight away. It is held in quarantine (listed under `released` in the `{gateway}-route-vcl` manifest) for at least 60 seconds, and until no running pod of the Gateway still reports the old policy's VCL in that slot. Meanwhile requests that still carry the slot get the 503 placeholder rather than another policy's VCL. A policy that comes back to the same route while its slot is in quarantine gets the same slot back at once.
 - **Pool exhaustion.** When every slot is taken, the policy gets no slot on that Gateway. It reports `Programmed=False`, reason `NoSlotAvailable`, and requests on its route keep running the gateway's master VCL. The operator logs a warning once and the `varnish_gateway_route_vcl_unassigned` metric counts it. It gets a slot as soon as one is freed or the pool grows.
 - **Pool shrink.** If `slotPoolSize` is reduced below a slot that is in use, that policy loses its slot (other policies keep their numbers). It is given a free slot inside the smaller pool if there is one, otherwise it waits with reason `SlotOutsidePool`.
 - **Size limit.** All route VCLs of a Gateway travel in one ConfigMap (`{gateway}-route-vcl`). If adding a document would push it past 900 KiB, that policy gets no slot (reason `ConfigMapFull`).
 
-The operator-side metrics `varnish_gateway_route_vcl_slots{state="used|free"}` and `varnish_gateway_route_vcl_unassigned` show pool usage per Gateway.
+The operator-side metrics `varnish_gateway_route_vcl_slots{state="used|free"}` and `varnish_gateway_route_vcl_unassigned` show pool usage per Gateway, and `varnish_gateway_route_vcl_policies{programmed="true|false"}` counts policies by their Programmed condition. The chaperone exports per-pod metrics (`chaperone_route_vcl_*`), see [Observability](../operations/observability.md#route-vcl-metrics).
 
 ## Status and Conditions
 
@@ -90,11 +93,12 @@ The operator writes one entry under `status.ancestors`, with the target HTTPRout
 
 | Condition      | Reason            | Meaning                                                                                                                                  |
 | -------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Accepted=True  | Accepted          | The policy is valid, its references resolve, and route VCL is enabled for at least one parent Gateway of the route. The message lists any parent Gateways where it is disabled |
+| Accepted=True  | Accepted          | The policy is valid, its references resolve, and route VCL is enabled for at least one parent Gateway of the route that the route is attached to. The message lists any parent Gateways where it does not apply |
 | Accepted=False | Invalid           | Bad spec: wrong `targetRef` group or kind, `sectionName` set, empty ConfigMap name, or a VCL document larger than 256 KiB                     |
 | Accepted=False | TargetNotFound    | The HTTPRoute does not exist in the policy's namespace. Rechecked every 10s                                                                  |
 | Accepted=False | ConfigMapNotFound | The ConfigMap, or the key in it, does not exist. Rechecked every 10s                                                                         |
 | Accepted=False | Disabled          | None of the route's parent Gateways belongs to a GatewayClass with `routeVCL.enabled: true`. The message names each Gateway and GatewayClass |
+| Accepted=False | RouteNotAttached  | Route VCL is enabled for a parent Gateway, but the HTTPRoute is not attached to it (no `Accepted=True` entry for it in the route's `status.parents`, e.g. refused by the listener's `allowedRoutes`) |
 | Accepted=False | Conflicted        | Another VarnishVCLPolicy already targets the same HTTPRoute                                                                              |
 
 Conflict resolution: if two policies target the same HTTPRoute, the older one (by creation timestamp, then name) wins. When the winner is deleted or retargeted, the other policy is promoted.

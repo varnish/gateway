@@ -108,11 +108,29 @@ func TestRouteVCL_EndToEnd_Envtest(t *testing.T) {
 	routeR := NewEnvtestHTTPRouteReconciler(testEnv)
 	routeReq := ctrl.Request{NamespacedName: types.NamespacedName{Name: "rvcl-route", Namespace: ns}}
 
-	// 1. VVP: Accepted.
+	// 0. Before the HTTPRoute controller has attached the route, the
+	// policy is RouteNotAttached.
 	if _, err := vvpR.Reconcile(ctx, vvpReq); err != nil {
 		t.Fatalf("vvp reconcile: %v", err)
 	}
 	cur := getEnvtestVVP(t, vvp)
+	if a := meta.FindStatusCondition(cur.Status.Ancestors[0].Conditions, gatewayparamsv1alpha1.VCLPolicyConditionAccepted); a == nil ||
+		a.Reason != gatewayparamsv1alpha1.VCLPolicyReasonRouteNotAttached {
+		t.Fatalf("Accepted = %+v, want RouteNotAttached", a)
+	}
+
+	// 1. Gateway, then HTTPRoute (attaches the route: status.parents
+	// Accepted=True), then VVP: Accepted.
+	if _, err := gwR.Reconcile(ctx, gwReq); err != nil {
+		t.Fatalf("gateway reconcile: %v", err)
+	}
+	if _, err := routeR.Reconcile(ctx, routeReq); err != nil {
+		t.Fatalf("httproute reconcile: %v", err)
+	}
+	if _, err := vvpR.Reconcile(ctx, vvpReq); err != nil {
+		t.Fatalf("vvp reconcile: %v", err)
+	}
+	cur = getEnvtestVVP(t, vvp)
 	if !vvpAcceptedCurrent(cur) {
 		t.Fatalf("policy not accepted: %+v", cur.Status)
 	}
@@ -202,6 +220,42 @@ func TestRouteVCL_EndToEnd_Envtest(t *testing.T) {
 	}
 	if a := meta.FindStatusCondition(cur.Status.Ancestors[0].Conditions, gatewayparamsv1alpha1.VCLPolicyConditionAccepted); a == nil || a.Status != metav1.ConditionTrue {
 		t.Errorf("Accepted lost: %+v", a)
+	}
+
+	// 6. The policy is deleted: slot 0 goes into quarantine (Released, not
+	// free), a requeue is scheduled, and routing.json drops vcl_slot.
+	if err := c.Delete(ctx, cur); err != nil {
+		t.Fatalf("delete vvp: %v", err)
+	}
+	res, err := gwR.Reconcile(ctx, gwReq)
+	if err != nil {
+		t.Fatalf("gateway reconcile: %v", err)
+	}
+	if res.RequeueAfter <= 0 || res.RequeueAfter > routeVCLReleaseQuarantine {
+		t.Errorf("RequeueAfter = %v, want within the quarantine", res.RequeueAfter)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: "rvcl-gw-route-vcl", Namespace: ns}, &routeCM); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err = vcl.ParseRouteVCLManifest(routeCM.Data[vcl.ManifestKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Slots) != 0 || len(manifest.Released) != 1 || manifest.Released[0].Slot != 0 ||
+		manifest.Released[0].Policy != "default/rvcl-vvp" || manifest.Released[0].Hash != slot0.Hash {
+		t.Errorf("manifest after delete = %+v", manifest)
+	}
+	if _, ok := routeCM.Data[vcl.SlotKey(0)]; ok {
+		t.Error("released slot 0 still has a document")
+	}
+	if _, err := routeR.Reconcile(ctx, routeReq); err != nil {
+		t.Fatalf("httproute reconcile: %v", err)
+	}
+	if err := c.Get(ctx, types.NamespacedName{Name: "rvcl-gw-vcl", Namespace: ns}, &vclCM); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(vclCM.Data["routing.json"], `"vcl_slot"`) {
+		t.Errorf("routing.json still carries a vcl_slot:\n%s", vclCM.Data["routing.json"])
 	}
 }
 

@@ -56,6 +56,12 @@ func podResult(pod, hash string, programmed bool, msg string) gatewayparamsv1alp
 	}
 }
 
+func podResultSlot(pod string, slot int32, hash string, programmed bool, msg string) gatewayparamsv1alpha1.VarnishVCLPolicyPodResult {
+	res := podResult(pod, hash, programmed, msg)
+	res.Slot = slot
+	return res
+}
+
 func vvpWithResults(results ...gatewayparamsv1alpha1.VarnishVCLPolicyPodResult) *gatewayparamsv1alpha1.VarnishVCLPolicy {
 	vvp := newVVP("p", "my-route", "vcl", time.Now())
 	vvp.Generation = 1
@@ -131,6 +137,30 @@ func TestVVPProgrammed(t *testing.T) {
 			status: metav1.ConditionFalse, reason: gatewayparamsv1alpha1.VCLPolicyReasonCompileFailed,
 			msgHas: "pod gw-b: VCL compilation failed: Unknown variable 'req.htp'", wantSlots: "[default/gw=2]",
 			wantPodRes: []string{"gw-a", "gw-b"},
+		},
+		{
+			// The slot moved (2 -> now) while the document stayed the
+			// same: gw-b still reports the same hash for its old slot 5,
+			// which says nothing about label gwvcl-2. Neither its
+			// "programmed" nor its failure counts.
+			name:  "same hash reported for an old slot",
+			extra: []runtime.Object{slotManifestCM("gw", "")},
+			results: []gatewayparamsv1alpha1.VarnishVCLPolicyPodResult{
+				podResult("gw-a", progHash, true, ""),
+				podResultSlot("gw-b", 5, progHash, true, ""),
+			},
+			status: metav1.ConditionFalse, reason: gatewayparamsv1alpha1.VCLPolicyReasonPending,
+			msgHas: "programmed on 1 of 2", wantSlots: "[default/gw=2]", wantPodRes: []string{"gw-a", "gw-b"},
+		},
+		{
+			name:  "failure reported for an old slot is not CompileFailed",
+			extra: []runtime.Object{slotManifestCM("gw", "")},
+			results: []gatewayparamsv1alpha1.VarnishVCLPolicyPodResult{
+				podResult("gw-a", progHash, true, ""),
+				podResultSlot("gw-b", 5, progHash, false, "label refused"),
+			},
+			status: metav1.ConditionFalse, reason: gatewayparamsv1alpha1.VCLPolicyReasonPending,
+			msgHas: "programmed on 1 of 2", wantSlots: "[default/gw=2]", wantPodRes: []string{"gw-a", "gw-b"},
 		},
 		{
 			name:   "pool exhausted",
@@ -318,6 +348,58 @@ func TestVVPProgrammed_DisabledGatewayIgnored(t *testing.T) {
 	}
 }
 
+func TestVVPProgrammed_ReleasedSlotHolderPodsKeptForGC(t *testing.T) {
+	// The policy was retargeted away from "old-gw", which still holds its
+	// slot 3 in Released. old-gw's pod entry is what the Gateway controller
+	// checks before freeing the slot, so GC must keep it although old-gw is
+	// no longer a parent. A pod of an unrelated gateway is dropped.
+	old := slotManifestCM("old-gw", "")
+	old.Data[vcl.ManifestKey] = `{"slots":{},"released":[{"slot":3,"policy":"default/p","route":"default/was","hash":"h","releasedAt":"2026-01-01T00:00:00Z"}]}`
+	unrelated := slotManifestCM("x-gw", "")
+	unrelated.Data[vcl.ManifestKey] = `{"slots":{}}`
+	objs := append(vvpEnabledWorld(),
+		gatewayPod("gw", "gw-a"), slotManifestCM("gw", ""),
+		old, gatewayPod("old-gw", "old-a"),
+		unrelated, gatewayPod("x-gw", "x-a"),
+		vvpWithResults(
+			podResult("gw-a", progHash, true, ""),
+			podResultSlot("old-a", 3, "h", true, ""),
+			podResultSlot("x-a", 1, "h", true, ""),
+		),
+	)
+	r := newVVPTestReconciler(objs...)
+	reconcileVVP(t, r, "p")
+	var got []string
+	for _, res := range getVVP(t, r, "p").Status.PodResults {
+		got = append(got, res.PodName)
+	}
+	if fmt.Sprint(got) != "[gw-a old-a]" {
+		t.Errorf("podResults = %v, want [gw-a old-a]", got)
+	}
+}
+
+func TestRouteGenerationOrParentsChanged(t *testing.T) {
+	p := routeGenerationOrParentsChanged()
+	base := vvpRoute("r", "gw")
+	base.Status.Parents = nil
+
+	attached := base.DeepCopy()
+	markRouteAttached(attached)
+	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: attached}) {
+		t.Error("status.parents change filtered")
+	}
+	same := base.DeepCopy()
+	same.ResourceVersion = "2"
+	if p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: same}) {
+		t.Error("no-op update passed")
+	}
+	gen := base.DeepCopy()
+	gen.Generation = 5
+	if !p.Update(event.UpdateEvent{ObjectOld: base, ObjectNew: gen}) {
+		t.Error("generation change filtered")
+	}
+}
+
 func TestVVPGenerationOrPodResultsChanged(t *testing.T) {
 	p := vvpGenerationOrPodResultsChanged()
 	base := vvpWithResults(podResult("a", progHash, false, ""))
@@ -353,10 +435,11 @@ func TestFindVVPsForConfigMap_RouteVCLManifest(t *testing.T) {
 	r := newVVPTestReconciler(append(vvpEnabledWorld(), newVVP("p", "my-route", "vcl", time.Now()))...)
 	cm := slotManifestCM("gw", "")
 	cm.Data[vcl.ManifestKey] = `{"slots":{"0":{"policy":"team/a","route":"team/r"},"1":{"policy":"default/b","route":"default/r"}},` +
-		`"unassigned":[{"policy":"other/c","route":"other/r","reason":"NoSlotAvailable"}]}`
+		`"unassigned":[{"policy":"other/c","route":"other/r","reason":"NoSlotAvailable"}],` +
+		`"released":[{"slot":2,"policy":"old/d","route":"old/r","hash":"h","releasedAt":"2026-01-01T00:00:00Z"}]}`
 	got := requestNames(t, r.findVVPsForConfigMap(context.Background(), cm))
 	sort.Strings(got)
-	want := []string{"default/b", "other/c", "team/a"}
+	want := []string{"default/b", "old/d", "other/c", "team/a"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("requests = %v, want %v", got, want)
 	}

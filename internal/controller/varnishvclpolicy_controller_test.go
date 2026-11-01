@@ -93,7 +93,26 @@ func vvpRoute(name string, parents ...string) *gatewayv1.HTTPRoute {
 	for _, p := range parents {
 		route.Spec.ParentRefs = append(route.Spec.ParentRefs, gatewayv1.ParentReference{Name: gatewayv1.ObjectName(p)})
 	}
+	markRouteAttached(route)
 	return route
+}
+
+// markRouteAttached sets status.parents as the HTTPRoute controller would
+// for a route accepted by every Gateway in its parentRefs.
+func markRouteAttached(route *gatewayv1.HTTPRoute) {
+	route.Status.Parents = nil
+	for _, ref := range route.Spec.ParentRefs {
+		route.Status.Parents = append(route.Status.Parents, gatewayv1.RouteParentStatus{
+			ParentRef:      ref,
+			ControllerName: gatewayv1.GatewayController(ControllerName),
+			Conditions: []metav1.Condition{{
+				Type:               string(gatewayv1.RouteConditionAccepted),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.RouteReasonAccepted),
+				LastTransitionTime: metav1.Now(),
+			}},
+		})
+	}
 }
 
 func vvpConfigMap(name string, data map[string]string) *corev1.ConfigMap {
@@ -277,6 +296,53 @@ func TestVVPReconcile_DisabledEdgeCases(t *testing.T) {
 			t.Errorf("message = %q", c.Message)
 		}
 	})
+}
+
+// A route that lists an enabled Gateway but is not attached to it (no
+// Accepted=True status.parents entry from us, e.g. allowedRoutes refuse it)
+// is RouteNotAttached, and becomes Accepted once the HTTPRoute controller
+// attaches it.
+func TestVVPReconcile_RouteNotAttached(t *testing.T) {
+	cases := []struct {
+		name   string
+		status func(route *gatewayv1.HTTPRoute)
+	}{
+		{"no parent status yet", func(route *gatewayv1.HTTPRoute) { route.Status.Parents = nil }},
+		{"parent status Accepted=False", func(route *gatewayv1.HTTPRoute) {
+			route.Status.Parents[0].Conditions[0].Status = metav1.ConditionFalse
+			route.Status.Parents[0].Conditions[0].Reason = string(gatewayv1.RouteReasonNotAllowedByListeners)
+		}},
+		{"parent status from another controller", func(route *gatewayv1.HTTPRoute) {
+			route.Status.Parents[0].ControllerName = "example.com/other"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			route := vvpRoute("my-route", "gw")
+			tc.status(route)
+			objs := append(vvpEnabledWorld()[:3], route,
+				vvpConfigMap("vcl", map[string]string{"route.vcl": "x"}),
+				newVVP("p", "my-route", "vcl", time.Now()))
+			r := newVVPTestReconciler(objs...)
+			reconcileVVP(t, r, "p")
+			c := assertVVPAccepted(t, r, "p", metav1.ConditionFalse, gatewayparamsv1alpha1.VCLPolicyReasonRouteNotAttached)
+			if !strings.Contains(c.Message, `Gateway default/gw: HTTPRoute "my-route" is not attached`) {
+				t.Errorf("message = %q", c.Message)
+			}
+
+			// The HTTPRoute controller attaches the route.
+			var cur gatewayv1.HTTPRoute
+			if err := r.Get(context.Background(), types.NamespacedName{Name: "my-route", Namespace: vvpTestNS}, &cur); err != nil {
+				t.Fatal(err)
+			}
+			markRouteAttached(&cur)
+			if err := r.Update(context.Background(), &cur); err != nil {
+				t.Fatal(err)
+			}
+			reconcileVVP(t, r, "p")
+			assertVVPAccepted(t, r, "p", metav1.ConditionTrue, gatewayparamsv1alpha1.VCLPolicyReasonAccepted)
+		})
+	}
 }
 
 // A route with one enabled and one disabled parent is accepted, and the

@@ -593,3 +593,173 @@ Accepted as-is, must be documented in P7/P8:
   900 KiB guard is the real limit, which the docs state.
 - Re-measure startup probe headroom (180 s) on 9.1.0 in a pod with the
   default 100m CPU request: 256 populated slots took ~57 s unthrottled.
+
+### P6 review fixes
+
+- **Two-phase slot release.** `RouteVCLManifest.Released
+  []RouteVCLReleased{Slot, Policy, Route, Hash, ReleasedAt metav1.Time}`
+  (`released`, omitempty; the chaperone ignores it, its parse test still
+  passes). Deviation from the brief: `Route` was added, it is needed for the
+  "same policy and route gets its slot back" rule. Any previous slot whose
+  occupant did not keep it (deleted, not eligible, retargeted, moved by a pool
+  shrink, ConfigMapFull) is not free: it is listed in Released with
+  `ReleasedAt = now` (RFC 3339, seconds), has no `slot-N.vcl` and is not in
+  Slots, so the chaperone points the label at the placeholder and
+  routing.json drops the slot (fail-closed 503). It becomes free when both
+  `routeVCLReleaseQuarantine` (60 s) has passed and the previous policy is
+  gone or none of its podResults for a live pod of this Gateway reports that
+  slot `programmed: true`. **The pod check ignores the hash** (stricter than
+  the brief): a pod still reporting the slot programmed with an older hash of
+  the same policy still has the label on that policy's VCL; the chaperone's
+  final `{hash: "", programmed: false}` entry clears it. A policy coming back
+  with the same policy and route while its slot is Released gets it back at
+  once (pass 1b, before new placements); a different route is treated as new.
+  `assignRouteVCLSlots` takes `routeVCLRelease{now, cleared map[slot]bool}`
+  and returns `requeueAfter` (remaining quarantine, else
+  `routeVCLReleasePollInterval` = 10 s while pods still report the slot,
+  since podResults writes are filtered from the Gateway controller's VVP
+  watch). `reconcileResources` now returns `(time.Duration, error)` and
+  `Reconcile` returns it as `RequeueAfter`. Clock: unexported
+  `GatewayReconciler.clock` (nil = `time.Now`). Pool 0 still writes an empty
+  manifest (Released dropped too; the chaperone discards all labels).
+- **podResults GC vs release.** The VVP controller's GC now also keeps
+  entries of live pods of Gateways whose manifest lists the policy in Slots
+  or Released (`manifestHolderGateways`, a List of operator-labelled
+  ConfigMaps). Without it a retargeted policy's entries on the old Gateway
+  were GCed at once and the release check saw "cleared" while the pod still
+  had the label. `manifestPolicyKeys` includes Released, so manifest changes
+  re-reconcile those policies.
+- **Status lag.** `vvpAcceptance` is tri-state (accepted / rejected / unknown
+  for the current generation). A policy holding a slot in the previous
+  manifest stays a candidate unless rejected at the current generation;
+  others need accepted-current. Composed from the live spec. If a holder's
+  ConfigMap/key is missing (or oversized) right now, its previous composed
+  `slot-N.vcl` bytes and manifest generation are kept (warn); without a
+  previous document the slot is released. `vvpSlotRelevantChange` compares
+  the tri-state, so "unknown -> rejected" after a spec edit triggers the
+  Gateway.
+- **Programmed** matches pod entries on slot AND hash.
+- **User VCL read errors**: `userVCLFromParams` returns `(string, error)`;
+  non-NotFound Get errors fail the reconcile. Missing ConfigMap or key stays
+  "" with a log line. Same fix applied to the GatewayClassParameters lookup in
+  `reconcileResources` (previously an API error gave nil params, i.e. pool 0
+  and an infra hash without the class settings, which would also roll the
+  pods). `getUserVCL`/`generateVCL` (test-only helpers) still log and return
+  "".
+- **Attachment.** `routeAcceptedByGateway(route, gwKey)`: spec parentRef
+  present AND a `status.parents` entry for that Gateway with our controller
+  name and `Accepted=True`. Required for slot candidates (new and retained)
+  and in the VVP controller's enablement: enabled-but-unattached parents give
+  `Accepted=False` reason `RouteNotAttached` (new constant
+  `VCLPolicyReasonRouteNotAttached`, documented). The VVP controller's
+  HTTPRoute watch now passes `status.parents` changes
+  (`routeGenerationOrParentsChanged`); the Gateway controller already watched
+  HTTPRoutes unfiltered. Accepted message wording changed to "route VCL does
+  not apply on some parent Gateways: ..." (it now also lists unattached ones).
+- **Corrupt manifest**: a non-empty, unparseable `manifest.json` fails the
+  Gateway reconcile (error logged with "delete the ConfigMap to start over")
+  instead of reassigning from scratch. Empty/missing = fresh start. This
+  supersedes the P6 note that "the Gateway controller rewrites a bad manifest
+  from scratch": both controllers now wedge on it until a human acts.
+- Tests: release not reused in the same round, reused after quarantine when
+  cleared, held while a pod reports it (poll requeue), Gateway reconcile
+  following podResults (live pod programmed holds; gone pod and final entry
+  do not), deleted policy freed after quarantine only, returning policy gets
+  its slot (same route) but not on another route, exhaustion waits for the
+  release; status lag keeps the slot and uses the new document, rejection
+  releases it; holder keeps previous document when its ConfigMap vanishes,
+  new policy is left out; unattached / refused routes excluded; corrupt
+  manifest is an error and left untouched; user VCL Get error fails without
+  rewriting main.vcl or slot documents, missing user VCL ConfigMap is "";
+  Programmed with a same-hash entry for an old slot (neither programmed nor
+  failure counts); GC keeps a released holder's pods; predicates. Envtest:
+  RouteNotAttached before the HTTPRoute controller attaches the route, and
+  delete -> Released + requeue + `vcl_slot` gone from routing.json.
+- Open: `varnish_gateway_route_vcl_slots{state="free"}` (internal/metrics,
+  not touched here) counts released slots as free although they are not
+  assignable yet. A deleted-and-recreated `{gateway}-route-vcl` ConfigMap
+  still starts fresh without quarantine (pods may hold labels from before).
+
+## P7 — throttling, metrics, dashboard, caveats (#102)
+
+### Compile throttle (`internal/vcl/throttle.go`)
+
+- `golang.org/x/time/rate` was already vendored (direct dependency); no new
+  dependency. `compileThrottle` wraps a `rate.Limiter` and uses `ReserveN` with
+  an injectable clock and sleep, so tests run on a virtual clock. Waiting
+  honours ctx (the reservation is returned on cancel); a cancelled wait fails
+  the reconcile with the context error.
+- Only the route VCL `vcl.inline` in `reconcileSlots` waits. The master and the
+  placeholder never do (tested). `Reloader.SetCompileThrottle(rate, burst)`;
+  `New()` leaves the throttle off (so unit tests stay fast), the chaperone
+  applies `ROUTE_VCL_COMPILE_RATE` (default 4, `0` = off) and
+  `ROUTE_VCL_COMPILE_BURST` (default 8; < 1 raised to 1 while rate > 0).
+  Invalid env values fail `loadConfig`.
+- Honest arithmetic: the bucket starts full and refills at 4/s while a ~0.2 s
+  compile runs, so each compile costs a net 0.2 tokens. The burst of 8 lasts
+  ~40 compiles at local speed, after which compiles are spaced 0.25 s. At local
+  speed the default therefore hardly slows anything: 64 slots ~14 s,
+  256 slots ~60 s (vs 12.8 s / 57 s unthrottled). Under a CPU limit, where a
+  compile takes > 0.25 s, the default never binds at all. It is a ceiling on
+  compile rate (about 80% of a core at 0.2 s/compile), not a CPU cap; lowering
+  `ROUTE_VCL_COMPILE_RATE` (1 ~ 20% of a core) is how an operator protects
+  traffic during a gateway-VCL change.
+
+### Events and metrics
+
+- Route VCL loads publish `route_vcl_reload` / `route_vcl_reload_fail` (new
+  `PublishRouteVCLReload(bus, slot, name, compile)` and
+  `PublishRouteVCLReloadFail(bus, slot, err, result, compile)` in
+  `internal/dashboard/routevcl.go`; signatures carry a compile duration and a
+  result because the metrics need them). The master still uses
+  `PublishVCLReload`/`Fail` and the old counters.
+- `compiles_total{result}` is counted when the slot is labelled (`ok`) or fails
+  (`compile_error` = VCC, `error` = other refusal or failed `vcl.label`). A
+  compile that succeeds and is then retried at the label step counts `ok` once,
+  when the label lands, and observes its duration only then.
+- The histogram observes `vcl.inline` durations including failed compiles.
+- `chaperone_route_vcl_master_reloads_total{result=ok|error}` is derived from
+  the master's reload events (error does not distinguish compile from other).
+- Slot gauges come from a new `route_vcl_slots` event carrying a JSON
+  `RouteVCLState` snapshot (pool, master VCL name, populated slots). Published
+  after a slot pass only when it differs from the last one. Gauge states:
+  programmed, failed (every populated slot that is not programmed), placeholder
+  (pool minus populated slots inside the pool). Metrics updater and
+  `StateTracker.Run` replay the latest snapshot from the bus ring at start, so
+  a snapshot published before they subscribe is not lost. `SlotResult` gained
+  `Route` and `VCLName`.
+- **Jumps/s is not exported.** Ghost's `VhostStats` live in plain Rust structs
+  and are only surfaced through `backend.list` JSON; there is no VSC segment, so
+  the varnishstat collector has nothing to pick up and no Rust was touched.
+  Docs point at `varnishlog -q 'VCL_use ~ via'` and `MAIN.n_vcl`.
+- Operator: `varnish_gateway_route_vcl_policies{programmed="true|false"}`,
+  counted from `status.ancestors` under our controller name (Programmed=True is
+  `true`, everything else `false`). Silent when the kind is not served or not
+  registered.
+
+### Dashboard
+
+- New "Route VCL" panel (hidden while the pool is 0 / no snapshot yet): pool
+  size, programmed, compile failed, placeholder counts, master VCL name and a
+  table of slot, policy, route, VCL name, state, error. `/api/state` gains
+  `routeVcl`. The snapshot event is not shown in the event log; route VCL
+  reload events are ("Route VCL" / "Route VCL Fail").
+- A programmed-then-failed slot (previous version still serving) is shown as
+  "compile failed" with its previous VCL name.
+
+### Docs
+
+`docs/reference/route-vcl-caveats.md` (nav under Reference), links from
+varnishvclpolicy.md; observability.md (chaperone and operator metrics,
+dashboard, jumps/s note), reload-paths.md (third hot path + diagram),
+gatewayclassparameters.md env table. `make docs-build` created `.venv-docs`
+and built clean (strict).
+
+### Open questions
+
+- The throttle is a rate ceiling rather than a CPU cap; if the intent was to
+  bound CPU use under a 100m request, the default rate should be much lower
+  (about 0.5/s), at the price of ~2 minutes to compile 64 slots at startup.
+  Needs the P8 in-pod measurement on 9.1.0.
+- `master_reloads_total` duplicates the old counters with a label; drop one
+  if that is unwanted.

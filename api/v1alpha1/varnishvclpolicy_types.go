@@ -52,6 +52,12 @@ const (
 	// parent Gateways belongs to a GatewayClass whose GatewayClassParameters
 	// set routeVCL.enabled=true.
 	VCLPolicyReasonDisabled = "Disabled"
+	// VCLPolicyReasonRouteNotAttached is used when route VCL is enabled for
+	// a parent Gateway of the target HTTPRoute, but the route is not
+	// attached to any such Gateway (its status.parents has no Accepted=True
+	// entry from this controller for it, e.g. the listener's allowedRoutes
+	// refuse the route).
+	VCLPolicyReasonRouteNotAttached = "RouteNotAttached"
 
 	// VCLPolicyReasonProgrammed is used with Programmed=True: every live
 	// pod of every route-VCL-enabled parent Gateway reports the current
