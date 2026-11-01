@@ -38,3 +38,17 @@ Other assumptions:
   (`return(vcl(label))`, `vcl.label`, labels always warm, `max_vcl`) predates
   both. P8 must re-run the P1b numbers and the compile tests on 9.1.0 before
   the defaults are called final.
+
+## P2 — API and status (#97)
+
+- `VarnishVCLPolicy` (shortName `vvp`) and `GatewayClassParameters.spec.routeVCL`
+  added. Controller sets `Accepted` only; `Programmed` is reserved (P5/P6).
+- Check order (first failure wins): Invalid (spec) → TargetNotFound →
+  ConfigMapNotFound / Invalid (document > 256 KiB) → Disabled → Conflicted.
+- `routeVCL` is deliberately not in the infra hash (reflect test + envtest).
+- `zz_generated.deepcopy.go` was hand-written, so `make generate` silently did
+  nothing. Added `+kubebuilder:object:generate=true` to `doc.go` and
+  regenerated. Side effect: fixes two shallow copies in the old file
+  (`GatewayClassParametersSpec.Resources`, `VarnishCachePolicyAncestorStatus.AncestorRef`).
+- Operator skips the VVP controller with a warning when the CRD is not
+  installed (Helm does not upgrade CRDs).

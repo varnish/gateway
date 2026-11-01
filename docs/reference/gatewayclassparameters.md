@@ -121,6 +121,31 @@ spec:
       - 198.51.100.0/24
 ```
 
+### spec.routeVCL
+
+!!! warning "API preview, not yet wired to the data plane"
+    The fields are accepted and gate the `Accepted` condition on
+    [VarnishVCLPolicy](varnishvclpolicy.md), but no route VCL reaches the
+    gateway pods yet.
+
+Gates per-HTTPRoute VCL (VarnishVCLPolicy) for Gateways of this class. Off by default.
+
+```yaml
+spec:
+  routeVCL:
+    enabled: true
+    slotPoolSize: 16 # optional
+```
+
+| Field          | Type    | Default | Description                                                                                                                             |
+| -------------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`      | `bool`  | `false` | Turns route VCL on for Gateways of this class. While it is off, every VarnishVCLPolicy on routes of this class reports `Accepted=False`, reason `Disabled`. |
+| `slotPoolSize` | `int32` | `16`    | Pre-allocated VCL label slots per gateway. Each slot holds one route VCL. Range 1–256. |
+
+**Security:** turning this on lets anyone who can create an HTTPRoute in a namespace routed by this class run code inside the gateway pod. Read the [trust statement](varnishvclpolicy.md#trust-statement) before you enable it.
+
+Changing `routeVCL` does **not** trigger a pod restart. A `slotPoolSize` change will recompile the VCL in place once the feature is wired to the data plane. The default (16) and ceiling (256) are provisional and may change before the feature leaves preview.
+
 ## Environment Variables
 
 Chaperone reads these environment variables. The operator sets most of them automatically when it builds the gateway pod, so the "Chaperone default" column documents what chaperone falls back to when run standalone — in operator-managed pods the operator-set value is what you'll see in practice.
