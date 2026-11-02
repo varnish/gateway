@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   drives its backends. One consequence: the 60-second request timeout is no
   longer an overall deadline. The blocking client re-arms it on every read, so
   a trickling upstream can hold a fetch — and its worker thread — open
-  indefinitely. Making both timeouts configurable is tracked separately.
+  indefinitely. Making both timeouts configurable, and restoring an overall
+  deadline, is tracked in #115.
 
 ### Fixed
 
