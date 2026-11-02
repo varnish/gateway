@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The ExternalName backend uses `reqwest::blocking`.** The shared tokio
+  runtime, the per-request task and the chunk channel are gone; the Varnish
+  worker now blocks on `send()` and on body reads, matching how `vmod-reqwest`
+  drives its backends. One consequence: the 60-second request timeout is no
+  longer an overall deadline. The blocking client re-arms it on every read, so
+  a trickling upstream can hold a fetch — and its worker thread — open
+  indefinitely. Making both timeouts configurable is tracked separately.
+
 ### Fixed
 
 - **Ghost no longer keeps the config path in process-global state.** A VMOD
