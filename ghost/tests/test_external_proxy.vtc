@@ -121,3 +121,15 @@ client c2 {
     expect resp.status == 200
     expect resp.body == "ok"
 } -run
+
+# Bodies past the 1 MiB buffer limit are rejected locally with 413. server s1
+# has no exchange left, so forwarding one upstream would fail the test here
+# rather than quietly succeed.
+client c3 {
+    txreq -req POST -url "/media/asset.png" \
+        -hdr "Host: preview.example.com" \
+        -bodylen 2097152
+    rxresp
+    expect resp.status == 413
+    expect resp.http.Cache-Control == "no-store"
+} -run

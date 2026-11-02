@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ExternalName backends forward request bodies.** POST, PUT, PATCH and
+  DELETE to a Service of type `ExternalName` used to be rejected locally with
+  `405 Method Not Allowed`; the body is now read off the client and sent
+  upstream. The body is buffered in memory and capped at 1 MiB — a larger one
+  gets `413 Request Entity Too Large` and the upstream is never contacted. A
+  chunked client body goes upstream with a `Content-Length` and no
+  `Transfer-Encoding`. Reading an uncached body makes the fetch
+  non-retryable, per Varnish's read-once rule; call `std.cache_req_body()` in
+  `vcl_recv` to keep retries.
+
 ### Changed
 
 - **The ExternalName backend uses `reqwest::blocking`.** The shared tokio
