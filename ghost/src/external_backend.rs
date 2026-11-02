@@ -1,29 +1,22 @@
 //! Synthetic backend for Kubernetes ExternalName Services.
 //!
 //! Modelled on `vmod-reqwest`: one synthetic Varnish backend (with stable
-//! VBE stats) fronts a `reqwest::Client` whose connection pool and DNS
-//! resolver hide rotating cloud IPs from Varnish.
+//! VBE stats) fronts a `reqwest::blocking::Client` whose connection pool and
+//! DNS resolver hide rotating cloud IPs from Varnish. The blocking client
+//! runs its own internal runtime thread, so the Varnish worker simply blocks
+//! on `send()` and on body reads.
 
-use std::io::Write;
-use std::sync::OnceLock;
+use std::io::{Read, Write};
 use std::time::Duration;
 
-use bytes::Bytes;
+use reqwest::blocking::{Client, Response};
 use reqwest::header::HeaderName;
-use reqwest::Client;
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc::{Receiver, Sender};
 use varnish::vcl::{Ctx, StrOrBytes, VclBackend, VclError, VclResponse};
 
 use crate::config::ExternalProxy;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Per-stream chunk channel size. Roughly bounds in-flight buffered bytes
-/// per response to `CHUNK_CHANNEL_SIZE * reqwest_chunk_size` (~512KB at
-/// reqwest's 16KB default), giving backpressure without starving the stream.
-const CHUNK_CHANNEL_SIZE: usize = 32;
 
 /// Methods the synthetic backend will forward. Anything else is rejected
 /// with 405 because we cannot stream a request body through the current
@@ -33,80 +26,6 @@ const ALLOWED_METHODS: &str = "GET, HEAD, OPTIONS";
 /// Body returned with the synthetic 405 so curl/log readers see why.
 const METHOD_NOT_ALLOWED_BODY: &[u8] =
     b"external proxy backend does not forward request bodies; allowed methods: GET, HEAD, OPTIONS\n";
-
-/// Background tokio runtime shared by all external-proxy backends.
-struct BgThread {
-    /// Held only for its destructor — dropping it stops the runtime.
-    #[allow(dead_code)]
-    rt: Runtime,
-}
-
-enum RespMsg {
-    Headers(HeadersFrame),
-    Chunk(Bytes),
-    Err(String),
-}
-
-struct HeadersFrame {
-    status: u16,
-    headers: reqwest::header::HeaderMap,
-    content_length: Option<u64>,
-}
-
-static BG_THREAD: OnceLock<BgThread> = OnceLock::new();
-
-fn bgt() -> &'static BgThread {
-    BG_THREAD.get_or_init(|| {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("ghost-external-proxy")
-            .build()
-            .expect("ghost: failed to start tokio runtime for external proxy");
-        BgThread { rt }
-    })
-}
-
-/// Warm the shared tokio runtime so the first request doesn't pay startup cost.
-pub fn warm_runtime() {
-    let _ = bgt();
-}
-
-async fn process_request(client: Client, request: reqwest::Request, resp_tx: Sender<RespMsg>) {
-    let mut resp = match client.execute(request).await {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = resp_tx.send(RespMsg::Err(format!("external proxy: {}", e))).await;
-            return;
-        }
-    };
-
-    let frame = HeadersFrame {
-        status: resp.status().as_u16(),
-        headers: resp.headers().clone(),
-        content_length: resp.content_length(),
-    };
-    if resp_tx.send(RespMsg::Headers(frame)).await.is_err() {
-        return;
-    }
-
-    loop {
-        match resp.chunk().await {
-            Ok(None) => return,
-            Ok(Some(bytes)) => {
-                if resp_tx.send(RespMsg::Chunk(bytes)).await.is_err() {
-                    return;
-                }
-            }
-            Err(e) => {
-                let _ = resp_tx
-                    .send(RespMsg::Err(format!("external proxy chunk: {}", e)))
-                    .await;
-                return;
-            }
-        }
-    }
-}
 
 /// Synthetic backend that proxies requests via `reqwest` to a single upstream
 /// hostname. One `ExternalBackend` per unique (hostname, port, tls) tuple —
@@ -121,7 +40,9 @@ pub struct ExternalBackend {
 impl ExternalBackend {
     pub fn new(proxy: &ExternalProxy) -> Result<Self, VclError> {
         if proxy.hostname.is_empty() {
-            return Err(VclError::new("external_proxy: hostname is empty".to_string()));
+            return Err(VclError::new(
+                "external_proxy: hostname is empty".to_string(),
+            ));
         }
         if proxy.port == 0 {
             return Err(VclError::new("external_proxy: port is zero".to_string()));
@@ -133,7 +54,7 @@ impl ExternalBackend {
         // Auto-decompression is intentionally not enabled (feature not
         // compiled in) so proxied bytes pass through unmodified and Varnish
         // can cache the wire representation.
-        let client = reqwest::ClientBuilder::new()
+        let client = reqwest::blocking::ClientBuilder::new()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
             .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
             // Surface 30x to the cache layer instead of following.
@@ -218,32 +139,29 @@ impl VclBackend<ExternalBody> for ExternalBackend {
         }
         req_builder = req_builder.header("host", &self.upstream_host);
 
-        let request = req_builder
-            .build()
-            .map_err(|e| VclError::new(format!("external_proxy: build request: {}", e)))?;
+        let resp = req_builder
+            .send()
+            .map_err(|e| VclError::new(format!("external proxy: {}", e)))?;
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<RespMsg>(CHUNK_CHANNEL_SIZE);
-        bgt().rt.spawn(process_request(self.client.clone(), request, tx));
-
-        let headers_frame = match rx.blocking_recv() {
-            Some(RespMsg::Headers(f)) => f,
-            Some(RespMsg::Err(e)) => return Err(VclError::new(e)),
-            // process_request always emits Headers exactly once before any
-            // Chunk and never returns None before sending something.
-            Some(RespMsg::Chunk(_)) | None => {
-                return Err(VclError::new(
-                    "external_proxy: response stream invariant violated".to_string(),
-                ))
-            }
-        };
+        let content_length = resp
+            .content_length()
+            .map(|c| {
+                usize::try_from(c).map_err(|e| {
+                    VclError::new(format!(
+                        "external_proxy: invalid content-length ({}): {}",
+                        c, e
+                    ))
+                })
+            })
+            .transpose()?;
 
         let beresp = ctx
             .http_beresp
             .as_mut()
             .ok_or_else(|| VclError::new("external_proxy: missing beresp".to_string()))?;
-        beresp.set_status(headers_frame.status);
+        beresp.set_status(resp.status().as_u16());
         beresp.set_proto("HTTP/1.1")?;
-        for (k, v) in headers_frame.headers.iter() {
+        for (k, v) in resp.headers() {
             if is_hop_by_hop(k.as_str()) {
                 continue;
             }
@@ -252,15 +170,12 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             }
         }
 
-        Ok(Some(ExternalBody::streamed(
-            rx,
-            headers_frame.content_length.map(|c| c as usize),
-        )))
+        Ok(Some(ExternalBody::streamed(resp, content_length)))
     }
 }
 
-/// Response body for a synthetic backend. Either streams chunks from the
-/// tokio runtime (upstream success path) or serves a fixed static buffer
+/// Response body for a synthetic backend. Either streams the upstream
+/// `reqwest` response (success path) or serves a fixed static buffer
 /// (locally generated responses like the 405 rejection).
 pub struct ExternalBody {
     state: BodyState,
@@ -268,9 +183,7 @@ pub struct ExternalBody {
 
 enum BodyState {
     Streamed {
-        chan: Receiver<RespMsg>,
-        current: Option<Bytes>,
-        cursor: usize,
+        resp: Response,
         content_length: Option<usize>,
     },
     Static {
@@ -280,12 +193,10 @@ enum BodyState {
 }
 
 impl ExternalBody {
-    fn streamed(chan: Receiver<RespMsg>, content_length: Option<usize>) -> Self {
+    fn streamed(resp: Response, content_length: Option<usize>) -> Self {
         Self {
             state: BodyState::Streamed {
-                chan,
-                current: None,
-                cursor: 0,
+                resp,
                 content_length,
             },
         }
@@ -301,46 +212,9 @@ impl ExternalBody {
 impl VclResponse for ExternalBody {
     fn read(&mut self, mut buf: &mut [u8]) -> Result<usize, VclError> {
         match &mut self.state {
-            BodyState::Streamed {
-                chan,
-                current,
-                cursor,
-                ..
-            } => {
-                let mut total = 0;
-                loop {
-                    if current.is_none() {
-                        match chan.blocking_recv() {
-                            Some(RespMsg::Chunk(bytes)) => {
-                                *current = Some(bytes);
-                                *cursor = 0;
-                            }
-                            Some(RespMsg::Err(e)) => return Err(VclError::new(e)),
-                            None => return Ok(total),
-                            // process_request only emits Headers once, before chunks.
-                            Some(RespMsg::Headers(_)) => {
-                                return Err(VclError::new(
-                                    "external_proxy: response stream invariant violated"
-                                        .to_string(),
-                                ));
-                            }
-                        }
-                    }
-                    let chunk = current.as_ref().unwrap();
-                    let remaining = &chunk[*cursor..];
-                    let n = buf.write(remaining).map_err(|e| {
-                        VclError::new(format!("external_proxy: body write: {}", e))
-                    })?;
-                    *cursor += n;
-                    total += n;
-                    if *cursor >= chunk.len() {
-                        *current = None;
-                    }
-                    if buf.is_empty() {
-                        return Ok(total);
-                    }
-                }
-            }
+            BodyState::Streamed { resp, .. } => resp
+                .read(buf)
+                .map_err(|e| VclError::new(format!("external proxy chunk: {}", e))),
             BodyState::Static { data, cursor } => {
                 let remaining = &data[*cursor..];
                 let n = buf
