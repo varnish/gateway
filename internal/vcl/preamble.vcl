@@ -108,6 +108,22 @@ sub vcl_backend_fetch {
     unset bereq.http.X-Ghost-Pass;
 }
 
+sub vcl_pipe {
+    # Piped requests skip vcl_backend_fetch and vcl_backend_response, so the
+    # internal control headers set by ghost in vcl_recv would reach the origin.
+    # Strip them here. Deliberately no return statement: user VCL appended
+    # after this must still run.
+    unset bereq.http.X-Ghost-Pass;
+    unset bereq.http.X-Ghost-Forced-TTL;
+    unset bereq.http.X-Ghost-Default-TTL;
+    unset bereq.http.X-Ghost-Grace;
+    unset bereq.http.X-Ghost-Keep;
+    unset bereq.http.X-Ghost-Cache-Key-Extra;
+    unset bereq.http.X-Ghost-Filter-Context;
+    unset bereq.http.X-Ghost-Redirect-Config;
+    unset bereq.http.X-Ghost-Error;
+}
+
 sub vcl_backend_response {
     # Store host and URL on cached object for ban lurker.
     # The ban expression matches against these headers for efficient background invalidation.
@@ -125,9 +141,16 @@ sub vcl_backend_response {
     # responses that Varnish has already marked uncacheable.
     if (bereq.http.X-Ghost-Forced-TTL) {
         set beresp.ttl = std.duration(bereq.http.X-Ghost-Forced-TTL, 0s);
-        unset beresp.http.Set-Cookie;
-        unset beresp.http.Cache-Control;
-        unset beresp.http.Expires;
+        # Only strip origin caching/cookie headers when the response is going
+        # to be cached. On a pass (bereq.uncacheable is true for pass
+        # transactions, whoever decided the pass: ghost, a bypass header or
+        # user VCL) the response goes to one client only and Set-Cookie must
+        # be preserved. beresp.uncacheable is checked as well for safety.
+        if (!bereq.uncacheable && !beresp.uncacheable) {
+            unset beresp.http.Set-Cookie;
+            unset beresp.http.Cache-Control;
+            unset beresp.http.Expires;
+        }
     }
     # Apply cache policy: default TTL when origin has no Cache-Control
     else if (bereq.http.X-Ghost-Default-TTL) {
