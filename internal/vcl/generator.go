@@ -17,12 +17,17 @@ var preambleVCL string
 var postambleVCL string
 
 // DefaultGhostConfigPath is the default location for ghost.json.
+//
+// Generate interpolates this into a VCL string literal without escaping. It
+// must stay a constant; do not make it configurable without escaping it for
+// VCL (quotes, backslashes, newlines) first.
 const DefaultGhostConfigPath = "/var/run/varnish/ghost.json"
 
 // Generate produces VCL preamble that integrates with the ghost VMOD.
 // The ghost VMOD handles all routing logic internally; VCL just initializes it.
-// The VCL template is embedded from preamble.vcl. The ghost config path is a
-// compile-time constant, so interpolating it into the template is safe.
+// The VCL template is embedded from preamble.vcl. The ghost config path is
+// interpolated unescaped, which is only safe because it is a constant; see
+// DefaultGhostConfigPath.
 func Generate() string {
 	return fmt.Sprintf(preambleVCL, DefaultGhostConfigPath)
 }

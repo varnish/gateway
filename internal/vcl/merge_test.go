@@ -94,7 +94,7 @@ func TestMerge_UserVCLWithImports(t *testing.T) {
 import ghost;
 
 sub vcl_init {
-    ghost.init("/var/run/varnish/ghost.json");
+    new router = ghost.ghost_backend("/var/run/varnish/ghost.json");
 }
 `
 	userVCL := `vcl 4.1;

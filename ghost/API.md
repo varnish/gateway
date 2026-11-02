@@ -23,13 +23,6 @@ import ghost;
 import ghost from "path/to/libghost.so";
 ```
 
-### Function `VOID ghost.init(STRING path)`
-
-Initialize ghost with a configuration file path.
-
-Must be called in `vcl_init` before creating any ghost backends.
-The config file is not loaded here — it will be loaded when `ghost_backend` is created.
-
 ### Function `STRING ghost.recv()`
 
 Pre-routing hook for `vcl_recv`. Currently a no-op, reserved for future use.
@@ -48,18 +41,18 @@ Ghost backend object for request routing.
 Routes requests to upstream servers based on the Host header and loaded
 configuration. Performs weighted random backend selection per-vhost.
 
-### Constructor `ghost.ghost_backend()`
+### Constructor `ghost.ghost_backend(STRING config_path)`
 
-Create a new ghost backend instance.
+Create a new ghost backend instance reading `config_path`.
 
-Must be called after `ghost.init()` has been called. If the config
-file (ghost.json) already exists on disk, routing state is loaded
-immediately. Otherwise the director starts empty and backends will
-be populated on the first `reload()` call from chaperone.
+If the config file (ghost.json) already exists on disk, routing
+state is loaded immediately. Otherwise the director starts empty and
+backends are populated on the first `reload()` from chaperone.
 
-#### Errors
-
-Returns an error if `ghost.init()` has not been called first.
+The path is per-instance rather than process-global: a VMOD `.so` is
+`dlopen`ed once per process, so several VCLs importing ghost share
+all statics, and a single global config path would be whatever the
+most recently loaded VCL happened to set.
 
 ### Method `BACKEND <object>.recv()`
 
@@ -95,6 +88,10 @@ Reload the configuration from disk.
 Reads `ghost.json`, builds new routing state, and atomically swaps it in.
 Existing backends are preserved for connection reuse.
 Returns `true` on success, `false` on failure (see `last_error()`).
+
+Any ghost instance in another loaded VCL picks the new config up on
+its own next request — this endpoint only ever runs in the active
+VCL, so it cannot reload them directly.
 
 ### Method `STRING <object>.last_error()`
 

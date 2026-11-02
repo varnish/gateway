@@ -45,7 +45,7 @@ for the full field reference and worked examples.
 
 Ghost hooks into several VCL subroutines:
 
-- `vcl_init` — construct the router (`ghost.init`, `new router = ghost.ghost_backend()`).
+- `vcl_init` — construct the router (`new router = ghost.ghost_backend("<ghost.json>")`).
 - `vcl_recv` — the main routing decision (`router.recv()`), which picks
   the backend and sets the per-request cache policy.
 - Backend fetch — the router acts as a VCL backend; ghost's

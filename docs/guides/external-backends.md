@@ -149,8 +149,12 @@ many IP addresses the external hostname resolves to. The underlying
 - **No health checking.** Ghost does not probe external backends. Failed
   requests surface as Varnish backend errors (typically a 503 to the
   client).
-- **Timeouts are fixed.** Connect timeout is 10 seconds and overall request
-  timeout is 60 seconds. Neither is currently configurable.
+- **Timeouts are fixed and there is no overall request deadline.** The
+  connect timeout is 10 seconds. A 60-second timeout applies to establishing
+  the request and to each read of the response body, but it is re-armed on
+  every read — an upstream that keeps trickling bytes can hold a fetch open
+  indefinitely. Each such fetch occupies a Varnish worker thread for its
+  whole lifetime. Neither timeout is currently configurable.
 
 ## See also
 

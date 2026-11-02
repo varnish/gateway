@@ -331,7 +331,7 @@ github.com/perbu/vclparser        # optional: VCL syntax validation
 VCL allows multiple definitions of the same subroutine - they get concatenated at compile time. We use this
 to avoid parsing user VCL:
 
-1. Generated VCL includes: ghost import, `vcl_init` (ghost.init, router creation), `vcl_recv` (ghost.recv), `vcl_backend_fetch` (router.backend)
+1. Generated VCL includes: ghost import, `vcl_init` (router creation), `vcl_recv` (ghost.recv), `vcl_backend_fetch` (router.backend)
 2. User VCL is appended after the generated VCL
 3. If user defines the same subroutines, their code runs *after* the gateway code
 

@@ -1,0 +1,135 @@
+varnishtest "a ghost instance in a labelled VCL picks up a reload it never saw"
+
+# The reload endpoint only ever runs in the active VCL, so a ghost instance
+# living in a labelled per-route VCL is never asked to reload directly. It has
+# to notice the published reload epoch and catch up on its own next request.
+
+server s1 {
+    rxreq
+    txresp -body "before-reload"
+} -start
+
+server s2 {
+    rxreq
+    txresp -body "after-reload"
+} -start
+
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "app.example.com": {
+            "routes": [
+                {
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s1_addr}", "port": ${s1_port}}
+                        ]}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+# The per-route VCL, with its own ghost instance on the same config file.
+varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        new route_router = ghost.ghost_backend("${tmpdir}/ghost.json");
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = route_router.recv();
+    }
+
+    sub vcl_deliver {
+        set resp.http.X-Which-VCL = "route";
+    }
+} -start
+
+varnish v1 -cliok "vcl.label routelbl vcl1"
+
+# The master VCL: owns the reload endpoint, jumps to the route VCL on demand.
+varnish v1 -vcl {
+    import ghost from "${vmod}";
+
+    backend dummy none;
+
+    sub vcl_init {
+        new router = ghost.ghost_backend("${tmpdir}/ghost.json");
+    }
+
+    sub vcl_recv {
+        if (req.url == "/.varnish-ghost/reload") {
+            if (router.reload()) {
+                return (synth(200, "OK"));
+            } else {
+                set req.http.X-Ghost-Error = router.last_error();
+                return (synth(500, "Reload failed"));
+            }
+        }
+        if (req.http.Jump) {
+            return (vcl(routelbl));
+        }
+        set req.backend_hint = router.recv();
+    }
+
+    sub vcl_deliver {
+        set resp.http.X-Which-VCL = "master";
+    }
+}
+
+# The labelled instance loaded the config when it was constructed.
+client c1 {
+    txreq -url "/a" -hdr "Host: app.example.com" -hdr "Jump: 1"
+    rxresp
+    expect resp.http.X-Which-VCL == "route"
+    expect resp.body == "before-reload"
+} -run
+
+# Point the same config file at the other backend.
+shell {
+    cat > ${tmpdir}/ghost.json <<EOF
+{
+    "version": 2,
+    "vhosts": {
+        "app.example.com": {
+            "routes": [
+                {
+                    "backend_groups": [
+                        {"weight": 100, "backends": [
+                            {"address": "${s2_addr}", "port": ${s2_port}}
+                        ]}
+                    ],
+                    "priority": 100
+                }
+            ]
+        }
+    }
+}
+EOF
+}
+
+# Reload is handled by the master's instance only.
+client c2 {
+    txreq -url "/.varnish-ghost/reload"
+    rxresp
+    expect resp.status == 200
+} -run
+
+# The labelled VCL's instance was never reloaded directly, but must now route
+# to the new backend.
+client c3 {
+    txreq -url "/b" -hdr "Host: app.example.com" -hdr "Jump: 1"
+    rxresp
+    expect resp.http.X-Which-VCL == "route"
+    expect resp.body == "after-reload"
+} -run

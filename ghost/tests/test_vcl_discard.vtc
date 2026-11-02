@@ -41,8 +41,7 @@ varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
     backend dummy none;
 
     sub vcl_init {
-        ghost.init("${tmpdir}/ghost.json");
-        new router = ghost.ghost_backend();
+        new router = ghost.ghost_backend("${tmpdir}/ghost.json");
     }
     sub vcl_recv {
         if (req.url == "/.varnish-ghost/reload") {
@@ -73,8 +72,7 @@ varnish v1 -vcl {
     backend dummy none;
 
     sub vcl_init {
-        ghost.init("${tmpdir}/ghost.json");
-        new router = ghost.ghost_backend();
+        new router = ghost.ghost_backend("${tmpdir}/ghost.json");
     }
     sub vcl_recv {
         if (req.url == "/.varnish-ghost/reload") {

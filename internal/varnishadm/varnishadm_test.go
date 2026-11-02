@@ -651,3 +651,35 @@ without proper format`,
 		})
 	}
 }
+
+// TestExecConnectionLostWhileCommandInFlight covers the path where varnishd
+// drops the connection after a command has been queued but before any result
+// comes back, including tryRead's empty-channel branch.
+//
+// The ordering is forced rather than raced: the session is open while Exec
+// queues the request, and is only closed once this test has taken that request
+// off reqCh. Nothing is ever sent on the response channel and done is never
+// closed, so Exec's second select has exactly one ready case. Reaching these
+// lines by racing a real disconnect instead makes their coverage a coin flip.
+func TestExecConnectionLostWhileCommandInFlight(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	v := New(6082, "secret", logger, WithTimeouts(5*time.Second, 0, 0))
+
+	session := make(chan struct{})
+	v.stateMu.Lock()
+	v.session = session
+	v.stateMu.Unlock()
+
+	go func() {
+		<-v.reqCh // the command is queued; Exec is now waiting for a result
+		close(session)
+	}()
+
+	_, err := v.Exec("ping")
+	if err == nil {
+		t.Fatal("Exec() succeeded, want a connection-lost error")
+	}
+	if !strings.Contains(err.Error(), "connection lost while command was in flight") {
+		t.Fatalf("Exec() error = %v, want connection lost while command was in flight", err)
+	}
+}

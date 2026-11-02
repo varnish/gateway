@@ -39,11 +39,8 @@ func TestGenerate_GhostPreamble(t *testing.T) {
 	if !strings.Contains(result, "sub vcl_init {") {
 		t.Error("expected vcl_init subroutine")
 	}
-	if !strings.Contains(result, "ghost.init(") {
-		t.Error("expected ghost.init call")
-	}
-	if !strings.Contains(result, "new router = ghost.ghost_backend()") {
-		t.Error("expected ghost_backend initialization")
+	if !strings.Contains(result, `new router = ghost.ghost_backend("`+DefaultGhostConfigPath+`")`) {
+		t.Error("expected ghost_backend initialization with the ghost.json path")
 	}
 
 	// Check vcl_recv for reload interception
