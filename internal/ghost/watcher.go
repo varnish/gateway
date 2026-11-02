@@ -43,10 +43,19 @@ type Watcher struct {
 	// Fatal error channel for reload failures
 	fatalErrCh chan error
 
+	// regenCh carries regeneration requests from informer callbacks to the
+	// single regeneration worker (see runRegenerateLoop). Buffered with
+	// capacity 1 so requests made while one is already pending coalesce.
+	regenCh chan struct{}
+
+	// retryBackoffs are the waits between failed regeneration attempts.
+	retryBackoffs []time.Duration
+
 	// Internal state protected by mutex
 	mu              sync.RWMutex
 	initialSyncDone bool                  // true after initial EndpointSlice sync
 	routingConfig   *RoutingConfig        // current routing rules
+	routingGen      uint64                // bumped every time routingConfig is replaced
 	endpoints       map[string][]Endpoint // service key -> endpoints
 	serviceWatch    map[string]struct{}   // services we care about (namespace/name)
 
@@ -86,6 +95,8 @@ func NewWatcher(
 		reloadClient:    reload.NewClient(varnishAddr),
 		readyCh:         make(chan struct{}),
 		fatalErrCh:      make(chan error, 1), // buffered to avoid blocking
+		regenCh:         make(chan struct{}, 1),
+		retryBackoffs:   []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second},
 		endpoints:       make(map[string][]Endpoint),
 		serviceWatch:    make(map[string]struct{}),
 	}
@@ -244,6 +255,13 @@ func (w *Watcher) Run(ctx context.Context, varnishReady <-chan struct{}) error {
 		close(w.readyCh)
 	})
 
+	// From here on, informer callbacks only request a regeneration; this
+	// worker performs it. Started after the initial reload so the two never
+	// run concurrently. Requests made in between are buffered in regenCh.
+	loopCtx, stopLoop := context.WithCancel(ctx)
+	defer stopLoop()
+	go w.runRegenerateLoop(loopCtx)
+
 	// Wait for context cancellation or fatal error
 	// ConfigMap and EndpointSlice updates are handled by informer callbacks
 	select {
@@ -338,8 +356,7 @@ func (w *Watcher) handleEndpointSliceUpdate(ctx context.Context, slice *discover
 		return
 	}
 
-	// Regenerate ghost.json with retry
-	w.regenerateConfigWithRetry(ctx)
+	w.requestRegenerate()
 }
 
 // handleEndpointSliceDelete processes an EndpointSlice delete event.
@@ -392,41 +409,85 @@ func (w *Watcher) handleEndpointSliceDelete(ctx context.Context, slice *discover
 		return
 	}
 
-	// Regenerate ghost.json with retry
-	w.regenerateConfigWithRetry(ctx)
+	w.requestRegenerate()
 }
 
-// regenerateConfigWithRetry retries regenerateConfig up to 3 times with exponential
-// backoff (500ms, 1s, 2s) before sending a fatal error. This prevents transient reload
+// requestRegenerate asks the regeneration worker to rebuild ghost.json and
+// reload ghost. It never blocks: informer callbacks are delivered serially per
+// handler, so blocking here (as the retry backoff used to) would stall every
+// later event of that informer — including the ConfigMap update that fixes a
+// bad config. Requests made while one is already pending coalesce, which is
+// safe because regenerateConfig always reads the latest state.
+func (w *Watcher) requestRegenerate() {
+	select {
+	case w.regenCh <- struct{}{}:
+	default:
+	}
+}
+
+// runRegenerateLoop serves regeneration requests one at a time until ctx is
+// done. Being the only caller of regenerateConfigWithRetry after startup, it
+// also keeps ghost.json writes and reloads from racing each other.
+func (w *Watcher) runRegenerateLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.regenCh:
+			w.regenerateConfigWithRetry(ctx)
+		}
+	}
+}
+
+// routingGeneration returns the current routing config generation.
+func (w *Watcher) routingGeneration() uint64 {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.routingGen
+}
+
+// regenerateConfigWithRetry retries regenerateConfig with backoff (by default
+// 500ms, 1s, 2s) before sending a fatal error. This prevents transient reload
 // failures (e.g., ghost temporarily unavailable) from crashing the watcher.
+//
+// Every attempt reads the current routing config, and since informer callbacks
+// are not blocked meanwhile, a ConfigMap update that lands during the backoff
+// is used by the next attempt. Such an update also resets the retry budget:
+// it is a new config, so failures of the previous one say nothing about it.
+// Endpoint changes do not reset the budget, so a persistently failing reload
+// still ends in a fatal error under endpoint churn.
 func (w *Watcher) regenerateConfigWithRetry(ctx context.Context) {
-	backoffs := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
-	var lastErr error
-	for attempt := 0; attempt <= len(backoffs); attempt++ {
-		if err := w.regenerateConfig(ctx); err != nil {
-			lastErr = err
-			if attempt < len(backoffs) {
-				w.logger.Warn("ghost reload failed, retrying",
-					"error", err,
-					"attempt", attempt+1,
-					"backoff", backoffs[attempt],
-				)
-				select {
-				case <-time.After(backoffs[attempt]):
-				case <-ctx.Done():
-					w.notifyFatal(err)
-					return
-				}
-				continue
-			}
+	gen := w.routingGeneration()
+	attempt := 0
+	for {
+		err := w.regenerateConfig(ctx)
+		if err == nil {
+			return
+		}
+		if attempt >= len(w.retryBackoffs) {
 			w.logger.Error("ghost reload failed after all retries", "error", err)
 			w.notifyFatal(err)
 			return
 		}
-		return // success
+		backoff := w.retryBackoffs[attempt]
+		attempt++
+		w.logger.Warn("ghost reload failed, retrying",
+			"error", err,
+			"attempt", attempt,
+			"backoff", backoff,
+		)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			// Shutting down; nothing left to keep in sync.
+			return
+		}
+		if g := w.routingGeneration(); g != gen {
+			w.logger.Info("routing config changed during reload retries, restarting retry budget")
+			gen = g
+			attempt = 0
+		}
 	}
-	// Should not reach here, but just in case
-	w.notifyFatal(lastErr)
 }
 
 // regenerateConfig generates and writes ghost.json, then triggers a reload.
@@ -620,6 +681,7 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 	w.mu.Lock()
 	oldServiceWatch := w.serviceWatch
 	w.routingConfig = config
+	w.routingGen++
 	w.updateServiceWatch(config)
 
 	// Prune endpoints for services no longer watched
@@ -647,8 +709,7 @@ func (w *Watcher) handleConfigMapUpdate(ctx context.Context, cm *corev1.ConfigMa
 		return
 	}
 
-	// Regenerate ghost.json and trigger reload with retry
-	w.regenerateConfigWithRetry(ctx)
+	w.requestRegenerate()
 }
 
 // backfillEndpoints queries the EndpointSlice lister for services that are newly watched
