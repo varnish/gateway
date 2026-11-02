@@ -135,9 +135,20 @@ many IP addresses the external hostname resolves to. The underlying
 
 ## Limitations
 
-- **Request bodies are buffered.** Ghost reads the whole request body
-  into memory before contacting the upstream, so very large uploads cost
-  memory proportional to their size.
+- **Request bodies are buffered, and capped at 1 MiB.** Ghost reads the
+  whole request body into memory before contacting the upstream, because
+  reqwest's blocking client needs an owned body. A request whose body
+  exceeds 1 MiB is answered with `413 Request Entity Too Large` and the
+  upstream is never contacted; ghost emits an `Error` line in
+  `varnishlog`. The limit is a compile-time constant today — making it
+  configurable is tracked in
+  [#115](https://github.com/varnish/gateway/issues/115) along with the
+  timeouts.
+- **Forwarding a body disables fetch retries.** Per Varnish's own rule an
+  uncached request body can be read exactly once, so reading it marks the
+  fetch non-retryable. Call `std.cache_req_body()` in your `vcl_recv` if
+  you need an ExternalName fetch with a body to stay retryable — ghost
+  reads the cached copy and retries keep working.
 - **`BackendTLSPolicy` is ignored** for ExternalName Services — custom CA
   pinning and SNI override are not currently supported. TLS is on/off based
   on `appProtocol` only.

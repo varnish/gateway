@@ -6,17 +6,26 @@
 //! runs its own internal runtime thread, so the Varnish worker simply blocks
 //! on `send()` and on body reads.
 
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::time::Duration;
 
 use reqwest::blocking::{Client, Response};
 use reqwest::header::HeaderName;
-use varnish::vcl::{BodyState, Ctx, StrOrBytes, VclBackend, VclError, VclResponse};
+use varnish::vcl::{BodyState, Ctx, LogTag, StrOrBytes, VclBackend, VclError, VclResponse};
 
 use crate::config::ExternalProxy;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Largest request body forwarded to an ExternalName upstream.
+///
+/// reqwest's blocking body has to be `Send + 'static`, so a body cannot be
+/// streamed straight off the client — it lands in a `Vec` on the worker's heap
+/// first. Without a cap, one client's upload sizes an allocation on a data
+/// plane shared by every Gateway. Anything larger is rejected with 413 and the
+/// upstream is never contacted.
+const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 /// Synthetic backend that proxies requests via `reqwest` to a single upstream
 /// hostname. One `ExternalBackend` per unique (hostname, port, tls) tuple —
@@ -90,12 +99,48 @@ impl VclBackend<ExternalBody> for ExternalBackend {
 
         // The request body is buffered: reqwest's blocking body must be
         // `Send + 'static`, which a reader borrowing `ctx` can't be.
-        let body = if ctx.req_body_state()? != BodyState::None {
-            let mut buf = Vec::new();
-            ctx.req_body(&mut buf)?;
-            Some(buf)
-        } else {
-            None
+        let body = match ctx.req_body_state()? {
+            BodyState::None => None,
+            // `Cached` (after `std.cache_req_body()`, or on a retried fetch)
+            // reads from the stored object; the rest stream off the client and
+            // can only be read once — which is why reading here also clears
+            // `bereq`'s retryability. See `Ctx::req_body`.
+            BodyState::Cached | BodyState::Length | BodyState::Chunked | BodyState::Eof => {
+                let mut buf = LimitedBuffer::new(MAX_REQUEST_BODY_BYTES);
+                match ctx.req_body(&mut buf) {
+                    Ok(_) => Some(buf.into_inner()),
+                    // The writer stopped the copy, so the upstream never sees a
+                    // truncated body. 413 is the honest answer; a VclError here
+                    // would surface as a 503 and send operators after the
+                    // upstream for what is a client-side problem.
+                    Err(_) if buf.overflowed() => {
+                        ctx.log(
+                            LogTag::Error,
+                            format!(
+                                "external_proxy: request body exceeds {} bytes, rejecting with 413",
+                                MAX_REQUEST_BODY_BYTES
+                            ),
+                        );
+                        let beresp = ctx.http_beresp.as_mut().ok_or_else(|| {
+                            VclError::new("external_proxy: missing beresp".to_string())
+                        })?;
+                        beresp.set_status(413);
+                        beresp.set_proto("HTTP/1.1")?;
+                        beresp.set_header("Cache-Control", "no-store")?;
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // Someone already consumed the body (user VCL, say) or the client
+            // stream failed. Reading would hand the upstream an empty body and
+            // make a truncated request look like a normal one.
+            state @ (BodyState::Taken | BodyState::Error) => {
+                return Err(VclError::new(format!(
+                    "external_proxy: request body unavailable ({:?}); it was consumed or failed before the fetch",
+                    state
+                )));
+            }
         };
 
         let url = format!("{}{}", self.base_url, path);
@@ -166,6 +211,53 @@ impl VclResponse for ExternalBody {
 
     fn len(&self) -> Option<usize> {
         self.content_length
+    }
+}
+
+/// `Write` sink that buffers at most `limit` bytes and then refuses the rest.
+///
+/// `Ctx::req_body` turns a writer error into a `VclError` and stops iterating,
+/// so failing here aborts the copy rather than letting an oversized body grow
+/// the worker's heap. The bytes already read are dropped with the buffer.
+struct LimitedBuffer {
+    buf: Vec<u8>,
+    limit: usize,
+    overflowed: bool,
+}
+
+impl LimitedBuffer {
+    fn new(limit: usize) -> Self {
+        Self {
+            buf: Vec::new(),
+            limit,
+            overflowed: false,
+        }
+    }
+
+    fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+impl Write for LimitedBuffer {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        if self.buf.len().saturating_add(data.len()) > self.limit {
+            self.overflowed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request body exceeds the external-proxy buffer limit",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -240,6 +332,36 @@ mod tests {
         assert!(forward_client_header("User-Agent"));
         assert!(forward_client_header("Authorization"));
         assert!(forward_client_header("X-Amz-Date"));
+    }
+
+    #[test]
+    fn limited_buffer_accepts_up_to_the_limit() {
+        let mut buf = LimitedBuffer::new(8);
+        buf.write_all(b"1234").unwrap();
+        buf.write_all(b"5678").unwrap();
+        assert!(!buf.overflowed());
+        assert_eq!(buf.into_inner(), b"12345678");
+    }
+
+    #[test]
+    fn limited_buffer_refuses_the_write_that_would_exceed_the_limit() {
+        let mut buf = LimitedBuffer::new(8);
+        buf.write_all(b"12345").unwrap();
+
+        // The whole write is refused rather than truncated, so a caller that
+        // ignores the error can't mistake a partial body for a complete one.
+        let err = buf.write_all(b"6789").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(buf.overflowed());
+        assert_eq!(buf.into_inner(), b"12345");
+    }
+
+    #[test]
+    fn limited_buffer_refuses_a_single_oversized_write() {
+        let mut buf = LimitedBuffer::new(4);
+        assert!(buf.write_all(b"too long").is_err());
+        assert!(buf.overflowed());
+        assert!(buf.into_inner().is_empty());
     }
 
     #[test]
