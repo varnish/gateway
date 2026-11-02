@@ -173,6 +173,14 @@ backoff (500ms, 1s, 2s). Each attempt uses the newest routing config. If the
 routing config changes during the retries, the retry budget starts over. When
 the retries run out, chaperone exits and the pod restarts.
 
+The budget only runs out while the routing config holds still. A ConfigMap
+that keeps changing — each version still unloadable — resets the budget on
+every update, so chaperone retries indefinitely instead of exiting. That is
+deliberate: every attempt uses the newest config, so the gateway heals on the
+first good one without a restart. EndpointSlice churn does not reset the
+budget, so a reload that fails for reasons other than the routing config
+still ends in a restart.
+
 A rolling restart that produces an unschedulable or crashing pod is
 handled by the Deployment's rolling update strategy in the usual way
 — the previous ReplicaSet stays up while the new one fails to make
