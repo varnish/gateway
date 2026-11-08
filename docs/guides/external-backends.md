@@ -135,15 +135,25 @@ many IP addresses the external hostname resolves to. The underlying
 
 ## Limitations
 
-- **Request bodies are buffered, and capped at 1 MiB.** Ghost reads the
-  whole request body into memory before contacting the upstream, because
-  reqwest's blocking client needs an owned body. A request whose body
-  exceeds 1 MiB is answered with `413 Request Entity Too Large` and the
-  upstream is never contacted; ghost emits an `Error` line in
-  `varnishlog`. The limit is a compile-time constant today — making it
-  configurable is tracked in
-  [#115](https://github.com/varnish/gateway/issues/115) along with the
-  timeouts.
+- **Request bodies are buffered, and capped at 1 MiB in 60s.** Ghost reads
+  the whole request body into memory before contacting the upstream,
+  because reqwest's blocking client needs an owned body. A request whose
+  body exceeds 1 MiB is answered with `413 Request Entity Too Large`, and
+  one that has not finished arriving within 60 seconds with
+  `408 Request Timeout`; in both cases the upstream is never contacted and
+  ghost emits an `Error` line in `varnishlog`.
+
+    The time budget matters because the body is read on a Varnish worker
+    thread and Varnish puts no overall deadline on a client body read of
+    its own — without it, a client trickling an upload holds a worker for
+    as long as it likes. The budget is measured as body chunks arrive, so
+    it bounds a slow trickle rather than a connection that goes completely
+    silent.
+
+    Both limits are compile-time constants today — making them
+    configurable is tracked in
+    [#115](https://github.com/varnish/gateway/issues/115) along with the
+    upstream timeouts.
 - **Forwarding a body disables fetch retries.** Per Varnish's own rule an
   uncached request body can be read exactly once, so reading it marks the
   fetch non-retryable. Call `std.cache_req_body()` in your `vcl_recv` if

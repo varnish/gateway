@@ -12,8 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **ExternalName backends forward request bodies.** POST, PUT, PATCH and
   DELETE to a Service of type `ExternalName` used to be rejected locally with
   `405 Method Not Allowed`; the body is now read off the client and sent
-  upstream. The body is buffered in memory and capped at 1 MiB — a larger one
-  gets `413 Request Entity Too Large` and the upstream is never contacted. A
+  upstream. The body is buffered in memory and bounded two ways: at 1 MiB, a
+  larger one getting `413 Request Entity Too Large`, and at 60 seconds, a
+  slower one getting `408 Request Timeout`. In both cases the upstream is
+  never contacted. The time budget keeps a trickling uploader from holding a
+  Varnish worker thread indefinitely, which the size cap alone does not do. A
   chunked client body goes upstream with a `Content-Length` and no
   `Transfer-Encoding`. Reading an uncached body makes the fetch
   non-retryable, per Varnish's read-once rule; call `std.cache_req_body()` in
