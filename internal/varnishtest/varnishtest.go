@@ -104,11 +104,9 @@ func Start(t *testing.T) *Varnishd {
 	)
 	v.cmd.Stdout = logFile
 	v.cmd.Stderr = logFile
-	// Own process group so cleanup can reach the child process too.
-	// Pdeathsig (Linux) kills the manager if the test binary dies without
-	// running cleanups (interrupted or timed-out `go test`); the manager's
-	// own child exits when the manager goes away.
-	v.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	// Own process group so cleanup can reach the child process too; see
+	// sysProcAttr, which adds Pdeathsig where the platform has it.
+	v.cmd.SysProcAttr = sysProcAttr()
 	if err := v.cmd.Start(); err != nil {
 		logFile.Close()
 		t.Fatalf("exec.Start(%s): %v", varnishdBin, err)
