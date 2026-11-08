@@ -484,6 +484,74 @@ func TestAssignRouteVCLSlots_ConfigMapFull(t *testing.T) {
 	}
 }
 
+// The size guard applies to slot holders too, not only to policies asking
+// for a new slot: the budget is spent in candidate order, so policies that
+// grow can push a later holder out of a slot it already had. The loser is
+// unassigned (fail closed, 503 on that route) rather than keeping a slot
+// whose document is no longer in the ConfigMap.
+func TestAssignRouteVCLSlots_RetainedSlotLostToConfigMapFull(t *testing.T) {
+	grown := strings.Repeat("#", 250*1024) // at MaxRouteVCLDocumentBytes
+	small := strings.Repeat("#", 200*1024)
+	cands := func(doc string) []routeVCLCandidate {
+		return []routeVCLCandidate{
+			cand("a", 1, doc), cand("b", 2, doc), cand("c", 3, doc), cand("d", 4, doc),
+		}
+	}
+	prev := assignAt(vcl.RouteVCLManifest{}, cands(small), 8, "").manifest
+	assertSlots(t, prev, map[string]int{"default/a": 0, "default/b": 1, "default/c": 2, "default/d": 3})
+
+	// Every document grows to the per-document maximum. Four no longer fit
+	// under routeVCLConfigMapMaxBytes; "d", decided last, is the one to go.
+	a := assignAt(prev, cands(grown), 8, "")
+	assertSlots(t, a.manifest, map[string]int{"default/a": 0, "default/b": 1, "default/c": 2})
+	if un := unassignedOf(a.manifest); un["default/d"] != vcl.UnassignedConfigMapFull || len(un) != 1 {
+		t.Errorf("unassigned = %v, want only default/d ConfigMapFull", un)
+	}
+	if doc, ok := a.data[vcl.SlotKey(3)]; ok {
+		t.Errorf("slot 3 still carries %d bytes of document", len(doc))
+	}
+	total := 0
+	for k, v := range a.data {
+		total += len(k) + len(v)
+	}
+	if total > 1024*1024 {
+		t.Errorf("ConfigMap data is %d bytes, over 1 MiB", total)
+	}
+}
+
+// A policy returning to its own released slot inside the quarantine takes
+// the same route through the size guard: it is decided in that pass, and
+// when its document no longer fits it is unassigned instead of placed.
+func TestAssignRouteVCLSlots_ReturningPolicyLosesReleasedSlotWhenFull(t *testing.T) {
+	grown := strings.Repeat("#", 250*1024)
+	small := strings.Repeat("#", 200*1024)
+	all := []routeVCLCandidate{
+		cand("a", 1, small), cand("b", 2, small), cand("c", 3, small), cand("d", 4, small),
+	}
+	prev := assignAt(vcl.RouteVCLManifest{}, all, 8, "").manifest
+	assertSlots(t, prev, map[string]int{"default/a": 0, "default/b": 1, "default/c": 2, "default/d": 3})
+
+	// "a" drops out: slot 0 is released and held for the quarantine.
+	gone := releaseRound(prev, all[1:], 8, 0).manifest
+	if releasedOf(gone)[0] != "default/a" {
+		t.Fatalf("released = %v, want slot 0 held for default/a", releasedOf(gone))
+	}
+
+	// "a" comes back one second later, by which time the three holders have
+	// grown into the whole budget. Slot 0 is still "a"'s to take, but the
+	// document does not fit.
+	back := releaseRound(gone, []routeVCLCandidate{
+		cand("a", 1, grown), cand("b", 2, grown), cand("c", 3, grown), cand("d", 4, grown),
+	}, 8, time.Second)
+	assertSlots(t, back.manifest, map[string]int{"default/b": 1, "default/c": 2, "default/d": 3})
+	if un := unassignedOf(back.manifest); un["default/a"] != vcl.UnassignedConfigMapFull || len(un) != 1 {
+		t.Errorf("unassigned = %v, want only default/a ConfigMapFull", un)
+	}
+	if _, ok := back.data[vcl.SlotKey(0)]; ok {
+		t.Error("slot 0 carries a document for a policy that was not placed")
+	}
+}
+
 // --- Gateway reconcile with a fake client ---
 
 // routeVCLWorld returns a Gateway "gw" (class "varnish", params "params" with
@@ -959,5 +1027,89 @@ func TestGatewayReconcile_UserVCLReadErrorFailsReconcile(t *testing.T) {
 	reconcileGatewayResources(t, base)
 	if got := getCM(t, base, "gw-vcl").Data[vcl.MainVCLKey]; got != vcl.GenerateMaster(4, "") {
 		t.Error("main.vcl with the user VCL ConfigMap gone is not GenerateMaster(4, \"\")")
+	}
+}
+
+// --- release state against live pods ---
+
+// A slot still inside its quarantine is left out of the cleared map
+// altogether: it stays held whatever the pods report, and routeVCLReleaseState
+// does not ask them.
+func TestRouteVCLReleaseState_QuarantineHoldsSlotWithoutAskingPods(t *testing.T) {
+	objs := routeVCLWorld(1)
+	objs = append(objs, gatewayPod("gw", "gw-pod-a"))
+	r := newTestReconciler(newTestScheme(), objs...)
+	now := slotTestEpoch
+	r.clock = func() time.Time { return now }
+	gw := vvpGateway("gw", "varnish")
+	prev := vcl.RouteVCLManifest{Released: []vcl.RouteVCLReleased{{
+		Slot: 0, Policy: "default/p1", Route: "default/r1",
+		ReleasedAt: metav1.NewTime(slotTestEpoch),
+	}}}
+
+	// One second short of the quarantine: nothing is decided.
+	now = slotTestEpoch.Add(routeVCLReleaseQuarantine - time.Second)
+	rel, err := r.routeVCLReleaseState(context.Background(), gw, prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rel.cleared) != 0 {
+		t.Errorf("cleared = %v, want nothing decided inside the quarantine", rel.cleared)
+	}
+
+	// On the boundary it is evaluated: p1 still exists but no live pod
+	// reports the slot programmed, so the slot is clear.
+	now = slotTestEpoch.Add(routeVCLReleaseQuarantine)
+	if rel, err = r.routeVCLReleaseState(context.Background(), gw, prev); err != nil {
+		t.Fatal(err)
+	}
+	if ok, seen := rel.cleared[0]; !seen || !ok {
+		t.Errorf("cleared = %v, want slot 0 cleared on the quarantine boundary", rel.cleared)
+	}
+}
+
+// One slot can carry more than one release entry. Every entry has to agree
+// before the slot is reusable, so an entry a live pod still reports
+// programmed holds the slot even when another entry's policy is long gone --
+// in either order, since the entries are folded together as they are read.
+func TestRouteVCLReleaseState_SlotHeldWhenAnyEntryIsStillProgrammed(t *testing.T) {
+	stillProgrammed := vcl.RouteVCLReleased{
+		Slot: 0, Policy: "default/p1", Route: "default/r1",
+		ReleasedAt: metav1.NewTime(slotTestEpoch),
+	}
+	vanished := vcl.RouteVCLReleased{
+		Slot: 0, Policy: "default/vanished", Route: "default/r9",
+		ReleasedAt: metav1.NewTime(slotTestEpoch),
+	}
+	for _, tc := range []struct {
+		name    string
+		entries []vcl.RouteVCLReleased
+	}{
+		{"programmed entry first", []vcl.RouteVCLReleased{stillProgrammed, vanished}},
+		{"programmed entry last", []vcl.RouteVCLReleased{vanished, stillProgrammed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := routeVCLWorld(1)
+			objs = append(objs, gatewayPod("gw", "gw-pod-a"))
+			r := newTestReconciler(newTestScheme(), objs...)
+			r.clock = func() time.Time { return slotTestEpoch.Add(2 * routeVCLReleaseQuarantine) }
+
+			p1 := getGatewayTestVVP(t, r, "p1")
+			p1.Status.PodResults = []gatewayparamsv1alpha1.VarnishVCLPolicyPodResult{
+				{PodName: "gw-pod-a", Slot: 0, Programmed: true, LastUpdate: metav1.Now()},
+			}
+			if err := r.Update(context.Background(), p1); err != nil {
+				t.Fatal(err)
+			}
+
+			rel, err := r.routeVCLReleaseState(context.Background(),
+				vvpGateway("gw", "varnish"), vcl.RouteVCLManifest{Released: tc.entries})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rel.cleared[0] {
+				t.Errorf("cleared = %v, want slot 0 held: a live pod still reports it programmed", rel.cleared)
+			}
+		})
 	}
 }
