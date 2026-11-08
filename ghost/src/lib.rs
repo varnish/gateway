@@ -55,6 +55,10 @@ const FILTER_CONTEXT_HEADER: &str = "X-Ghost-Filter-Context";
 // Run VTC tests
 varnish::run_vtc_tests!("tests/*.vtc");
 
+// Fails loudly when those tests would load a VMOD older than this source.
+#[cfg(test)]
+mod vtc_guard;
+
 /// The ghost backend - wraps our director
 #[allow(non_camel_case_types)]
 pub struct ghost_backend {
