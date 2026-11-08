@@ -6,26 +6,72 @@
 //! runs its own internal runtime thread, so the Varnish worker simply blocks
 //! on `send()` and on body reads.
 
-use std::io::{Read, Write};
-use std::time::Duration;
+use std::io::{self, Read, Write};
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response};
 use reqwest::header::HeaderName;
-use varnish::vcl::{Ctx, StrOrBytes, VclBackend, VclError, VclResponse};
+use varnish::vcl::{BodyState, Ctx, LogTag, StrOrBytes, VclBackend, VclError, VclResponse};
 
 use crate::config::ExternalProxy;
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Methods the synthetic backend will forward. Anything else is rejected
-/// with 405 because we cannot stream a request body through the current
-/// VclBackend bridge.
-const ALLOWED_METHODS: &str = "GET, HEAD, OPTIONS";
+/// Largest request body forwarded to an ExternalName upstream.
+///
+/// reqwest's blocking body has to be `Send + 'static`, so a body cannot be
+/// streamed straight off the client — it lands in a `Vec` on the worker's heap
+/// first. Without a cap, one client's upload sizes an allocation on a data
+/// plane shared by every Gateway. Anything larger is rejected with 413 and the
+/// upstream is never contacted.
+const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
-/// Body returned with the synthetic 405 so curl/log readers see why.
-const METHOD_NOT_ALLOWED_BODY: &[u8] =
-    b"external proxy backend does not forward request bodies; allowed methods: GET, HEAD, OPTIONS\n";
+/// Wall-clock budget for taking a request body off the client.
+///
+/// The size cap bounds how much memory one upload costs; it says nothing
+/// about how long the client may take to deliver it. `VRB_Iterate` runs on
+/// the Varnish worker thread, and Varnish applies no overall deadline to a
+/// client body read of its own (`timeout_idle` covers the gap between
+/// requests, not the body), so without this a trickling uploader holds a
+/// worker for as long as it cares to. Matched to `DEFAULT_REQUEST_TIMEOUT`:
+/// the upload gets the same budget as the upstream fetch it precedes.
+///
+/// Checked as each chunk arrives, so it bounds a slow trickle. A client that
+/// opens the body and then sends nothing at all never reaches the writer, and
+/// is bounded by the socket read behaviour rather than by this.
+const MAX_REQUEST_BODY_DURATION: Duration = Duration::from_secs(60);
+
+/// Why ghost stopped taking a request body, and what the client is told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyReject {
+    /// Past `MAX_REQUEST_BODY_BYTES`.
+    TooLarge,
+    /// Past `MAX_REQUEST_BODY_DURATION`.
+    TooSlow,
+}
+
+impl BodyReject {
+    fn status(self) -> u16 {
+        match self {
+            Self::TooLarge => 413,
+            Self::TooSlow => 408,
+        }
+    }
+
+    fn log_message(self) -> String {
+        match self {
+            Self::TooLarge => format!(
+                "external_proxy: request body exceeds {} bytes, rejecting with 413",
+                MAX_REQUEST_BODY_BYTES
+            ),
+            Self::TooSlow => format!(
+                "external_proxy: request body not delivered within {}s, rejecting with 408",
+                MAX_REQUEST_BODY_DURATION.as_secs()
+            ),
+        }
+    }
+}
 
 /// Synthetic backend that proxies requests via `reqwest` to a single upstream
 /// hostname. One `ExternalBackend` per unique (hostname, port, tls) tuple —
@@ -77,55 +123,64 @@ impl ExternalBackend {
 
 impl VclBackend<ExternalBody> for ExternalBackend {
     fn get_response(&self, ctx: &mut Ctx<'_>) -> Result<Option<ExternalBody>, VclError> {
-        // Pull the method first so the 405 fast-path skips the header copy.
-        // Each block drops its bereq borrow before we touch ctx mutably.
-        let method_str = {
+        // Copy what we need out of bereq so its borrow ends before
+        // ctx.req_body() needs ctx mutably.
+        let (method_str, path, headers_owned) = {
             let bereq = ctx
                 .http_bereq
                 .as_ref()
                 .ok_or_else(|| VclError::new("external_proxy: missing bereq".to_string()))?;
-            sob_to_str(bereq.method())?.to_string()
-        };
-
-        let method = reqwest::Method::from_bytes(method_str.as_bytes())
-            .map_err(|e| VclError::new(format!("external_proxy: invalid method: {}", e)))?;
-
-        // Bodies on bereq aren't streamed into reqwest yet. Rather than
-        // forwarding a body-bearing method with the body silently dropped —
-        // which can succeed at a forgiving upstream and look like a normal
-        // 2xx to the client — reject it locally with 405 + Allow.
-        if method_implies_body(&method) {
-            ctx.log(
-                varnish::vcl::LogTag::Error,
-                format!(
-                    "external_proxy: rejecting {} with 405; request bodies are not forwarded",
-                    method
-                ),
-            );
-            let beresp = ctx
-                .http_beresp
-                .as_mut()
-                .ok_or_else(|| VclError::new("external_proxy: missing beresp".to_string()))?;
-            beresp.set_status(405);
-            beresp.set_proto("HTTP/1.1")?;
-            beresp.set_header("Allow", ALLOWED_METHODS)?;
-            beresp.set_header("Content-Type", "text/plain; charset=utf-8")?;
-            beresp.set_header("Cache-Control", "no-store")?;
-            return Ok(Some(ExternalBody::from_static(METHOD_NOT_ALLOWED_BODY)));
-        }
-
-        let (path, headers_owned) = {
-            let bereq = ctx
-                .http_bereq
-                .as_ref()
-                .ok_or_else(|| VclError::new("external_proxy: missing bereq".to_string()))?;
+            let m = sob_to_str(bereq.method())?.to_string();
             let p = sob_to_str(bereq.url())?.to_string();
             let headers: Vec<(String, Vec<u8>)> = bereq
                 .into_iter()
                 .filter(|(k, _)| forward_client_header(k))
                 .map(|(k, v)| (k.to_string(), v.as_ref().to_vec()))
                 .collect();
-            (p, headers)
+            (m, p, headers)
+        };
+
+        let method = reqwest::Method::from_bytes(method_str.as_bytes())
+            .map_err(|e| VclError::new(format!("external_proxy: invalid method: {}", e)))?;
+
+        // The request body is buffered: reqwest's blocking body must be
+        // `Send + 'static`, which a reader borrowing `ctx` can't be.
+        let body = match ctx.req_body_state()? {
+            BodyState::None => None,
+            // `Cached` (after `std.cache_req_body()`, or on a retried fetch)
+            // reads from the stored object; the rest stream off the client and
+            // can only be read once — which is why reading here also clears
+            // `bereq`'s retryability. See `Ctx::req_body`.
+            BodyState::Cached | BodyState::Length | BodyState::Chunked | BodyState::Eof => {
+                let mut buf = LimitedBuffer::new(MAX_REQUEST_BODY_BYTES, MAX_REQUEST_BODY_DURATION);
+                match (ctx.req_body(&mut buf), buf.rejected()) {
+                    (Ok(_), _) => Some(buf.into_inner()),
+                    // The writer stopped the copy, so the upstream never sees a
+                    // truncated body. 413/408 is the honest answer; a VclError
+                    // here would surface as a 503 and send operators after the
+                    // upstream for what is a client-side problem.
+                    (Err(_), Some(reject)) => {
+                        ctx.log(LogTag::Error, reject.log_message());
+                        let beresp = ctx.http_beresp.as_mut().ok_or_else(|| {
+                            VclError::new("external_proxy: missing beresp".to_string())
+                        })?;
+                        beresp.set_status(reject.status());
+                        beresp.set_proto("HTTP/1.1")?;
+                        beresp.set_header("Cache-Control", "no-store")?;
+                        return Ok(None);
+                    }
+                    (Err(e), None) => return Err(e),
+                }
+            }
+            // Someone already consumed the body (user VCL, say) or the client
+            // stream failed. Reading would hand the upstream an empty body and
+            // make a truncated request look like a normal one.
+            state @ (BodyState::Taken | BodyState::Error) => {
+                return Err(VclError::new(format!(
+                    "external_proxy: request body unavailable ({:?}); it was consumed or failed before the fetch",
+                    state
+                )));
+            }
         };
 
         let url = format!("{}{}", self.base_url, path);
@@ -138,6 +193,9 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             }
         }
         req_builder = req_builder.header("host", &self.upstream_host);
+        if let Some(body) = body {
+            req_builder = req_builder.body(body);
+        }
 
         let resp = req_builder
             .send()
@@ -170,78 +228,91 @@ impl VclBackend<ExternalBody> for ExternalBackend {
             }
         }
 
-        Ok(Some(ExternalBody::streamed(resp, content_length)))
+        Ok(Some(ExternalBody {
+            resp,
+            content_length,
+        }))
     }
 }
 
-/// Response body for a synthetic backend. Either streams the upstream
-/// `reqwest` response (success path) or serves a fixed static buffer
-/// (locally generated responses like the 405 rejection).
+/// Response body for a synthetic backend: the upstream `reqwest` response,
+/// streamed through to Varnish as it is read.
 pub struct ExternalBody {
-    state: BodyState,
-}
-
-enum BodyState {
-    Streamed {
-        resp: Response,
-        content_length: Option<usize>,
-    },
-    Static {
-        data: &'static [u8],
-        cursor: usize,
-    },
-}
-
-impl ExternalBody {
-    fn streamed(resp: Response, content_length: Option<usize>) -> Self {
-        Self {
-            state: BodyState::Streamed {
-                resp,
-                content_length,
-            },
-        }
-    }
-
-    fn from_static(data: &'static [u8]) -> Self {
-        Self {
-            state: BodyState::Static { data, cursor: 0 },
-        }
-    }
+    resp: Response,
+    content_length: Option<usize>,
 }
 
 impl VclResponse for ExternalBody {
-    fn read(&mut self, mut buf: &mut [u8]) -> Result<usize, VclError> {
-        match &mut self.state {
-            BodyState::Streamed { resp, .. } => resp
-                .read(buf)
-                .map_err(|e| VclError::new(format!("external proxy chunk: {}", e))),
-            BodyState::Static { data, cursor } => {
-                let remaining = &data[*cursor..];
-                let n = buf
-                    .write(remaining)
-                    .map_err(|e| VclError::new(format!("external_proxy: body write: {}", e)))?;
-                *cursor += n;
-                Ok(n)
-            }
-        }
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, VclError> {
+        self.resp
+            .read(buf)
+            .map_err(|e| VclError::new(format!("external proxy chunk: {}", e)))
     }
 
     fn len(&self) -> Option<usize> {
-        match &self.state {
-            BodyState::Streamed { content_length, .. } => *content_length,
-            BodyState::Static { data, .. } => Some(data.len()),
-        }
+        self.content_length
     }
 }
 
-fn method_implies_body(method: &reqwest::Method) -> bool {
-    matches!(
-        *method,
-        reqwest::Method::POST
-            | reqwest::Method::PUT
-            | reqwest::Method::PATCH
-            | reqwest::Method::DELETE
-    )
+/// `Write` sink that buffers at most `limit` bytes, arriving within `budget`,
+/// and refuses everything past either bound.
+///
+/// `Ctx::req_body` turns a writer error into a `VclError` and stops iterating,
+/// so failing here aborts the copy rather than letting an oversized body grow
+/// the worker's heap, or a slow one hold the worker. The bytes already read
+/// are dropped with the buffer.
+struct LimitedBuffer {
+    buf: Vec<u8>,
+    limit: usize,
+    deadline: Instant,
+    rejected: Option<BodyReject>,
+}
+
+impl LimitedBuffer {
+    fn new(limit: usize, budget: Duration) -> Self {
+        Self {
+            buf: Vec::new(),
+            limit,
+            deadline: Instant::now() + budget,
+            rejected: None,
+        }
+    }
+
+    /// `Some` once a bound was crossed — the caller turns it into a status.
+    fn rejected(&self) -> Option<BodyReject> {
+        self.rejected
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+impl Write for LimitedBuffer {
+    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        // Time first: a body that is both late and oversized is late, and the
+        // client learns the bound it actually blew through first.
+        if Instant::now() > self.deadline {
+            self.rejected = Some(BodyReject::TooSlow);
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "request body exceeds the external-proxy time budget",
+            ));
+        }
+        if self.buf.len().saturating_add(data.len()) > self.limit {
+            self.rejected = Some(BodyReject::TooLarge);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "request body exceeds the external-proxy buffer limit",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 fn sob_to_str<'a>(value: Option<StrOrBytes<'a>>) -> Result<&'a str, VclError> {
@@ -318,33 +389,66 @@ mod tests {
     }
 
     #[test]
-    fn method_implies_body_matches_body_carrying_verbs() {
-        assert!(method_implies_body(&reqwest::Method::POST));
-        assert!(method_implies_body(&reqwest::Method::PUT));
-        assert!(method_implies_body(&reqwest::Method::PATCH));
-        assert!(method_implies_body(&reqwest::Method::DELETE));
-        assert!(!method_implies_body(&reqwest::Method::GET));
-        assert!(!method_implies_body(&reqwest::Method::HEAD));
-        assert!(!method_implies_body(&reqwest::Method::OPTIONS));
+    fn limited_buffer_accepts_up_to_the_limit() {
+        let mut buf = LimitedBuffer::new(8, MAX_REQUEST_BODY_DURATION);
+        buf.write_all(b"1234").unwrap();
+        buf.write_all(b"5678").unwrap();
+        assert_eq!(buf.rejected(), None);
+        assert_eq!(buf.into_inner(), b"12345678");
     }
 
     #[test]
-    fn static_body_drains_in_chunks() {
-        let mut body = ExternalBody::from_static(b"hello world");
-        assert_eq!(body.len(), Some(11));
+    fn limited_buffer_refuses_the_write_that_would_exceed_the_limit() {
+        let mut buf = LimitedBuffer::new(8, MAX_REQUEST_BODY_DURATION);
+        buf.write_all(b"12345").unwrap();
 
-        let mut buf = [0u8; 5];
-        let n = <ExternalBody as VclResponse>::read(&mut body, &mut buf).unwrap();
-        assert_eq!(n, 5);
-        assert_eq!(&buf[..n], b"hello");
+        // The whole write is refused rather than truncated, so a caller that
+        // ignores the error can't mistake a partial body for a complete one.
+        let err = buf.write_all(b"6789").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(buf.rejected(), Some(BodyReject::TooLarge));
+        assert_eq!(buf.into_inner(), b"12345");
+    }
 
-        let mut buf = [0u8; 32];
-        let n = <ExternalBody as VclResponse>::read(&mut body, &mut buf).unwrap();
-        assert_eq!(n, 6);
-        assert_eq!(&buf[..n], b" world");
+    #[test]
+    fn limited_buffer_refuses_a_single_oversized_write() {
+        let mut buf = LimitedBuffer::new(4, MAX_REQUEST_BODY_DURATION);
+        assert!(buf.write_all(b"too long").is_err());
+        assert_eq!(buf.rejected(), Some(BodyReject::TooLarge));
+        assert!(buf.into_inner().is_empty());
+    }
 
-        let n = <ExternalBody as VclResponse>::read(&mut body, &mut buf).unwrap();
-        assert_eq!(n, 0);
+    #[test]
+    fn limited_buffer_refuses_a_chunk_arriving_past_the_deadline() {
+        // A zero budget is already spent, so the first chunk is late however
+        // fast the test machine is — no sleeping, no flakiness.
+        let mut buf = LimitedBuffer::new(MAX_REQUEST_BODY_BYTES, Duration::ZERO);
+        let err = buf.write_all(b"late").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(buf.rejected(), Some(BodyReject::TooSlow));
+        assert!(buf.into_inner().is_empty());
+    }
+
+    #[test]
+    fn limited_buffer_reports_lateness_before_size() {
+        // Both bounds blown at once: the client is told about the deadline,
+        // which is the one it crossed first.
+        let mut buf = LimitedBuffer::new(2, Duration::ZERO);
+        assert!(buf.write_all(b"far too long").is_err());
+        assert_eq!(buf.rejected(), Some(BodyReject::TooSlow));
+    }
+
+    #[test]
+    fn body_reject_maps_to_client_visible_statuses() {
+        assert_eq!(BodyReject::TooLarge.status(), 413);
+        assert_eq!(BodyReject::TooSlow.status(), 408);
+    }
+
+    #[test]
+    fn a_clean_read_leaves_no_rejection() {
+        let mut buf = LimitedBuffer::new(8, MAX_REQUEST_BODY_DURATION);
+        buf.write_all(b"ok").unwrap();
+        assert_eq!(buf.rejected(), None);
     }
 
     #[test]
