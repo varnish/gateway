@@ -270,10 +270,14 @@ struct LimitedBuffer {
 
 impl LimitedBuffer {
     fn new(limit: usize, budget: Duration) -> Self {
+        Self::with_deadline(limit, Instant::now() + budget)
+    }
+
+    fn with_deadline(limit: usize, deadline: Instant) -> Self {
         Self {
             buf: Vec::new(),
             limit,
-            deadline: Instant::now() + budget,
+            deadline,
             rejected: None,
         }
     }
@@ -418,11 +422,19 @@ mod tests {
         assert!(buf.into_inner().is_empty());
     }
 
+    /// A deadline strictly in the past, so "late" does not depend on whether
+    /// the clock happened to tick between construction and the write. A zero
+    /// budget is not enough: it puts the deadline exactly at `Instant::now()`,
+    /// and the check is `>`.
+    fn already_expired() -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("monotonic clock is less than 1s past its epoch")
+    }
+
     #[test]
     fn limited_buffer_refuses_a_chunk_arriving_past_the_deadline() {
-        // A zero budget is already spent, so the first chunk is late however
-        // fast the test machine is — no sleeping, no flakiness.
-        let mut buf = LimitedBuffer::new(MAX_REQUEST_BODY_BYTES, Duration::ZERO);
+        let mut buf = LimitedBuffer::with_deadline(MAX_REQUEST_BODY_BYTES, already_expired());
         let err = buf.write_all(b"late").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert_eq!(buf.rejected(), Some(BodyReject::TooSlow));
@@ -433,9 +445,16 @@ mod tests {
     fn limited_buffer_reports_lateness_before_size() {
         // Both bounds blown at once: the client is told about the deadline,
         // which is the one it crossed first.
-        let mut buf = LimitedBuffer::new(2, Duration::ZERO);
+        let mut buf = LimitedBuffer::with_deadline(2, already_expired());
         assert!(buf.write_all(b"far too long").is_err());
         assert_eq!(buf.rejected(), Some(BodyReject::TooSlow));
+    }
+
+    #[test]
+    fn limited_buffer_accepts_a_chunk_arriving_inside_the_budget() {
+        let mut buf = LimitedBuffer::with_deadline(8, Instant::now() + Duration::from_secs(3600));
+        buf.write_all(b"in time").unwrap();
+        assert_eq!(buf.rejected(), None);
     }
 
     #[test]

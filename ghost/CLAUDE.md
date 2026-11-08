@@ -68,15 +68,21 @@ docker build -f docker/chaperone.Dockerfile -t varnish-gateway .
 ## Test
 
 ```bash
+# Everything, with the VMOD built first (recommended)
+make test-ghost
+
 # Unit tests (work in debug and release mode)
 cargo test --lib -- --skip vtc_
 
 # VTC integration tests (must use release mode - see DEBUG_MODE_LIMITATIONS.md)
-cargo test --release vtc_
-
-# All tests in release mode (recommended)
-cargo test --release
+cargo build --release && cargo test --release vtc_
 ```
+
+**Always `cargo build --release` before running VTC tests.** `cargo test` builds the rlib and the test
+harness, but not the `cdylib` — only `cargo build` produces that. The VTC harness resolves the VMOD at run
+time through the platform's dylib search path, so `cargo test --release vtc_` on its own loads whatever
+`cargo build` left behind last time, however old. The `vtc_vmod_is_not_stale` guard fails the run when that
+happens (see `src/vtc_guard.rs` and issue #121), but building first avoids the situation entirely.
 
 **Important**: VTC tests require increased stack size (`-p thread_pool_stack=160k`) for regex support in debug mode. All
 VTC test files include this parameter. See `DEBUG_MODE_LIMITATIONS.md` for details.
