@@ -20,3 +20,11 @@ ignore:
   - "api/**"
   - "cmd/**"
   - "test/**"
+  # Test support, not product code. internal/varnishtest drives a real
+  # varnishd manager process and a varnishadm CLI for tests that need label
+  # switching, which varnishd -C cannot do. It sits outside *_test.go so
+  # several packages can share it, so Codecov counts it as production. It only
+  # runs where varnishd and the ghost VMOD are present — the test-rust job —
+  # and that job uploads no coverage, while test-go, which does, skips every
+  # test built on it. Measured, it is ~260 lines that can never be hit.
+  - "internal/varnishtest/**"
