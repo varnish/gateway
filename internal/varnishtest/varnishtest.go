@@ -2,7 +2,7 @@
 //
 // Start skips the calling test when varnishd or varnishadm are not on PATH,
 // when varnishd is older than 7.0, or when the ghost VMOD has not been built
-// (ghost/target/release/libvmod_ghost.so). CI's Go job has neither, so tests
+// (`cargo build --release` in ghost/). CI's Go job has neither, so tests
 // built on this package skip there and run on a developer machine.
 //
 // The manager is started with no VCL (an empty -f argument) and no child, so
@@ -64,13 +64,12 @@ func Start(t *testing.T) *Varnishd {
 	if major < minMajorVersion {
 		t.Skipf("varnishd major version %d < %d; skipping", major, minMajorVersion)
 	}
-	vmodDir, err := GhostVMODDir()
+	workDir := t.TempDir()
+	scratch := t.TempDir()
+	vmodDir, err := GhostVMODDir(scratch)
 	if err != nil {
 		t.Skipf("ghost VMOD not available: %v", err)
 	}
-
-	workDir := t.TempDir()
-	scratch := t.TempDir()
 	v := &Varnishd{
 		t:       t,
 		workDir: filepath.Join(workDir, "n"),
@@ -134,19 +133,35 @@ func Start(t *testing.T) *Varnishd {
 	return v
 }
 
-// GhostVMODDir returns <repo root>/ghost/target/release if it contains
-// libvmod_ghost.so.
-func GhostVMODDir() (string, error) {
+// GhostVMODDir returns a directory holding the built ghost VMOD under the
+// name varnishd's VCC looks for, which is libvmod_ghost.so on every platform.
+// cargo names a cdylib libvmod_ghost.so on Linux but libvmod_ghost.dylib on
+// macOS, and VCC will not load the latter: "Could not find VMOD ghost". Where
+// only the .dylib exists, link it under the .so name inside linkDir (the
+// caller's t.TempDir(), so it goes away with the test) and return that
+// directory instead of the cargo one.
+func GhostVMODDir(linkDir string) (string, error) {
 	root, err := repoRoot()
 	if err != nil {
 		return "", err
 	}
 	dir := filepath.Join(root, "ghost", "target", "release")
 	so := filepath.Join(dir, "libvmod_ghost.so")
-	if _, err := os.Stat(so); err != nil {
-		return "", fmt.Errorf("%s not found; run `cargo build --release` in ghost/", so)
+	if _, err := os.Stat(so); err == nil {
+		return dir, nil
 	}
-	return dir, nil
+	dylib := filepath.Join(dir, "libvmod_ghost.dylib")
+	if _, err := os.Stat(dylib); err != nil {
+		return "", fmt.Errorf("no ghost VMOD at %s or %s; run `cargo build --release` in ghost/", so, dylib)
+	}
+	link := filepath.Join(linkDir, "vmod", "libvmod_ghost.so")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		return "", fmt.Errorf("os.MkdirAll(%s): %w", filepath.Dir(link), err)
+	}
+	if err := os.Symlink(dylib, link); err != nil {
+		return "", fmt.Errorf("os.Symlink(%s, %s): %w", dylib, link, err)
+	}
+	return filepath.Dir(link), nil
 }
 
 // repoRoot walks up from this source file to the directory holding go.mod.
