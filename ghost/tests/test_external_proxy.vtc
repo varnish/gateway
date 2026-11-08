@@ -33,6 +33,24 @@ server s1 {
     expect req.http.Content-Length == "11"
     expect req.body == "hello world"
     txresp -body "ok"
+
+    # std.cache_req_body() path: the body comes off the cached object
+    # (ObjIterate) rather than the live client stream (VRB_Iterate). Fail the
+    # first attempt so the retry below has to re-read it.
+    rxreq
+    expect req.method == "POST"
+    expect req.http.Content-Length == "11"
+    expect req.body == "cached-body"
+    txresp -status 503
+
+    # Same body again on the retry. A body read off the live client stream
+    # sets bo.no_retry, so reaching this exchange at all proves the cached
+    # copy was used.
+    rxreq
+    expect req.method == "POST"
+    expect req.http.Content-Length == "11"
+    expect req.body == "cached-body"
+    txresp -status 200 -body "retried"
 } -start
 
 # Write ghost.json with an external_proxy group instead of native backends.
@@ -67,6 +85,7 @@ EOF
 
 varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
     import ghost from "${vmod}";
+    import std;
 
     backend dummy none;
 
@@ -75,9 +94,24 @@ varnish v1 -arg "-p thread_pool_stack=160k" -vcl {
     }
 
     sub vcl_recv {
+        if (req.http.X-Cache-Body == "true") {
+            if (!std.cache_req_body(1MB)) {
+                return (synth(500, "cache_req_body failed"));
+            }
+        }
         set req.backend_hint = router.recv();
         if (req.http.X-Ghost-Pass == "true") {
             return (pass);
+        }
+    }
+
+    sub vcl_backend_response {
+        # Retry once for the cached-body case. This only gets as far as a
+        # second fetch if the body was read from the cached object; reading
+        # the live client stream sets bo.no_retry and turns this into a 503.
+        if (bereq.http.X-Cache-Body == "true" && beresp.status == 503
+            && bereq.retries == 0) {
+            return (retry);
         }
     }
 } -start
@@ -122,10 +156,22 @@ client c2 {
     expect resp.body == "ok"
 } -run
 
+# std.cache_req_body() in vcl_recv: the body is forwarded from the cached
+# object, and survives a fetch retry.
+client c3 {
+    txreq -req POST -url "/media/asset.png" \
+        -hdr "Host: preview.example.com" \
+        -hdr "X-Cache-Body: true" \
+        -body "cached-body"
+    rxresp
+    expect resp.status == 200
+    expect resp.body == "retried"
+} -run
+
 # Bodies past the 1 MiB buffer limit are rejected locally with 413. server s1
 # has no exchange left, so forwarding one upstream would fail the test here
 # rather than quietly succeed.
-client c3 {
+client c4 {
     txreq -req POST -url "/media/asset.png" \
         -hdr "Host: preview.example.com" \
         -bodylen 2097152
