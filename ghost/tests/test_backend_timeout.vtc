@@ -76,8 +76,7 @@ varnish v1 -arg "-p thread_pool_stack=160k" -arg "-p first_byte_timeout=10" -vcl
     backend dummy none;
 
     sub vcl_init {
-        ghost.init("${tmpdir}/ghost.json");
-        new router = ghost.ghost_backend();
+        new router = ghost.ghost_backend("${tmpdir}/ghost.json");
     }
 
     sub vcl_recv {
