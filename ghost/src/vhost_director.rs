@@ -33,6 +33,7 @@ pub struct RouteMatchResult<'a> {
     pub vcl_slot: Option<u32>,
     pub cache_policy: Option<&'a crate::config::CachePolicy>,
     pub bypass_headers: &'a [crate::director::BypassHeaderCompiled],
+    pub backend_timeout_ms: Option<u32>,
 }
 
 /// Result returned by route_request to the caller (recv/resolve).
@@ -394,6 +395,16 @@ impl VhostDirector {
         // Determine cache behavior from policy
         let pass = apply_cache_policy_headers(http, &match_result, &query_string_owned);
 
+        // Per-route backend timeout (HTTPRoute timeouts.backendRequest), bridged
+        // to bereq. vcl_backend_fetch turns this into first_byte_timeout /
+        // between_bytes_timeout, and the postamble vcl_backend_error uses its
+        // presence to report 504 rather than Varnish's default 503.
+        // Must unset first since set_header() appends a header slot.
+        if let Some(ms) = match_result.backend_timeout_ms {
+            http.unset_header("X-Ghost-Timeout");
+            let _ = http.set_header("X-Ghost-Timeout", &format!("{}ms", ms));
+        }
+
         // Select backend using two-level weighted random:
         // Level 1: pick a group by weight
         // Level 2: pick a random pod within the selected group
@@ -532,6 +543,7 @@ fn match_routes<'a>(
             vcl_slot: route.vcl_slot,
             cache_policy: route.cache_policy.as_ref(),
             bypass_headers: &route.bypass_headers,
+            backend_timeout_ms: route.backend_timeout_ms,
         });
     }
 
@@ -1167,6 +1179,7 @@ mod tests {
             rule_index: 0,
             cache_policy: None,
             bypass_headers: Vec::new(),
+            backend_timeout_ms: None,
         }];
 
         // This test doesn't use HttpHeaders, so we can't fully test it here
@@ -1195,6 +1208,7 @@ mod tests {
             rule_index: 0,
             cache_policy: None,
             bypass_headers: Vec::new(),
+            backend_timeout_ms: None,
         }];
 
         // Verify route structure
@@ -1226,6 +1240,7 @@ mod tests {
                 rule_index: 0,
                 cache_policy: None,
                 bypass_headers: Vec::new(),
+                backend_timeout_ms: None,
             }],
             backend_pool.clone(),
             None,
@@ -1326,6 +1341,7 @@ mod tests {
             vcl_slot: None,
             cache_policy: None,
             bypass_headers: &[],
+            backend_timeout_ms: None,
         };
 
         assert_eq!(result.backend_groups.len(), 1);
