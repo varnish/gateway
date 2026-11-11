@@ -106,6 +106,25 @@ jobs:
       - name: Run VTC integration tests
         run: cd ghost && cargo test --release vtc_
 
+      # The Go tests under internal/vcl that drive a real varnishd (route VCL
+      # compile, dispatch and the chaperone reconciler) skip when varnishd or
+      # the ghost VMOD is absent, which is the case in test-go. This job has
+      # both, so run them here against the pinned Varnish version.
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run varnishd-backed Go tests
+        run: |
+          go test -count=1 -v -run 'TestGeneratedVCLCompiles|TestRouteVCLRunsBeforeReturningGatewayVCL|TestReloaderAgainstVarnishd' ./internal/vcl/ 2>&1 | tee varnishd-go-tests.log
+          # Fail if any of them skipped: the point of this job is that they run.
+          if grep -q -- '--- SKIP' varnishd-go-tests.log; then
+            echo "varnishd-backed Go tests skipped; varnishd or the ghost VMOD was not found" >&2
+            exit 1
+          fi
+
   helm-test:
     runs-on: ubuntu-latest
     steps:

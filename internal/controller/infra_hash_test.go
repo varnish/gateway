@@ -334,3 +334,15 @@ func TestInfraHash_ServiceConfigDoesNotAffectHash(t *testing.T) {
 		}
 	}
 }
+
+// routeVCL (enablement and slot pool size) is hot-reloadable: changing it
+// recompiles VCL but must never roll the gateway pods. The envtest
+// TestRouteVCL_DoesNotChangeInfraHash_Envtest checks the same end to end.
+func TestInfraHash_RouteVCLDoesNotAffectHash(t *testing.T) {
+	configType := reflect.TypeOf(InfrastructureConfig{})
+	for _, f := range []string{"RouteVCL", "RouteVCLConfig", "RouteVCLEnabled", "SlotPoolSize"} {
+		if _, ok := configType.FieldByName(f); ok {
+			t.Errorf("InfrastructureConfig must not contain field %q — routeVCL changes are hot reloads, not pod restarts", f)
+		}
+	}
+}

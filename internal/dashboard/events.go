@@ -9,11 +9,16 @@ import (
 type EventType string
 
 const (
-	EventEndpointsChanged EventType = "endpoints_changed"
-	EventGhostReload      EventType = "ghost_reload"
-	EventGhostReloadFail  EventType = "ghost_reload_fail"
-	EventVCLReload        EventType = "vcl_reload"
-	EventVCLReloadFail    EventType = "vcl_reload_fail"
+	EventEndpointsChanged   EventType = "endpoints_changed"
+	EventGhostReload        EventType = "ghost_reload"
+	EventGhostReloadFail    EventType = "ghost_reload_fail"
+	EventVCLReload          EventType = "vcl_reload"
+	EventVCLReloadFail      EventType = "vcl_reload_fail"
+	EventRouteVCLReload     EventType = "route_vcl_reload"
+	EventRouteVCLReloadFail EventType = "route_vcl_reload_fail"
+	// EventRouteVCLSlots carries a RouteVCLState snapshot after a slot pass
+	// that changed it. It feeds state and metrics and is not shown in the log.
+	EventRouteVCLSlots    EventType = "route_vcl_slots"
 	EventTLSReload        EventType = "tls_reload"
 	EventTLSReloadFail    EventType = "tls_reload_fail"
 	EventConfigMapUpdate  EventType = "configmap_update"

@@ -121,6 +121,35 @@ spec:
       - 198.51.100.0/24
 ```
 
+### spec.routeVCL
+
+!!! warning "API preview: end-to-end wiring complete, not yet load-tested or conformance-verified with the feature on"
+    With `enabled: true`, accepted [VarnishVCLPolicy](varnishvclpolicy.md)
+    resources get a slot, are compiled on every gateway pod, and run for the
+    requests their route matches.
+
+Gates per-HTTPRoute VCL (VarnishVCLPolicy) for Gateways of this class. Off by default.
+
+```yaml
+spec:
+  routeVCL:
+    enabled: true
+    slotPoolSize: 16 # optional
+```
+
+| Field          | Type    | Default | Description                                                                                                                             |
+| -------------- | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`      | `bool`  | `false` | Turns route VCL on for Gateways of this class. While it is off, every VarnishVCLPolicy on routes of this class reports `Accepted=False`, reason `Disabled`. |
+| `slotPoolSize` | `int32` | `64`    | Pre-allocated VCL label slots per gateway. Each slot holds one route VCL. Range 1–256. |
+
+**Security:** turning this on lets anyone who can create an HTTPRoute in a namespace routed by this class run code inside the gateway pod. Read the [trust statement](varnishvclpolicy.md#trust-statement) before you enable it.
+
+Changing `routeVCL` does **not** trigger a pod restart. Turning it on or off, or changing `slotPoolSize`, is a hot recompile of the master VCL on every pod: the operator writes the new master and the pool size in the same ConfigMap update, and the chaperone creates or removes slot labels to match. Growing the pool never moves an existing policy. Shrinking it below a slot that is in use takes that slot away from its policy (it moves to a free slot inside the smaller pool if there is one, otherwise it reports `NoSlotAvailable` with reason `SlotOutsidePool`); the other policies keep their slot numbers. See [slots](varnishvclpolicy.md#slots).
+
+A gateway pod that starts (or restarts) compiles every populated slot before it serves traffic, about 0.2 s per slot unthrottled and more under a CPU limit. The pod has a startup probe that allows up to 180 s for this.
+
+The default (64) and ceiling (256) come from the capacity spike in `docs/development/route-vcl-capacity-spike.md`: unused slots cost nothing, each populated slot costs about 0.2 s of compile time and 125 KB of memory per pod.
+
 ## Environment Variables
 
 Chaperone reads these environment variables. The operator sets most of them automatically when it builds the gateway pod, so the "Chaperone default" column documents what chaperone falls back to when run standalone — in operator-managed pods the operator-set value is what you'll see in practice.
@@ -140,9 +169,11 @@ Chaperone reads these environment variables. The operator sets most of them auto
 | Variable            | Chaperone default             | Description                                                                                                                                          |
 | ------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `WORK_DIR`          | `/var/run/varnish`            | Chaperone working directory (secrets, runtime files)                                                                                                 |
-| `VCL_PATH`          | `/var/run/varnish/main.vcl`   | Path to VCL file (watched for changes). The operator sets `/etc/varnish/main.vcl`, mounted from the gateway's ConfigMap.                             |
 | `CONFIGMAP_NAME`    | `gateway-vcl`                 | Name of the ConfigMap that holds `routing.json` and `main.vcl`. Chaperone watches this directly via the Kubernetes informer rather than a file path. |
+| `ROUTE_VCL_CONFIGMAP_NAME` | `$GATEWAY_NAME-route-vcl` | ConfigMap with per-HTTPRoute VCL documents and their slot manifest. Empty when `GATEWAY_NAME` is unset (never watched). A missing ConfigMap means no route VCL. |
 | `GHOST_CONFIG_PATH` | `/var/run/varnish/ghost.json` | Generated ghost config output                                                                                                                        |
+| `ROUTE_VCL_COMPILE_RATE` | `4` | Route VCL compiles per second (token bucket on `vcl.inline` of route VCLs; the master and placeholder are never throttled). A float; `0` disables throttling. See [route VCL caveats](route-vcl-caveats.md#compile-cost-and-startup). |
+| `ROUTE_VCL_COMPILE_BURST` | `8` | Bucket size of the route VCL compile throttle. The bucket starts full, so a pod's first slot pass is not delayed by it. An integer; values below 1 are treated as 1 while the rate is above 0. |
 
 ### Runtime
 

@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -210,4 +212,81 @@ func TestStateTracker_Snapshot_EmptyCollections(t *testing.T) {
 	if len(snap.VHosts) != 0 {
 		t.Errorf("expected 0 vhosts, got %d", len(snap.VHosts))
 	}
+}
+
+func TestStateTracker_RouteVCL(t *testing.T) {
+	bus := NewEventBus(16)
+	st := NewStateTracker(bus, "v")
+	if st.Snapshot().RouteVCL != nil {
+		t.Fatal("RouteVCL set before the first slot pass")
+	}
+
+	// A snapshot published before Run subscribes is replayed.
+	PublishRouteVCLSlots(bus, RouteVCLState{PoolSize: 4, MasterVCL: "vcl_a"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- st.Run(ctx) }()
+
+	waitFor := func(cond func(*RouteVCLState) bool) *RouteVCLState {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if r := st.Snapshot().RouteVCL; r != nil && cond(r) {
+				return r
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatal("route VCL state did not arrive")
+		return nil
+	}
+	waitFor(func(r *RouteVCLState) bool { return r.MasterVCL == "vcl_a" })
+
+	PublishRouteVCLSlots(bus, RouteVCLState{PoolSize: 4, MasterVCL: "vcl_b", Slots: []RouteVCLSlot{
+		{Slot: 1, Policy: "ns/p", Route: "ns/r", VCLName: "route_1_abc", State: RouteVCLProgrammed},
+		{Slot: 2, Policy: "ns/q", Route: "ns/s", State: RouteVCLFailed, Message: "boom"},
+	}})
+	r := waitFor(func(r *RouteVCLState) bool { return r.MasterVCL == "vcl_b" })
+	if len(r.Slots) != 2 || r.Slots[1].Message != "boom" || r.Slots[0].VCLName != "route_1_abc" {
+		t.Errorf("slots = %+v", r.Slots)
+	}
+	if p, f, ph := r.Counts(); p != 1 || f != 1 || ph != 2 {
+		t.Errorf("counts = %d/%d/%d, want 1/1/2", p, f, ph)
+	}
+
+	// The snapshot is a copy: mutating it does not touch the tracker.
+	r.Slots[0].Policy = "mutated"
+	if got := st.Snapshot().RouteVCL.Slots[0].Policy; got != "ns/p" {
+		t.Errorf("snapshot aliases tracker state: %q", got)
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run: %v", err)
+	}
+}
+
+func TestRouteVCLEvents(t *testing.T) {
+	bus := NewEventBus(8)
+	PublishRouteVCLReload(bus, 3, "route_3_x", 250*time.Millisecond)
+	PublishRouteVCLReload(bus, 4, "route_4_x", 0)
+	PublishRouteVCLReloadFail(bus, 5, errors.New("bad"), "", 0)
+	ev := bus.Recent()
+	if len(ev) != 3 {
+		t.Fatalf("events = %d", len(ev))
+	}
+	if ev[0].Type != EventRouteVCLReload || ev[0].Data["slot"] != "3" || ev[0].Data["compile_seconds"] != "0.25" || ev[0].Data["result"] != "ok" {
+		t.Errorf("reload event %+v", ev[0])
+	}
+	if _, ok := ev[1].Data["compile_seconds"]; ok {
+		t.Errorf("label-only reload carries a compile time: %+v", ev[1])
+	}
+	if ev[2].Type != EventRouteVCLReloadFail || ev[2].Data["result"] != "error" || ev[2].Message != "bad" {
+		t.Errorf("fail event %+v", ev[2])
+	}
+	// nil bus is a no-op, like the other publishers.
+	PublishRouteVCLReload(nil, 0, "x", 0)
+	PublishRouteVCLReloadFail(nil, 0, errors.New("x"), "", 0)
+	PublishRouteVCLSlots(nil, RouteVCLState{})
 }

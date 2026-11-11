@@ -9,11 +9,18 @@ package metrics
 import (
 	"context"
 	"log/slog"
+	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
+
+	gatewayparamsv1alpha1 "github.com/varnish/gateway/api/v1alpha1"
+	"github.com/varnish/gateway/internal/vcl"
 )
 
 // gatewayCollector is a prometheus.Collector that snapshots Gateway API
@@ -37,6 +44,9 @@ type gatewayCollector struct {
 	httproutesDesc         *prometheus.Desc
 	httproutesAcceptedDesc *prometheus.Desc
 	infoDesc               *prometheus.Desc
+	routeVCLSlotsDesc      *prometheus.Desc
+	routeVCLUnassignedDesc *prometheus.Desc
+	routeVCLPoliciesDesc   *prometheus.Desc
 }
 
 // RegisterGatewayMetrics builds the Gateway API inventory collector and
@@ -89,6 +99,21 @@ func RegisterGatewayMetrics(reg prometheus.Registerer, reader client.Reader, con
 			"Operator build info; constant 1 with the version label.",
 			[]string{"version"}, nil,
 		),
+		routeVCLSlotsDesc: prometheus.NewDesc(
+			"varnish_gateway_route_vcl_slots",
+			"Route VCL slots of a managed Gateway: used (holding a VarnishVCLPolicy), released (in quarantine after their policy left) or free. All are 0 when route VCL is off.",
+			[]string{"gateway_namespace", "gateway_name", "state"}, nil,
+		),
+		routeVCLUnassignedDesc: prometheus.NewDesc(
+			"varnish_gateway_route_vcl_unassigned",
+			"Eligible VarnishVCLPolicies that did not get a route VCL slot on a managed Gateway (pool exhausted, pool shrunk, or ConfigMap full).",
+			[]string{"gateway_namespace", "gateway_name"}, nil,
+		),
+		routeVCLPoliciesDesc: prometheus.NewDesc(
+			"varnish_gateway_route_vcl_policies",
+			"VarnishVCLPolicies managed by this operator, by whether their Programmed condition is true.",
+			[]string{"programmed"}, nil,
+		),
 	}
 	reg.MustRegister(c)
 }
@@ -103,6 +128,9 @@ func (c *gatewayCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.httproutesDesc
 	ch <- c.httproutesAcceptedDesc
 	ch <- c.infoDesc
+	ch <- c.routeVCLSlotsDesc
+	ch <- c.routeVCLUnassignedDesc
+	ch <- c.routeVCLPoliciesDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -117,6 +145,41 @@ func (c *gatewayCollector) Collect(ch chan<- prometheus.Metric) {
 	// Gateway does not exist — see httproute_controller processParentRef).
 	managed := c.collectGateways(ctx, ch)
 	c.collectHTTPRoutes(ctx, ch, managed)
+	c.collectVCLPolicies(ctx, ch)
+}
+
+// collectVCLPolicies counts VarnishVCLPolicies by Programmed condition. A
+// policy counts as programmed when an ancestor under our controller name has
+// Programmed=True; everything else (False, Unknown, no status yet) counts as
+// not programmed. Nothing is emitted when the kind is not served (CRD not
+// installed): Helm does not upgrade CRDs, so that is a normal state.
+func (c *gatewayCollector) collectVCLPolicies(ctx context.Context, ch chan<- prometheus.Metric) {
+	var list gatewayparamsv1alpha1.VarnishVCLPolicyList
+	if err := c.reader.List(ctx, &list); err != nil {
+		if !apimeta.IsNoMatchError(err) && !runtime.IsNotRegisteredError(err) {
+			c.warn("list VarnishVCLPolicies", err)
+		}
+		return
+	}
+	var programmed, other int
+	for i := range list.Items {
+		ok := false
+		for _, anc := range list.Items[i].Status.Ancestors {
+			if string(anc.ControllerName) != c.controllerName {
+				continue
+			}
+			if apimeta.IsStatusConditionTrue(anc.Conditions, gatewayparamsv1alpha1.VCLPolicyConditionProgrammed) {
+				ok = true
+			}
+		}
+		if ok {
+			programmed++
+		} else {
+			other++
+		}
+	}
+	ch <- prometheus.MustNewConstMetric(c.routeVCLPoliciesDesc, prometheus.GaugeValue, float64(programmed), "true")
+	ch <- prometheus.MustNewConstMetric(c.routeVCLPoliciesDesc, prometheus.GaugeValue, float64(other), "false")
 }
 
 // collectGateways emits per-Gateway metrics and returns the set of Gateways
@@ -162,6 +225,8 @@ func (c *gatewayCollector) collectGateways(ctx context.Context, ch chan<- promet
 			attached += l.AttachedRoutes
 		}
 		ch <- prometheus.MustNewConstMetric(c.gwAttachedRoutesDesc, prometheus.GaugeValue, float64(attached), ns, name)
+
+		c.collectRouteVCL(ctx, ch, gw)
 	}
 
 	for className, count := range classCounts {
@@ -213,6 +278,65 @@ func (c *gatewayCollector) collectHTTPRoutes(ctx context.Context, ch chan<- prom
 
 	ch <- prometheus.MustNewConstMetric(c.httproutesDesc, prometheus.GaugeValue, float64(total))
 	ch <- prometheus.MustNewConstMetric(c.httproutesAcceptedDesc, prometheus.GaugeValue, float64(accepted))
+}
+
+// collectRouteVCL emits the route VCL slot gauges for one Gateway, from the
+// pool size in "{gateway}-vcl" and the manifest in "{gateway}-route-vcl"
+// (both written by the Gateway controller). Missing ConfigMaps count as a
+// pool of 0 and an empty manifest.
+func (c *gatewayCollector) collectRouteVCL(ctx context.Context, ch chan<- prometheus.Metric, gw *gatewayv1.Gateway) {
+	ns, name := gw.Namespace, gw.Name
+
+	pool := 0
+	var vclCM corev1.ConfigMap
+	if err := c.reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name + "-vcl"}, &vclCM); err != nil {
+		if !apierrors.IsNotFound(err) {
+			c.warn("get route VCL pool size", err)
+		}
+	} else if n, err := vcl.ParsePoolSize(vclCM.Data[vcl.PoolSizeKey]); err != nil {
+		c.warn("parse route VCL pool size", err)
+	} else {
+		pool = n
+	}
+
+	var manifest vcl.RouteVCLManifest
+	var routeCM corev1.ConfigMap
+	if err := c.reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: name + vcl.RouteVCLConfigMapSuffix}, &routeCM); err != nil {
+		if !apierrors.IsNotFound(err) {
+			c.warn("get route VCL manifest", err)
+		}
+	} else if m, err := vcl.ParseRouteVCLManifest(routeCM.Data[vcl.ManifestKey]); err != nil {
+		c.warn("parse route VCL manifest", err)
+	} else {
+		manifest = m
+	}
+
+	inPool := func(key string) bool {
+		n, err := strconv.Atoi(key)
+		return err == nil && n >= 0 && n < pool && strconv.Itoa(n) == key
+	}
+	used := 0
+	for key := range manifest.Slots {
+		if inPool(key) {
+			used++
+		}
+	}
+	// Released slots are in quarantine: not held by a policy, but not
+	// assignable yet either, so they are neither used nor free.
+	released := 0
+	for _, r := range manifest.Released {
+		if inPool(strconv.Itoa(int(r.Slot))) {
+			released++
+		}
+	}
+	free := pool - used - released
+	if free < 0 {
+		free = 0
+	}
+	ch <- prometheus.MustNewConstMetric(c.routeVCLSlotsDesc, prometheus.GaugeValue, float64(used), ns, name, "used")
+	ch <- prometheus.MustNewConstMetric(c.routeVCLSlotsDesc, prometheus.GaugeValue, float64(released), ns, name, "released")
+	ch <- prometheus.MustNewConstMetric(c.routeVCLSlotsDesc, prometheus.GaugeValue, float64(free), ns, name, "free")
+	ch <- prometheus.MustNewConstMetric(c.routeVCLUnassignedDesc, prometheus.GaugeValue, float64(len(manifest.Unassigned)), ns, name)
 }
 
 // isOurClass reports whether className is a GatewayClass with our controllerName.

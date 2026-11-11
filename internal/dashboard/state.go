@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"context"
 	"sort"
 	"sync"
 	"time"
@@ -35,6 +36,8 @@ type Snapshot struct {
 	VHosts   []VHostState   `json:"vhosts"`
 	Services []ServiceState `json:"services"`
 	Events   []Event        `json:"events"`
+	// RouteVCL is nil until the first slot pass.
+	RouteVCL *RouteVCLState `json:"routeVcl,omitempty"`
 }
 
 // StateTracker aggregates current state from events and direct updates.
@@ -46,6 +49,7 @@ type StateTracker struct {
 	startTime time.Time
 	services  map[string]ServiceState // key: namespace/name
 	vhosts    map[string]VHostState   // key: hostname
+	routeVCL  *RouteVCLState
 	bus       *EventBus
 }
 
@@ -110,6 +114,36 @@ func (s *StateTracker) UpdateVHosts(vhosts map[string]VHostState) {
 	s.mu.Unlock()
 }
 
+// UpdateRouteVCL replaces the route VCL state.
+func (s *StateTracker) UpdateRouteVCL(st RouteVCLState) {
+	s.mu.Lock()
+	s.routeVCL = &st
+	s.mu.Unlock()
+}
+
+// Run applies route VCL snapshot events from the bus to the state until ctx
+// is done.
+func (s *StateTracker) Run(ctx context.Context) error {
+	ch := s.bus.Subscribe()
+	defer s.bus.Unsubscribe(ch)
+	// Catch up on a snapshot published before we subscribed.
+	for _, ev := range s.bus.Recent() {
+		if st, ok := ev.RouteVCLState(); ok {
+			s.UpdateRouteVCL(st)
+		}
+	}
+	for {
+		select {
+		case ev := <-ch:
+			if st, ok := ev.RouteVCLState(); ok {
+				s.UpdateRouteVCL(st)
+			}
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
 // Snapshot returns a point-in-time view of all state.
 func (s *StateTracker) Snapshot() Snapshot {
 	s.mu.RLock()
@@ -134,7 +168,15 @@ func (s *StateTracker) Snapshot() Snapshot {
 		return vhosts[i].Hostname < vhosts[j].Hostname
 	})
 
+	var routeVCL *RouteVCLState
+	if s.routeVCL != nil {
+		cp := *s.routeVCL
+		cp.Slots = append([]RouteVCLSlot(nil), cp.Slots...)
+		routeVCL = &cp
+	}
+
 	return Snapshot{
+		RouteVCL: routeVCL,
 		Ready:    s.ready,
 		Draining: s.draining,
 		Uptime:   time.Since(s.startTime).Truncate(time.Second).String(),

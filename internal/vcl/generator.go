@@ -18,18 +18,63 @@ var postambleVCL string
 
 // DefaultGhostConfigPath is the default location for ghost.json.
 //
-// Generate interpolates this into a VCL string literal without escaping. It
-// must stay a constant; do not make it configurable without escaping it for
-// VCL (quotes, backslashes, newlines) first.
+// The preamble interpolates the ghost config path into a VCL string literal
+// without escaping. Production always uses this constant. The only other path
+// ever passed is one a test hands to the unexported generators, and
+// generatePreamble rejects any path containing a double quote, a backslash, a
+// newline or a carriage return before interpolating it. Do not make the path
+// user configurable without escaping it for VCL instead.
 const DefaultGhostConfigPath = "/var/run/varnish/ghost.json"
+
+// dispatchSentinel is the line in preamble.vcl that is replaced by the route
+// VCL dispatch block, or removed when there is none.
+const dispatchSentinel = "    # {{ROUTE_VCL_DISPATCH}}\n"
 
 // Generate produces VCL preamble that integrates with the ghost VMOD.
 // The ghost VMOD handles all routing logic internally; VCL just initializes it.
-// The VCL template is embedded from preamble.vcl. The ghost config path is
-// interpolated unescaped, which is only safe because it is a constant; see
-// DefaultGhostConfigPath.
+// The VCL template is embedded from preamble.vcl. It carries no route VCL
+// dispatch block; see GenerateMaster for that.
 func Generate() string {
-	return fmt.Sprintf(preambleVCL, DefaultGhostConfigPath)
+	return mustGeneratePreamble(DefaultGhostConfigPath, 0)
+}
+
+// generatePreamble renders preamble.vcl with the given ghost config path and a
+// dispatch block for slots 0..slotPoolSize-1 (none when slotPoolSize <= 0).
+func generatePreamble(ghostConfigPath string, slotPoolSize int) (string, error) {
+	if err := validateGhostConfigPath(ghostConfigPath); err != nil {
+		return "", err
+	}
+	preamble := fmt.Sprintf(preambleVCL, ghostConfigPath)
+	// A master without its dispatch block would silently route every slotted
+	// request in the master, so a pool that needs dispatch must find the
+	// sentinel. Fail loudly instead of emitting a wrong document.
+	if slotPoolSize > 0 && !strings.Contains(preamble, dispatchSentinel) {
+		return "", fmt.Errorf("vcl.generatePreamble: dispatch sentinel %q missing from preamble.vcl", strings.TrimSpace(dispatchSentinel))
+	}
+	return strings.Replace(preamble, dispatchSentinel, dispatchBlock(slotPoolSize), 1), nil
+}
+
+// mustGeneratePreamble is generatePreamble for the constant production path,
+// which always validates. It panics only if DefaultGhostConfigPath is edited
+// into something that cannot be interpolated safely.
+func mustGeneratePreamble(ghostConfigPath string, slotPoolSize int) string {
+	preamble, err := generatePreamble(ghostConfigPath, slotPoolSize)
+	if err != nil {
+		panic(err)
+	}
+	return preamble
+}
+
+// validateGhostConfigPath rejects paths that cannot be interpolated into a VCL
+// string literal unescaped.
+func validateGhostConfigPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("vcl.validateGhostConfigPath(%q): empty path", path)
+	}
+	if strings.ContainsAny(path, "\"\\\n\r") {
+		return fmt.Errorf("vcl.validateGhostConfigPath(%q): path contains a double quote, backslash or newline", path)
+	}
+	return nil
 }
 
 // CalculateRoutePriority calculates the priority for a route based on all match criteria.

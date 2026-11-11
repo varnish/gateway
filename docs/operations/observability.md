@@ -50,6 +50,23 @@ Go runtime and process collectors.
 | `chaperone_ready`    | 1 when the pod is ready, 0 otherwise |
 | `chaperone_draining` | 1 when the pod is draining           |
 
+#### Route VCL metrics
+
+Registered on every chaperone, also when route VCL is off (the series then stay at zero). Route VCL loads are **not** counted in `chaperone_vcl_reloads_total`; that counter and its error counterpart cover the master VCL only.
+
+| Metric                                         | Type      | Labels                                                | Description                                                                                         |
+| ---------------------------------------------- | --------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `chaperone_route_vcl_compiles_total`           | counter   | `result` (`ok`, `compile_error`, `error`)             | Route VCL loads. `ok` = compiled (or already loaded) and labelled; `compile_error` = VCC rejected the document; `error` = any other refusal or a failed `vcl.label` |
+| `chaperone_route_vcl_compile_duration_seconds` | histogram | -                                                     | Duration of route VCL `vcl.inline` calls, 0.05 s to 5 s buckets. Includes failed compiles            |
+| `chaperone_route_vcl_slots`                    | gauge     | `state` (`programmed`, `failed`, `placeholder`)       | Pool slots by state on this pod. `failed` = compile failed or waiting for a master; the slot serves its previous VCL or the placeholder. `placeholder` = empty slots |
+| `chaperone_route_vcl_master_reloads_total`     | counter   | `result` (`ok`, `error`)                              | Master VCL loads (the VCL that dispatches to route VCLs). Also counted in `chaperone_vcl_reloads_total` |
+
+The slot gauges are updated after each slot pass that changed something. A sustained `failed > 0` means a policy is `Programmed=False`; check `kubectl get vvp`. A high `compile_error` rate with a flat slot count means a document is being retried; failed documents are remembered for five minutes, so this should not climb quickly.
+
+The operator exports `varnish_gateway_route_vcl_slots`, `varnish_gateway_route_vcl_unassigned` and `varnish_gateway_route_vcl_policies{programmed="true|false"}`, see [Operator metrics](#operator-metrics).
+
+**Jumps per second are not exported.** Ghost's per-vhost counters are not VSC counters (they exist only in the `backend.list` JSON), so there is no `route_vcl_dispatch` counter in varnishstat. To see dispatch activity, use `varnishlog -q 'VCL_use ~ via'`: a jump logs a `VCL_use` record naming the label and the VCL it came from. `MAIN.n_vcl` and `MAIN.n_vcl_avail` show how many VCLs are loaded.
+
 ### Varnish metrics
 
 Chaperone runs `varnishstat -1 -j` periodically and exposes each counter
@@ -83,6 +100,9 @@ GatewayClass with our controller name are counted.
 | `varnish_gateway_gateway_attached_routes` | `gateway_namespace`, `gateway_name` | Total AttachedRoutes across all listeners of the Gateway           |
 | `varnish_gateway_httproutes`              | —                     | Number of HTTPRoutes attached to a managed Gateway                 |
 | `varnish_gateway_httproutes_accepted`     | —                     | Number of managed HTTPRoutes Accepted on at least one parent       |
+| `varnish_gateway_route_vcl_slots`         | `gateway_namespace`, `gateway_name`, `state` (`used`/`released`/`free`) | Route VCL slots of the Gateway: holding a VarnishVCLPolicy, in quarantine after their policy left, or free. All 0 when route VCL is off |
+| `varnish_gateway_route_vcl_unassigned`    | `gateway_namespace`, `gateway_name` | Eligible VarnishVCLPolicies that got no slot (pool exhausted, pool shrunk, ConfigMap full) |
+| `varnish_gateway_route_vcl_policies`      | `programmed` (`true`/`false`) | VarnishVCLPolicies by Programmed condition (anything but True counts as `false`). Absent when the VarnishVCLPolicy CRD is not installed |
 | `varnish_gateway_info`                    | `version`             | Constant 1; carries the operator build version as a label          |
 
 The per-Gateway labels are `gateway_namespace` / `gateway_name` rather
@@ -176,12 +196,14 @@ kubectl port-forward <gateway-pod> 9000:9000
 
 Then open `http://localhost:9000` in a browser.
 
+When route VCL is on, the page has a **Route VCL** section: pool size, the active master VCL, and one row per populated slot with its policy, route, loaded VCL name, state (programmed or compile failed) and the compiler error.
+
 The dashboard exposes:
 
 | Path              | Description                                                                              |
 | ----------------- | ---------------------------------------------------------------------------------------- |
 | `/`               | HTML dashboard UI                                                                        |
-| `/api/state`      | JSON snapshot: ready/draining state, uptime, vhosts, services, recent events             |
+| `/api/state`      | JSON snapshot: ready/draining state, uptime, vhosts, services, route VCL slots (`routeVcl`), recent events |
 | `/api/events`     | Server-Sent Events stream of reload, endpoint, and state-change events                   |
 | `/api/varnishlog` | Server-Sent Events stream of live varnishlog-json output, with query parameter filtering |
 

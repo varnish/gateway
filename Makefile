@@ -490,6 +490,8 @@ manifests:
 	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_varnishcachepolicies.yaml >> deploy/00-prereqs.yaml
 	@echo "---" >> deploy/00-prereqs.yaml
 	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_varnishcacheinvalidations.yaml >> deploy/00-prereqs.yaml
+	@echo "---" >> deploy/00-prereqs.yaml
+	@cat charts/varnish-gateway/crds/gateway.varnish-software.com_varnishvclpolicies.yaml >> deploy/00-prereqs.yaml
 
 # Generate deepcopy functions from Go types
 generate:

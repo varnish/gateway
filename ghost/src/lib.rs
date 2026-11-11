@@ -229,7 +229,8 @@ mod ghost {
         /// Performs full routing (hostname -> vhost -> route -> backend) using
         /// `req` headers and `local.socket` for listener-aware routing.
         /// Returns a concrete backend, not a director.
-        /// Sets `X-Gateway-Listener` and `X-Gateway-Route` headers on the request.
+        /// Sets `X-Gateway-Listener` and `X-Gateway-Route` headers on the request,
+        /// plus `X-Ghost-VCL-Slot` when the matched route has a VCL slot.
         ///
         /// # Safety
         ///
@@ -281,6 +282,10 @@ mod ghost {
                 if let Some(ref name) = result.route_name {
                     req.unset_header("X-Gateway-Route");
                     let _ = req.set_header("X-Gateway-Route", name);
+                }
+                if let Some(slot) = result.vcl_slot {
+                    req.unset_header("X-Ghost-VCL-Slot");
+                    let _ = req.set_header("X-Ghost-VCL-Slot", &slot.to_string());
                 }
             }
 

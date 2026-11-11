@@ -38,6 +38,13 @@ rules:
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["varnishcacheinvalidations/status"]
     verbs: ["get", "update", "patch"]
+  # Route VCL: report per-pod compile results in VarnishVCLPolicy status
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishvclpolicies"]
+    verbs: ["get"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishvclpolicies/status"]
+    verbs: ["get", "update", "patch"]
   # List pods to determine expected pod count for invalidation phase calculation
   - apiGroups: [""]
     resources: ["pods"]

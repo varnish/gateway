@@ -386,7 +386,7 @@ func TestBuildVCLConfigMap(t *testing.T) {
 		},
 	}
 
-	cm := r.buildVCLConfigMap(gateway, "vcl 4.1;\n\nimport ghost;\n")
+	cm := r.buildVCLConfigMap(gateway, "vcl 4.1;\n\nimport ghost;\n", 0)
 
 	if cm.Name != "test-gateway-vcl" {
 		t.Errorf("expected configmap name %q, got %q", "test-gateway-vcl", cm.Name)

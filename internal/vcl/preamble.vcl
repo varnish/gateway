@@ -31,6 +31,7 @@ sub vcl_recv {
     unset req.http.X-Ghost-Filter-Context;
     unset req.http.X-Ghost-Redirect-Config;
     unset req.http.X-Ghost-Error;
+    unset req.http.X-Ghost-VCL-Slot;
     unset req.http.X-Gateway-Listener;
     unset req.http.X-Gateway-Route;
 
@@ -81,6 +82,7 @@ sub vcl_recv {
     # postamble vcl_recv so that user VCL concatenated between preamble and
     # postamble gets a chance to run.
     set req.backend_hint = router.recv();
+    # {{ROUTE_VCL_DISPATCH}}
 }
 
 sub vcl_hash {
@@ -106,6 +108,9 @@ sub vcl_backend_fetch {
     # because vcl_backend_response needs to read them. They are cleaned up
     # at the end of vcl_backend_response instead.
     unset bereq.http.X-Ghost-Pass;
+    # Route VCL slot signal. The master consumes it in the dispatch block, but
+    # a route VCL runs ghost again (which sets it again) with no dispatch.
+    unset bereq.http.X-Ghost-VCL-Slot;
 }
 
 sub vcl_pipe {
@@ -114,6 +119,7 @@ sub vcl_pipe {
     # Strip them here. Deliberately no return statement: user VCL appended
     # after this must still run.
     unset bereq.http.X-Ghost-Pass;
+    unset bereq.http.X-Ghost-VCL-Slot;
     unset bereq.http.X-Ghost-Forced-TTL;
     unset bereq.http.X-Ghost-Default-TTL;
     unset bereq.http.X-Ghost-Grace;

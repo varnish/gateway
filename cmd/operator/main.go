@@ -11,11 +11,17 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -108,6 +114,15 @@ func main() {
 
 	mgr, err := ctrl.NewManager(restCfg, ctrl.Options{
 		Scheme: scheme,
+		// The VarnishVCLPolicy controller lists gateway pods to decide
+		// whether a route VCL is programmed everywhere. Restrict the Pod
+		// informer to pods the operator created, so this is not a
+		// cluster-wide Pod cache.
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Pod{}: {Label: labels.SelectorFromSet(labels.Set{controller.LabelManagedBy: controller.ManagedByValue})},
+			},
+		},
 		Metrics: server.Options{
 			BindAddress:   metricsAddr,
 			ExtraHandlers: pprofHandlers,
@@ -181,6 +196,26 @@ func main() {
 		Logger: logger.With("controller", "VarnishCachePolicy"),
 	}).SetupWithManager(mgr); err != nil {
 		logger.Error("unable to create controller", "controller", "VarnishCachePolicy", "error", err)
+		os.Exit(1)
+	}
+
+	// Setup VarnishVCLPolicy controller (API preview: Accepted, Programmed, slots, podResults GC).
+	// Helm does not upgrade CRDs, so an operator upgraded without applying the
+	// new CRD would otherwise fail to start on the missing watch. Skip the
+	// controller with a warning in that case.
+	vvpGK := schema.GroupKind{Group: gatewayparamsv1alpha1.GroupName, Kind: "VarnishVCLPolicy"}
+	if _, err := mgr.GetRESTMapper().RESTMapping(vvpGK, gatewayparamsv1alpha1.GroupVersion.Version); err != nil {
+		if !meta.IsNoMatchError(err) {
+			logger.Error("unable to look up VarnishVCLPolicy CRD", "error", err)
+			os.Exit(1)
+		}
+		logger.Warn("VarnishVCLPolicy CRD not installed; VarnishVCLPolicy controller disabled. Apply the chart CRDs to enable it.")
+	} else if err := (&controller.VarnishVCLPolicyReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Logger: logger.With("controller", "VarnishVCLPolicy"),
+	}).SetupWithManager(mgr); err != nil {
+		logger.Error("unable to create controller", "controller", "VarnishVCLPolicy", "error", err)
 		os.Exit(1)
 	}
 

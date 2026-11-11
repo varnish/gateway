@@ -5,25 +5,35 @@ import (
 	"strings"
 )
 
-// Merge combines generated VCL with user-provided VCL.
+// Merge combines generated VCL with one or more user-provided VCL documents.
 //
 // VCL requires all imports to appear before any subroutines, and the vcl version
 // declaration must come first. This function handles the merge properly:
 //
-//  1. Extract vcl version and imports from both generated and user VCL
-//  2. Output: vcl version, ghost import, user imports, generated body, user body
+//  1. Extract vcl version and imports from the generated and every user VCL
+//  2. Output: vcl version (generated only), generated imports, user imports
+//     (deduplicated, in document order), generated body, each user body in
+//     order, postamble
 //
 // VCL allows multiple definitions of the same subroutine - they are concatenated
 // at compile time. If user defines vcl_backend_fetch, their code runs after the
-// gateway routing call.
-func Merge(generatedVCL, userVCL string) string {
-	if userVCL == "" {
+// gateway routing call. With several user documents, an earlier document's
+// subroutine code runs before a later one's.
+//
+// Empty user documents are ignored; with none left the result is the generated
+// VCL followed by the postamble.
+func Merge(generatedVCL string, userVCLs ...string) string {
+	var users []vclParts
+	for _, u := range userVCLs {
+		if u != "" {
+			users = append(users, parseVCL(u))
+		}
+	}
+	if len(users) == 0 {
 		return generatedVCL + postambleVCL
 	}
 
-	// Parse both VCLs
 	genParts := parseVCL(generatedVCL)
-	userParts := parseVCL(userVCL)
 
 	var sb strings.Builder
 
@@ -34,42 +44,49 @@ func Merge(generatedVCL, userVCL string) string {
 	}
 
 	// Ghost import first (from generated)
+	seen := make([]string, 0, len(genParts.imports))
 	for _, imp := range genParts.imports {
 		sb.WriteString(imp)
 		sb.WriteString("\n")
+		seen = append(seen, imp)
 	}
 
-	// User imports (skip if duplicate of ghost)
-	for _, imp := range userParts.imports {
-		if !containsImport(genParts.imports, imp) {
+	// User imports, skipping any already emitted
+	for _, u := range users {
+		for _, imp := range u.imports {
+			if containsImport(seen, imp) {
+				continue
+			}
 			sb.WriteString(imp)
 			sb.WriteString("\n")
+			seen = append(seen, imp)
 		}
 	}
 
 	// Blank line between imports and body
 	sb.WriteString("\n")
 
-	// Generated body (subroutines)
-	if genParts.body != "" {
-		sb.WriteString(genParts.body)
-		if !strings.HasSuffix(genParts.body, "\n") {
-			sb.WriteString("\n")
-		}
-	}
-
-	// User body (subroutines)
-	if userParts.body != "" {
-		sb.WriteString(userParts.body)
-		if !strings.HasSuffix(userParts.body, "\n") {
-			sb.WriteString("\n")
-		}
+	// Generated body, then each user body (subroutines)
+	writeBody(&sb, genParts.body)
+	for _, u := range users {
+		writeBody(&sb, u.body)
 	}
 
 	// Postamble: runs after user VCL to handle deferred actions (e.g., return(pass))
 	sb.WriteString(postambleVCL)
 
 	return sb.String()
+}
+
+// writeBody appends a VCL body, newline-terminated, if it is non-empty.
+func writeBody(sb *strings.Builder, body string) {
+	if body == "" {
+		return
+	}
+	sb.WriteString(body)
+	if !strings.HasSuffix(body, "\n") {
+		sb.WriteString("\n")
+	}
 }
 
 // vclParts holds the parsed sections of a VCL file.

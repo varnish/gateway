@@ -45,6 +45,12 @@ rules:
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["varnishcachepolicies/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishvclpolicies"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["gateway.varnish-software.com"]
+    resources: ["varnishvclpolicies/status"]
+    verbs: ["get", "update", "patch"]
   # Garbage collect completed VarnishCacheInvalidation resources
   - apiGroups: ["gateway.varnish-software.com"]
     resources: ["varnishcacheinvalidations"]
@@ -52,6 +58,11 @@ rules:
   # Namespaces (needed for NamespacesFromSelector route checking)
   - apiGroups: [""]
     resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Gateway pods (read-only; the cache is restricted to operator-labelled
+  # pods). Used to derive VarnishVCLPolicy Programmed from per-pod results.
+  - apiGroups: [""]
+    resources: ["pods"]
     verbs: ["get", "list", "watch"]
   # Core resources the operator creates for Gateways
   - apiGroups: ["apps"]

@@ -1,69 +1,177 @@
 package vcl
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/varnish/gateway/internal/dashboard"
 	"github.com/varnish/gateway/internal/varnishadm"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
 
-// Note: VCL compilation failure is intentionally non-fatal. When Varnish rejects a
-// VCL update it keeps the previously active VCL, so the gateway continues serving
-// traffic. Chaperone logs the error and waits for the next config change.
+// The Reloader converges varnishd's set of loaded VCLs on what the gateway's
+// ConfigMaps describe:
+//
+//	gwvcl-placeholder   GeneratePlaceholder(), loaded while the pool is > 0
+//	gwvcl-0..N-1        one label per slot: a route VCL or the placeholder
+//	route_<slot>_<hash> route VCLs, each behind exactly one label
+//	vcl_<timestamp>     masters; the newest is active
+//
+// Both ConfigMap informers only record the latest object and nudge a channel.
+// A single goroutine runs reconcile(), which reads `vcl.list -j` (the source
+// of truth, not memory) and issues the CLI commands that close the gap, so
+// no two VCL command sequences ever interleave.
+//
+// VCL compilation failure is intentionally non-fatal. A master that fails to
+// compile leaves the previous master active; a route VCL that fails leaves its
+// label where it was (the previous route VCL or the placeholder).
 
 const (
-	// DefaultKeepCount is the default number of old VCLs to keep for rollback
-	DefaultKeepCount = 10
+	// DefaultKeepCount is the number of inactive masters kept after a master
+	// reload. It is small on purpose: every old master keeps its references
+	// to the slot labels, and a referenced label cannot be discarded, so old
+	// masters would block shrinking the pool. Discarding a master that still
+	// has requests in flight is safe: varnishd finishes them and frees it.
+	// When the pool shrinks, all inactive masters are discarded.
+	DefaultKeepCount = 2
 
-	// vclPrefix is the prefix for managed VCL names
+	// vclPrefix is the prefix for master VCL names.
 	vclPrefix = "vcl_"
+
+	// vclStatusDiscarded is the vcl.list status of a VCL that was discarded
+	// but is still referenced (busy) in the child.
+	vclStatusDiscarded = "discarded"
+
+	// maxPoolSize is a sanity cap on PoolSizeKey. The operator caps
+	// GatewayClassParameters.spec.routeVCL.slotPoolSize at 256; this only
+	// stops a corrupt value from creating labels without bound.
+	maxPoolSize = 1024
+
+	// maxResultMessage caps the CLI output recorded for a failed slot.
+	maxResultMessage = 2048
+
+	// failureMemoTTL is how long a VCC compile failure (route VCL or master)
+	// is remembered before the same document is compiled again.
+	failureMemoTTL = 5 * time.Minute
+
+	resyncPeriod      = 30 * time.Second
+	retryInitialDelay = 5 * time.Second
+	retryMaxDelay     = 30 * time.Second
 )
 
-// Reloader watches a VCL file and hot-reloads it into Varnish when it changes
+// failureMemo is a remembered VCC compile failure.
+type failureMemo struct {
+	msg string    // CLI output (trimmed) of the failed vcl.inline
+	at  time.Time // when it failed
+}
+
+// masterFailureMemo is a remembered VCC compile failure of a master.
+type masterFailureMemo struct {
+	content string // main.vcl that failed
+	err     error
+	at      time.Time
+}
+
+// SlotResult is the outcome of the last reconcile for one manifest slot.
+type SlotResult struct {
+	Policy     string // "<namespace>/<name>" from the manifest
+	Slot       int    // -1 when the manifest key is not a slot number
+	Hash       string // manifest hash the result refers to
+	Route      string // "<namespace>/<name>" of the HTTPRoute, from the manifest
+	VCLName    string // route VCL the slot label points at ("" = placeholder or unknown)
+	Programmed bool
+	Message    string
+}
+
+// Reloader watches the gateway's ConfigMaps and keeps varnishd's VCLs in sync.
 type Reloader struct {
 	varnishadm varnishadm.VarnishadmInterface
-	vclPath    string
 	keepCount  int
 	logger     *slog.Logger
 
-	// ConfigMap watching
 	kubeClient         kubernetes.Interface
 	configMapName      string
 	configMapNamespace string
-	lastVCL            string
-	lastVCLMux         sync.RWMutex
-	lastConfigMapRV    string
+	routeConfigMapName string // empty: route VCL ConfigMap not watched
+
+	reporter *statusReporter // nil: no VarnishVCLPolicy status writes
+
+	// Latest ConfigMap snapshots, written by the informers.
+	snapMu  sync.Mutex
+	vclCM   *corev1.ConfigMap
+	routeCM *corev1.ConfigMap
+	nudge   chan struct{}
+
+	// Delays before retrying a failed reconcile (doubling from the first).
+	retryInitial time.Duration
+	retryMax     time.Duration
+
+	// State below is owned by the reconcile goroutine.
+	appliedMaster    string // main.vcl content of the active master
+	activeMasterPool int    // pool size the active master was compiled for; 0 = none applied
+	maxVCLSet        int    // last max_vcl value set, 0 = never
+
+	// Failure memo. Only genuine VCC compile failures are remembered (they
+	// cannot succeed on retry); anything else is retried with the backoff.
+	// Entries expire after memoTTL. The route VCL memo is cleared whenever
+	// the applied master or the pool size changes: a document that returns
+	// to another slot's label can start compiling after a grow.
+	now             func() time.Time
+	memoTTL         time.Duration
+	compileFailures map[string]failureMemo // route VCL base name -> its VCC failure
+	memoPool        int                    // pool size compileFailures was built for
+	masterFailure   *masterFailureMemo     // last master that failed VCC, nil = none
+
+	resultsMu sync.Mutex
+	results   map[string]SlotResult // keyed by policy
+
+	// throttle rate-limits route VCL compiles (never the master or the
+	// placeholder). nil = unthrottled.
+	throttle *compileThrottle
+
+	// lastSlotsEvent is the last route VCL snapshot published to the
+	// dashboard, so an unchanged pass publishes nothing.
+	lastSlotsEvent string
 
 	// vclSeq is a monotonic counter appended to generated VCL names so two
 	// reloads within the same millisecond can't collide on the same name.
 	vclSeq atomic.Uint64
 
-	// firstLoadDone is closed after the first successful VCL load via the
-	// ConfigMap informer. Callers can wait on Ready() to know when the
-	// initial VCL has been pushed to varnishd's management process.
+	// firstLoadDone is closed after the first master is active.
 	firstLoadDone chan struct{}
 	firstLoadOnce sync.Once
+	firstLoadAt   time.Time
+
+	// slotsDone is closed after the first full slot pass that follows the
+	// first master load.
+	slotsDone chan struct{}
+	slotsOnce sync.Once
 
 	// Dashboard integration (optional)
 	dashBus *dashboard.EventBus
 }
 
-// New creates a new VCL reloader
+// New creates a VCL reloader for the "{gateway}-vcl" ConfigMap configMapName.
 func New(
 	v varnishadm.VarnishadmInterface,
-	vclPath string,
 	keepCount int,
 	kubeClient kubernetes.Interface,
 	configMapName string,
@@ -78,20 +186,64 @@ func New(
 	}
 	return &Reloader{
 		varnishadm:         v,
-		vclPath:            vclPath,
 		keepCount:          keepCount,
 		kubeClient:         kubeClient,
 		configMapName:      configMapName,
 		configMapNamespace: configMapNamespace,
 		logger:             logger,
+		nudge:              make(chan struct{}, 1),
+		retryInitial:       retryInitialDelay,
+		retryMax:           retryMaxDelay,
+		now:                time.Now,
+		memoTTL:            failureMemoTTL,
+		compileFailures:    make(map[string]failureMemo),
 		firstLoadDone:      make(chan struct{}),
+		slotsDone:          make(chan struct{}),
 	}
 }
 
-// Ready returns a channel closed once the reloader has successfully loaded
-// VCL into varnishd at least once (driven by the ConfigMap informer).
+// SetRouteVCLConfigMap sets the "{gateway}-route-vcl" ConfigMap to watch.
+// Empty (the default) never watches one: every slot is empty.
+func (r *Reloader) SetRouteVCLConfigMap(name string) {
+	r.routeConfigMapName = name
+}
+
+// SetCompileThrottle limits route VCL compiles (vcl.inline) to perSecond with
+// the given burst. perSecond <= 0 disables throttling. The bucket starts full,
+// so the first burst compiles (a pod's initial slot pass) are not delayed.
+// Call before Run.
+func (r *Reloader) SetCompileThrottle(perSecond float64, burst int) {
+	r.throttle = newCompileThrottle(perSecond, burst)
+}
+
+// SetStatusWriter enables writing this pod's per-slot results into
+// VarnishVCLPolicy status.podResults.
+func (r *Reloader) SetStatusWriter(dyn dynamic.Interface, podName string) {
+	if dyn == nil || podName == "" {
+		r.reporter = nil
+		return
+	}
+	r.reporter = newStatusReporter(dyn, podName, r.logger)
+}
+
+// Ready returns a channel closed once the first master VCL is active.
 func (r *Reloader) Ready() <-chan struct{} {
 	return r.firstLoadDone
+}
+
+// SlotsReady returns a channel closed after the first full slot pass that
+// follows the first master load: every programmed slot has its route VCL
+// labelled (or has failed to compile). Closed right after Ready when the pool
+// is 0 or there is no route VCL ConfigMap.
+func (r *Reloader) SlotsReady() <-chan struct{} {
+	return r.slotsDone
+}
+
+// SlotResults returns the per-policy results of the last slot pass.
+func (r *Reloader) SlotResults() map[string]SlotResult {
+	r.resultsMu.Lock()
+	defer r.resultsMu.Unlock()
+	return maps.Clone(r.results)
 }
 
 // SetDashboard connects the reloader to the dashboard event bus.
@@ -99,233 +251,980 @@ func (r *Reloader) SetDashboard(bus *dashboard.EventBus) {
 	r.dashBus = bus
 }
 
-// Run starts watching the VCL file and reloading on changes
-// It blocks until the context is cancelled
+// Run starts the ConfigMap informers and the reconcile loop. It blocks until
+// the context is cancelled.
 func (r *Reloader) Run(ctx context.Context) error {
 	r.logger.Debug("VCL reloader started",
-		"path", r.vclPath,
 		"configMapName", r.configMapName,
+		"routeVCLConfigMapName", r.routeConfigMapName,
 		"namespace", r.configMapNamespace,
 		"keepCount", r.keepCount)
 
-	// Set up ConfigMap informer. Restrict it to the single ConfigMap we care
-	// about via a field selector so the informer doesn't cache every ConfigMap
-	// in the namespace.
-	factory := informers.NewSharedInformerFactoryWithOptions(
-		r.kubeClient,
-		30*time.Second,
-		informers.WithNamespace(r.configMapNamespace),
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.FieldSelector = "metadata.name=" + r.configMapName
-		}),
-	)
-
-	configMapInformer := factory.Core().V1().ConfigMaps().Informer()
-	_, err := configMapInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj any) {
-			if cm, ok := obj.(*corev1.ConfigMap); ok {
-				r.handleConfigMapUpdate(cm)
-			}
-		},
-		UpdateFunc: func(_, newObj any) {
-			if cm, ok := newObj.(*corev1.ConfigMap); ok {
-				r.handleConfigMapUpdate(cm)
-			}
-		},
-	})
+	synced := []cache.InformerSynced{}
+	hasSynced, err := r.watchConfigMap(ctx, r.configMapName, r.setVCLConfigMap)
 	if err != nil {
-		return fmt.Errorf("configMapInformer.AddEventHandler: %w", err)
+		return err
 	}
-
-	// Start the informer
-	factory.Start(ctx.Done())
-
-	// Wait for informer to sync
-	if !cache.WaitForCacheSync(ctx.Done(), configMapInformer.HasSynced) {
+	synced = append(synced, hasSynced)
+	if r.routeConfigMapName != "" {
+		hasSynced, err := r.watchConfigMap(ctx, r.routeConfigMapName, r.setRouteConfigMap)
+		if err != nil {
+			return err
+		}
+		synced = append(synced, hasSynced)
+	}
+	if !cache.WaitForCacheSync(ctx.Done(), synced...) {
 		return fmt.Errorf("failed to sync ConfigMap cache")
 	}
 
-	r.logger.Info("VCL reloader ready")
+	if r.reporter != nil {
+		go r.reporter.run(ctx)
+	}
 
-	// Wait for context cancellation
-	<-ctx.Done()
+	r.logger.Info("VCL reloader ready")
+	r.loop(ctx)
 	r.logger.Info("VCL reloader stopping")
 	return ctx.Err()
 }
 
-// handleConfigMapUpdate processes ConfigMap add/update events
-func (r *Reloader) handleConfigMapUpdate(cm *corev1.ConfigMap) {
-	// Filter: only our ConfigMap
-	if cm.Name != r.configMapName {
-		return
-	}
-
-	r.lastVCLMux.Lock()
-
-	// Deduplicate via ResourceVersion. lastConfigMapRV is only advanced after
-	// a successful reload (see below) — never unconditionally on entry. If it
-	// were recorded here regardless of outcome, a transient ReloadInline
-	// failure would strand it at this RV, and this dedup check would then
-	// SKIP every subsequent resync/re-delivery of the same object (same RV),
-	// leaving Varnish running stale VCL indefinitely with no retry (M-22).
-	if cm.ResourceVersion != "" && cm.ResourceVersion == r.lastConfigMapRV {
-		r.lastVCLMux.Unlock()
-		r.logger.Debug("skipping duplicate ConfigMap update", "resourceVersion", cm.ResourceVersion)
-		return
-	}
-
-	// Extract main.vcl
-	newVCL, ok := cm.Data["main.vcl"]
-	if !ok {
-		r.lastVCLMux.Unlock()
-		r.logger.Warn("ConfigMap missing main.vcl key", "name", cm.Name)
-		return
-	}
-
-	// Check if VCL content actually changed
-	if r.lastVCL == newVCL {
-		r.lastVCLMux.Unlock()
-		r.logger.Debug("ConfigMap updated but main.vcl unchanged, skipping reload",
-			"resourceVersion", cm.ResourceVersion)
-		return
-	}
-	r.lastVCLMux.Unlock()
-
-	r.logger.Info("main.vcl changed, triggering VCL reload",
-		"resourceVersion", cm.ResourceVersion)
-
-	// Trigger varnishadm reload with inline VCL. Only record the content and
-	// ResourceVersion as "applied" on success — otherwise the next
-	// ConfigMap event with the same content/RV would be dedup-skipped and
-	// Varnish would stay on the old VCL while we believe the new one is
-	// active. On failure both markers are deliberately left untouched so the
-	// next resync of this same object retries the reload.
-	if err := r.ReloadInline(newVCL); err != nil {
-		r.logger.Error("VCL reload failed - keeping previous VCL", "error", err)
-		dashboard.PublishVCLReloadFail(r.dashBus, err)
-		return
-	}
-	r.lastVCLMux.Lock()
-	r.lastVCL = newVCL
-	r.lastConfigMapRV = cm.ResourceVersion
-	r.lastVCLMux.Unlock()
-}
-
-// Reload performs a single VCL reload from the configured file path
-func (r *Reloader) Reload() error {
-	name := r.generateVCLName()
-	r.logger.Debug("loading VCL", "name", name, "path", r.vclPath)
-	return r.loadAndActivate(name, func(n string) (varnishadm.VarnishResponse, error) {
-		return r.varnishadm.VCLLoad(n, r.vclPath)
+// watchConfigMap starts an informer restricted to one ConfigMap by a field
+// selector, so the informer doesn't cache every ConfigMap in the namespace.
+// set receives the object on add/update and nil on delete.
+func (r *Reloader) watchConfigMap(ctx context.Context, name string, set func(*corev1.ConfigMap)) (cache.InformerSynced, error) {
+	factory := informers.NewSharedInformerFactoryWithOptions(
+		r.kubeClient,
+		resyncPeriod,
+		informers.WithNamespace(r.configMapNamespace),
+		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.FieldSelector = "metadata.name=" + name
+		}),
+	)
+	informer := factory.Core().V1().ConfigMaps().Informer()
+	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == name {
+				set(cm)
+			}
+		},
+		UpdateFunc: func(_, obj any) {
+			if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == name {
+				set(cm)
+			}
+		},
+		DeleteFunc: func(obj any) {
+			if tomb, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+				obj = tomb.Obj
+			}
+			if cm, ok := obj.(*corev1.ConfigMap); ok && cm.Name == name {
+				set(nil)
+			}
+		},
 	})
-}
-
-// ReloadInline performs a single VCL reload with inline VCL content
-func (r *Reloader) ReloadInline(vcl string) error {
-	name := r.generateVCLName()
-	r.logger.Debug("loading inline VCL", "name", name)
-	return r.loadAndActivate(name, func(n string) (varnishadm.VarnishResponse, error) {
-		return r.varnishadm.VCLInline(n, vcl)
-	})
-}
-
-// loadAndActivate loads a VCL using the provided loadFn, activates it, and garbage collects old VCLs.
-func (r *Reloader) loadAndActivate(name string, loadFn func(string) (varnishadm.VarnishResponse, error)) error {
-	resp, err := loadFn(name)
 	if err != nil {
-		return fmt.Errorf("VCL load %s: %w", name, err)
+		return nil, fmt.Errorf("informer.AddEventHandler(%s): %w", name, err)
 	}
-	if err := resp.CheckOK("VCL compilation failed"); err != nil {
+	factory.Start(ctx.Done())
+	return informer.HasSynced, nil
+}
+
+// setVCLConfigMap records the latest "{gateway}-vcl" ConfigMap. A delete is
+// ignored: varnishd keeps serving what it has.
+func (r *Reloader) setVCLConfigMap(cm *corev1.ConfigMap) {
+	if cm == nil {
+		r.logger.Warn("VCL ConfigMap deleted, keeping the loaded VCL", "name", r.configMapName)
+		return
+	}
+	r.snapMu.Lock()
+	r.vclCM = cm
+	r.snapMu.Unlock()
+	r.poke()
+}
+
+// setRouteConfigMap records the latest "{gateway}-route-vcl" ConfigMap; nil
+// means it does not exist (an empty manifest).
+func (r *Reloader) setRouteConfigMap(cm *corev1.ConfigMap) {
+	r.snapMu.Lock()
+	r.routeCM = cm
+	r.snapMu.Unlock()
+	r.poke()
+}
+
+func (r *Reloader) poke() {
+	select {
+	case r.nudge <- struct{}{}:
+	default:
+	}
+}
+
+// loop runs reconcile on every nudge. A failed reconcile is retried after a
+// growing delay (5s doubling to 30s) in addition to the next event or resync.
+func (r *Reloader) loop(ctx context.Context) {
+	retry := time.NewTimer(time.Hour)
+	retry.Stop()
+	defer retry.Stop()
+	var delay time.Duration
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-r.nudge:
+		case <-retry.C:
+		}
+		if err := r.reconcile(ctx); err != nil {
+			if delay == 0 {
+				delay = r.retryInitial
+			} else {
+				delay = min(2*delay, r.retryMax)
+			}
+			r.logger.Error("VCL reconcile failed", "error", err, "retryIn", delay)
+			retry.Reset(delay)
+			continue
+		}
+		delay = 0
+		retry.Stop()
+	}
+}
+
+// publishSlots sends the route VCL state to the dashboard (state tracker and
+// metrics) when it differs from the last one sent.
+func (r *Reloader) publishSlots(pool int, master string, results map[string]SlotResult) {
+	if r.dashBus == nil {
+		return
+	}
+	st := dashboard.RouteVCLState{PoolSize: pool, MasterVCL: master, Slots: []dashboard.RouteVCLSlot{}}
+	for _, res := range results {
+		state := dashboard.RouteVCLFailed
+		if res.Programmed {
+			state = dashboard.RouteVCLProgrammed
+		}
+		st.Slots = append(st.Slots, dashboard.RouteVCLSlot{
+			Slot: res.Slot, Policy: res.Policy, Route: res.Route,
+			VCLName: res.VCLName, State: state, Message: res.Message,
+		})
+	}
+	slices.SortFunc(st.Slots, func(a, b dashboard.RouteVCLSlot) int {
+		return cmp.Or(cmp.Compare(a.Slot, b.Slot), strings.Compare(a.Policy, b.Policy))
+	})
+	raw, err := json.Marshal(st)
+	if err != nil || string(raw) == r.lastSlotsEvent {
+		return
+	}
+	r.lastSlotsEvent = string(raw)
+	dashboard.PublishRouteVCLSlots(r.dashBus, st)
+}
+
+// reconcile converges varnishd on the latest ConfigMap snapshots.
+func (r *Reloader) reconcile(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.snapMu.Lock()
+	vclCM, routeCM := r.vclCM, r.routeCM
+	r.snapMu.Unlock()
+	if vclCM == nil {
+		return nil
+	}
+	master, ok := vclCM.Data[MainVCLKey]
+	if !ok {
+		r.logger.Warn("ConfigMap missing key", "name", vclCM.Name, "key", MainVCLKey)
+		return nil
+	}
+	pool, err := ParsePoolSize(vclCM.Data[PoolSizeKey])
+	if err != nil {
+		// An operator bug; retrying the same ConfigMap cannot help.
+		if r.appliedMaster != "" {
+			r.logger.Error("invalid route VCL pool size, ignoring ConfigMap", "name", vclCM.Name, "error", err)
+			return nil
+		}
+		// Nothing loaded yet: bring the gateway up rather than hang the
+		// first load. If main.vcl was generated for a pool, it fails to
+		// compile (its slot labels do not exist) and that is reported.
+		r.logger.Error("invalid route VCL pool size and no VCL loaded yet, loading main.vcl with route VCL disabled",
+			"name", vclCM.Name, "error", err)
+		pool = 0
+	}
+	if pool != r.memoPool {
+		clear(r.compileFailures)
+		r.memoPool = pool
+	}
+
+	st, err := r.list()
+	if err != nil {
 		return err
 	}
 
-	r.logger.Debug("activating VCL", "name", name)
-	resp, err = r.varnishadm.VCLUse(name)
+	// 1. Placeholder and labels must exist before a master referencing them
+	// compiles.
+	if pool > 0 {
+		if err := r.ensurePool(st, pool); err != nil {
+			return err
+		}
+	}
+
+	// 2. Master. A failing master leaves the previous one active; the slots
+	// that master dispatches to are still reconciled (a broken gateway VCL
+	// must not freeze route VCL changes), and the error is returned at the
+	// end so the backoff retry still happens.
+	var masterErr error
+	if master != r.appliedMaster || !strings.HasPrefix(st.active, vclPrefix) {
+		masterErr = r.applyMaster(master, pool)
+		if masterErr != nil && !strings.HasPrefix(st.active, vclPrefix) {
+			return masterErr // no master at all: nothing dispatches to slots
+		}
+	}
+	if st, err = r.list(); err != nil {
+		return err
+	}
+
+	slotPool := pool
+	if masterErr != nil {
+		// Only slots both the desired and the active master know about.
+		// Old masters and labels >= pool stay until a master for pool
+		// is active.
+		slotPool = min(pool, r.activeMasterPool)
+	} else {
+		// 3. Old masters. When the pool shrank they pin labels >= pool, so
+		// all go.
+		keep := r.keepCount
+		if len(st.slotLabelsFrom(pool)) > 0 {
+			keep = 0
+		}
+		if r.discardOldMasters(st, keep) {
+			if st, err = r.list(); err != nil {
+				return err
+			}
+		}
+
+		// 4. Shrink.
+		if r.shrink(st, pool) {
+			if st, err = r.list(); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 5. Slots.
+	pass, err := r.reconcileSlots(ctx, st, pool, slotPool, routeCM)
 	if err != nil {
-		// Best-effort cleanup of the loaded-but-inactive VCL. If the VCLUse
-		// actually succeeded server-side and we just lost the response (comms
-		// error), VCLDiscard will fail with "VCL is active" — we log and
-		// proceed. Without this, repeated comms-error reloads would leak
-		// inactive VCLs faster than garbageCollect can reap them.
+		return errors.Join(masterErr, err)
+	}
+	if err := r.discardOrphans(pass.wanted); err != nil {
+		return errors.Join(masterErr, err)
+	}
+	if pass.results != nil {
+		r.resultsMu.Lock()
+		r.results = pass.results
+		r.resultsMu.Unlock()
+		if r.reporter != nil {
+			r.reporter.update(pass.results)
+		}
+		r.publishSlots(pool, st.active, pass.results)
+	}
+	if isClosed(r.firstLoadDone) {
+		r.slotsOnce.Do(func() {
+			programmed := 0
+			for _, res := range pass.results {
+				if res.Programmed {
+					programmed++
+				}
+			}
+			r.logger.Info("initial route VCL slot pass complete",
+				"poolSize", pool, "slots", len(pass.results), "programmed", programmed,
+				"duration", time.Since(r.firstLoadAt).Round(time.Millisecond))
+			close(r.slotsDone)
+		})
+	}
+	return errors.Join(masterErr, pass.retry)
+}
+
+func isClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// vclState indexes one `vcl.list -j` reply.
+//
+// A VCL discarded while requests (or idle keep-alive sessions) still hold it
+// stays listed with status "discarded" until varnishd frees it. Such entries
+// are left out of entries and order (they are gone as far as reconciling is
+// concerned) but their names stay taken in names.
+type vclState struct {
+	entries map[string]varnishadm.VCLEntry
+	order   []string        // live names in list order
+	names   map[string]bool // every listed name, discarded ones included
+	active  string
+}
+
+func (r *Reloader) list() (*vclState, error) {
+	entries, err := r.varnishadm.VCLListJSON()
+	if err != nil {
+		return nil, fmt.Errorf("varnishadm.VCLListJSON(): %w", err)
+	}
+	st := &vclState{
+		entries: make(map[string]varnishadm.VCLEntry, len(entries)),
+		names:   make(map[string]bool, len(entries)),
+	}
+	for _, e := range entries {
+		st.names[e.Name] = true
+		if e.Status == vclStatusDiscarded {
+			continue
+		}
+		st.entries[e.Name] = e
+		st.order = append(st.order, e.Name)
+		if e.Status == "active" {
+			st.active = e.Name
+		}
+	}
+	return st, nil
+}
+
+func (s *vclState) has(name string) bool {
+	_, ok := s.entries[name]
+	return ok
+}
+
+// loadedAs returns a live VCL loaded for base (see matchesRouteVCL), or "".
+func (s *vclState) loadedAs(base string) string {
+	for _, name := range s.order {
+		if e := s.entries[name]; !e.IsLabel() && matchesRouteVCL(name, base) {
+			return name
+		}
+	}
+	return ""
+}
+
+// freeName returns base, or base_<k> for the smallest k >= 2 whose name is
+// not taken. A route VCL discarded while still busy keeps its name until
+// varnishd frees it, so going back to an earlier document soon after needs
+// a different name.
+func (s *vclState) freeName(base string) string {
+	if !s.names[base] {
+		return base
+	}
+	for k := 2; ; k++ {
+		if name := base + "_" + strconv.Itoa(k); !s.names[name] {
+			return name
+		}
+	}
+}
+
+// matchesRouteVCL reports whether name is the route VCL base (route_<slot>_<hash>)
+// or one of its renamed loads (base_<k>).
+func matchesRouteVCL(name, base string) bool {
+	if name == base {
+		return true
+	}
+	rest, ok := strings.CutPrefix(name, base+"_")
+	if !ok || rest == "" {
+		return false
+	}
+	_, err := strconv.Atoi(rest)
+	return err == nil
+}
+
+// isPlaceholderName reports whether name is the placeholder VCL or a renamed
+// load of it (gwvcl-placeholder_<k>, used while a discarded-but-busy
+// placeholder still holds the name).
+func isPlaceholderName(name string) bool {
+	return matchesRouteVCL(name, PlaceholderVCLName)
+}
+
+// placeholder returns the live placeholder VCL's name, or "".
+func (s *vclState) placeholder() string {
+	for _, name := range s.order {
+		if !s.entries[name].IsLabel() && isPlaceholderName(name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// isCompileFailure reports whether a failed vcl.inline reply is a VCC
+// compile error, which the same document can never get past. varnishd
+// reports those as "Message from VCC-compiler: ... VCL compilation failed".
+// Everything else (max_vcl refusal, out of memory, a child-side failure) may
+// succeed later.
+func isCompileFailure(payload string) bool {
+	return strings.Contains(payload, "VCC-compiler") || strings.Contains(payload, "VCL compilation failed")
+}
+
+// labelTarget returns the VCL a label points at, or "" if there is no such
+// label.
+func (s *vclState) labelTarget(label string) string {
+	if e, ok := s.entries[label]; ok && e.IsLabel() {
+		return e.LabelTarget
+	}
+	return ""
+}
+
+// slotLabelsFrom returns the slot numbers >= from that have a label, sorted.
+func (s *vclState) slotLabelsFrom(from int) []int {
+	var out []int
+	for _, name := range s.order {
+		if !s.entries[name].IsLabel() {
+			continue
+		}
+		if n, ok := parseSlotLabel(name); ok && n >= from {
+			out = append(out, n)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// cliFailedPrefix is the text of a varnishadm.CLIError. cliOutcome falls back
+// to matching it for implementations that flatten the typed error.
+const cliFailedPrefix = "command failed: "
+
+// cliOutcome normalises the two ways a VarnishadmInterface reports that
+// varnishd refused a command: varnishadm.Server returns a *CLIError (an empty
+// response and a non-nil error), the mock by default returns the response
+// with its status code and a nil error. Both come out as a non-OK status
+// with the reply payload and transport false. Only an error that is not a
+// refusal (connection lost, timeout, server stopped) is a transport failure;
+// then payload is the error text.
+//
+// Every VCL CLI call in the reloader goes through this (or cliErr), so a VCC
+// failure is memoised and reported whichever implementation is plugged in,
+// and only transport failures abort a reconcile.
+func cliOutcome(resp varnishadm.VarnishResponse, err error) (status int, payload string, transport bool) {
+	if err == nil {
+		return resp.StatusCode(), resp.Payload(), false
+	}
+	var ce *varnishadm.CLIError
+	if errors.As(err, &ce) {
+		return ce.Status, ce.Payload, false
+	}
+	if msg := err.Error(); strings.HasPrefix(msg, cliFailedPrefix) {
+		// Status unknown; anything but ClisOk will do.
+		return varnishadm.ClisCant, strings.TrimPrefix(msg, cliFailedPrefix), false
+	}
+	return 0, err.Error(), true
+}
+
+// cliErr turns a CLI call result into an error: transport errors and non-200
+// replies alike, for call sites that treat both the same.
+func cliErr(op string, resp varnishadm.VarnishResponse, err error) error {
+	status, payload, transport := cliOutcome(resp, err)
+	if transport {
+		return fmt.Errorf("%s: %w", op, err)
+	}
+	if status != varnishadm.ClisOk {
+		return fmt.Errorf("%s: status %d: %s", op, status, strings.TrimSpace(payload))
+	}
+	return nil
+}
+
+// ensurePool sets max_vcl, loads the placeholder and creates missing slot
+// labels pointing at it. Existing labels are never moved here: they may hold
+// a route VCL.
+func (r *Reloader) ensurePool(st *vclState, pool int) error {
+	// Route VCLs count against max_vcl (labels do not); replaced generations
+	// linger until discarded, hence 2x plus headroom for masters.
+	if want := 2*pool + 10; r.maxVCLSet != want {
+		resp, err := r.varnishadm.ParamSet("max_vcl", strconv.Itoa(want))
+		if err := cliErr(fmt.Sprintf("varnishadm.ParamSet(max_vcl, %d)", want), resp, err); err != nil {
+			return err
+		}
+		r.maxVCLSet = want
+	}
+	ph := st.placeholder()
+	if ph == "" {
+		// A placeholder discarded while busy keeps its name: load under a
+		// free one, like route VCLs.
+		ph = st.freeName(PlaceholderVCLName)
+		resp, err := r.varnishadm.VCLInline(ph, GeneratePlaceholder())
+		if err := cliErr("vcl.inline "+ph, resp, err); err != nil {
+			return err
+		}
+		r.logger.Info("route VCL placeholder loaded", "name", ph)
+	}
+	created := 0
+	for i := range pool {
+		label := SlotLabel(i)
+		if st.labelTarget(label) != "" {
+			continue
+		}
+		resp, err := r.varnishadm.VCLLabel(label, ph)
+		if err := cliErr("vcl.label "+label, resp, err); err != nil {
+			return err
+		}
+		created++
+	}
+	if created > 0 {
+		r.logger.Info("route VCL slot labels created", "created", created, "poolSize", pool)
+	}
+	return nil
+}
+
+// applyMaster loads master unless the same content failed to compile less
+// than memoTTL ago.
+func (r *Reloader) applyMaster(master string, pool int) error {
+	if f := r.masterFailure; f != nil && f.content == master {
+		if retryAt := f.at.Add(r.memoTTL); r.now().Before(retryAt) {
+			return fmt.Errorf("master VCL failed to compile, not retried before %s or until main.vcl changes: %w",
+				retryAt.Format(time.RFC3339), f.err)
+		}
+		r.masterFailure = nil
+	}
+	return r.loadMaster(master, pool)
+}
+
+// loadMaster compiles and activates a new master built for pool slots. On
+// failure the previous master stays active; a VCC failure is memoised.
+func (r *Reloader) loadMaster(master string, pool int) error {
+	name := r.generateVCLName()
+	r.logger.Debug("loading master VCL", "name", name)
+	resp, err := r.varnishadm.VCLInline(name, master)
+	status, payload, transport := cliOutcome(resp, err)
+	if transport {
+		return fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
+	}
+	if status != varnishadm.ClisOk {
+		err := fmt.Errorf("VCL compilation failed: %s", payload)
+		r.logger.Error("VCL reload failed - keeping previous VCL", "name", name, "status", status, "error", err)
+		dashboard.PublishVCLReloadFail(r.dashBus, err)
+		if isCompileFailure(payload) {
+			r.masterFailure = &masterFailureMemo{content: master, err: err, at: r.now()}
+		}
+		return err
+	}
+	resp, err = r.varnishadm.VCLUse(name)
+	if err := cliErr("VCL activation failed", resp, err); err != nil {
+		// Best-effort cleanup of the loaded-but-inactive VCL. If vcl.use
+		// actually succeeded and only the reply was lost, the discard is
+		// refused ("active") and the next reconcile sees the truth in
+		// vcl.list.
 		if _, dErr := r.varnishadm.VCLDiscard(name); dErr != nil {
-			r.logger.Debug("VCL discard after activation error failed (may be active server-side)", "name", name, "error", dErr)
+			r.logger.Debug("VCL discard after activation error failed", "name", name, "error", dErr)
 		}
 		return fmt.Errorf("varnishadm.VCLUse(%s): %w", name, err)
 	}
-	if err := resp.CheckOK("VCL activation failed"); err != nil {
-		if _, dErr := r.varnishadm.VCLDiscard(name); dErr != nil {
-			r.logger.Debug("VCL discard after activation rejection failed", "name", name, "error", dErr)
-		}
-		return err
-	}
-
+	r.appliedMaster = master
+	r.activeMasterPool = pool
+	r.masterFailure = nil
+	clear(r.compileFailures)
 	r.logger.Info("VCL reload complete", "name", name)
 	dashboard.PublishVCLReload(r.dashBus, name)
-	r.firstLoadOnce.Do(func() { close(r.firstLoadDone) })
-
-	if err := r.garbageCollect(); err != nil {
-		r.logger.Warn("VCL garbage collection failed", "error", err)
-	}
-
+	r.firstLoadOnce.Do(func() {
+		r.firstLoadAt = time.Now()
+		close(r.firstLoadDone)
+	})
 	return nil
 }
 
-// garbageCollect removes old managed VCLs beyond keepCount
-func (r *Reloader) garbageCollect() error {
-	result, err := r.varnishadm.VCLListStructured()
-	if err != nil {
-		return fmt.Errorf("varnishadm.VCLListStructured(): %w", err)
-	}
-
-	// Filter to our managed VCLs (prefix vcl_) that are available (not active) and not labels
-	var managed []string
-	for _, entry := range result.Entries {
-		// Skip active VCL
-		if entry.Status == "active" {
+// discardOldMasters discards inactive masters beyond the newest keep. It
+// reports whether it discarded anything.
+func (r *Reloader) discardOldMasters(st *vclState, keep int) bool {
+	var masters []string
+	for _, name := range st.order {
+		e := st.entries[name]
+		if e.IsLabel() || e.Status == "active" || !strings.HasPrefix(name, vclPrefix) {
 			continue
 		}
-		// Skip labels (they have a target)
-		if entry.LabelTarget != "" {
-			continue
-		}
-		// Skip VCLs we don't manage
-		if !strings.HasPrefix(entry.Name, vclPrefix) {
-			continue
-		}
-		managed = append(managed, entry.Name)
+		masters = append(masters, name)
 	}
-
-	// Sort by name (timestamp makes them sortable, oldest first)
-	sort.Strings(managed)
-
-	// Discard oldest beyond keepCount
-	toDiscard := len(managed) - r.keepCount
-	if toDiscard <= 0 {
-		return nil
+	// Names embed a timestamp and sequence number, so they sort oldest first.
+	sort.Strings(masters)
+	changed := false
+	for i := 0; i < len(masters)-keep; i++ {
+		if r.discard(masters[i], slog.LevelWarn) {
+			changed = true
+		}
 	}
+	return changed
+}
 
-	for i := range toDiscard {
-		name := managed[i]
-		r.logger.Debug("discarding old VCL", "name", name)
-		resp, err := r.varnishadm.VCLDiscard(name)
+// shrink removes slot labels >= pool, and the placeholder when pool is 0. A
+// label an old master still references cannot be discarded yet; that is
+// logged and retried on the next reconcile. It reports whether it changed
+// anything.
+func (r *Reloader) shrink(st *vclState, pool int) bool {
+	changed := false
+	ph := st.placeholder()
+	for _, slot := range st.slotLabelsFrom(pool) {
+		label := SlotLabel(slot)
+		target := st.labelTarget(label)
+		routeTarget := strings.HasPrefix(target, routeVCLPrefix)
+		if routeTarget && ph != "" {
+			resp, err := r.varnishadm.VCLLabel(label, ph)
+			if err := cliErr("vcl.label "+label, resp, err); err != nil {
+				r.logger.Warn("cannot repoint removed slot to placeholder", "label", label, "error", err)
+			} else {
+				changed = true
+				r.discard(target, slog.LevelWarn)
+				routeTarget = false
+			}
+		}
+		if r.discard(label, slog.LevelInfo) {
+			changed = true
+			if routeTarget {
+				r.discard(target, slog.LevelWarn)
+			}
+		}
+	}
+	if pool == 0 && ph != "" {
+		// Re-check: labels discarded above no longer point at it.
+		if st2, err := r.list(); err == nil {
+			for _, name := range st2.order {
+				if e := st2.entries[name]; e.IsLabel() || e.Labels > 0 || !isPlaceholderName(name) {
+					continue
+				}
+				if r.discard(name, slog.LevelInfo) {
+					changed = true
+					r.logger.Info("route VCL disabled, placeholder discarded", "name", name)
+				}
+			}
+		}
+	}
+	if changed {
+		r.logger.Info("route VCL pool shrunk", "poolSize", pool)
+	}
+	return changed
+}
+
+// discard runs vcl.discard and logs a refusal at the given level. It reports
+// whether the VCL is gone.
+func (r *Reloader) discard(name string, refusalLevel slog.Level) bool {
+	resp, err := r.varnishadm.VCLDiscard(name)
+	if err := cliErr("vcl.discard "+name, resp, err); err != nil {
+		r.logger.Log(context.Background(), refusalLevel, "VCL discard refused, will retry on a later reconcile", "name", name, "error", err)
+		return false
+	}
+	r.logger.Debug("VCL discarded", "name", name)
+	return true
+}
+
+// desiredSlot is a valid manifest entry for a slot inside the pool.
+type desiredSlot struct {
+	policy string
+	route  string
+	hash   string
+	doc    string
+}
+
+// slotPass is the outcome of one reconcileSlots run.
+type slotPass struct {
+	// results are the per-policy results, nil when the manifest cannot be
+	// read (then nothing was changed).
+	results map[string]SlotResult
+	// wanted holds the route VCL base names of the desired documents. A
+	// loaded route VCL for one of them is kept even while unlabelled (its
+	// label is retried).
+	wanted map[string]bool
+	// retry joins the failures worth retrying with the backoff: a
+	// vcl.inline refused for a reason other than VCC, a refused vcl.label.
+	retry error
+}
+
+// resultSet collects per-policy results. One slot per policy per gateway is
+// the contract (the operator enforces it); should a manifest still list a
+// policy for two slots, the better result is kept: programmed over valid but
+// failed over invalid (ties keep the first).
+type resultSet struct {
+	m    map[string]SlotResult
+	rank map[string]int
+}
+
+func (s *resultSet) set(res SlotResult, valid bool) {
+	if res.Policy == "" {
+		return
+	}
+	rank := 0
+	if valid {
+		rank = 1
+	}
+	if res.Programmed {
+		rank = 2
+	}
+	if old, ok := s.rank[res.Policy]; ok && old >= rank {
+		return
+	}
+	s.m[res.Policy] = res
+	s.rank[res.Policy] = rank
+}
+
+// reconcileSlots points the labels of slots below limit at their desired
+// route VCL, or the placeholder. limit is pool, or less while the master for
+// pool failed to load (slots from limit on are reported as waiting). A
+// non-nil error is a CLI transport failure; the reconcile is retried.
+func (r *Reloader) reconcileSlots(ctx context.Context, st *vclState, pool, limit int, routeCM *corev1.ConfigMap) (*slotPass, error) {
+	results := &resultSet{m: make(map[string]SlotResult), rank: make(map[string]int)}
+	desired := make(map[int]desiredSlot)
+	if routeCM != nil {
+		manifest, err := ParseRouteVCLManifest(routeCM.Data[ManifestKey])
 		if err != nil {
-			r.logger.Warn("VCL discard failed", "name", name, "error", err)
-			continue
+			r.logger.Error("invalid route VCL manifest, leaving slots unchanged", "name", routeCM.Name, "error", err)
+			return &slotPass{}, nil
 		}
-		if err := resp.CheckOK("VCL discard %s failed", name); err != nil {
-			r.logger.Warn("VCL discard failed", "name", name, "error", err)
+		slotsOf := make(map[string][]string)
+		for _, key := range slices.Sorted(maps.Keys(manifest.Slots)) {
+			entry := manifest.Slots[key]
+			if entry.Policy == "" {
+				r.logger.Warn("route VCL manifest slot without policy", "slot", key)
+			} else {
+				slotsOf[entry.Policy] = append(slotsOf[entry.Policy], key)
+			}
+			res, d, ok := validateSlot(key, entry, pool, routeCM.Data)
+			switch {
+			case !ok:
+				results.set(res, false)
+			case res.Slot >= limit:
+				res.Message = fmt.Sprintf("slot %d waits for the master VCL for a pool of %d slots, which failed to load", res.Slot, pool)
+				results.set(res, true)
+			default:
+				desired[res.Slot] = d
+			}
+		}
+		for policy, keys := range slotsOf {
+			if len(keys) > 1 {
+				r.logger.Warn("policy listed for more than one slot in the route VCL manifest; one slot per policy per gateway is the contract, reporting the best result",
+					"policy", policy, "slots", keys)
+			}
 		}
 	}
 
+	ph := st.placeholder()
+	if ph == "" && limit > 0 {
+		return nil, errors.New("route VCL placeholder is not loaded")
+	}
+	wanted := make(map[string]bool)
+	var retry []error
+	for slot := range limit {
+		label := SlotLabel(slot)
+		cur := st.labelTarget(label)
+		d, ok := desired[slot]
+		if !ok {
+			if isPlaceholderName(cur) {
+				continue
+			}
+			resp, err := r.varnishadm.VCLLabel(label, ph)
+			if status, payload, transport := cliOutcome(resp, err); transport {
+				return nil, fmt.Errorf("varnishadm.VCLLabel(%s, %s): %w", label, ph, err)
+			} else if status != varnishadm.ClisOk {
+				// Not expected (the placeholder returns to no label), but
+				// a refusal must not hide the other slots' results.
+				failErr := fmt.Errorf("clearing slot %d: vcl.label %s %s: status %d: %s", slot, label, ph, status, trimMessage(payload))
+				retry = append(retry, failErr)
+				r.logger.Warn("route VCL slot could not be cleared, will retry", "slot", slot, "previous", cur, "error", failErr)
+				continue
+			}
+			r.logger.Info("route VCL slot cleared", "slot", slot, "previous", cur)
+			if strings.HasPrefix(cur, routeVCLPrefix) {
+				r.discard(cur, slog.LevelWarn)
+			}
+			continue
+		}
+
+		base := routeVCLName(slot, d.hash)
+		wanted[base] = true
+		res := SlotResult{Policy: d.policy, Slot: slot, Hash: d.hash}
+		res.Route = d.route
+		res.VCLName = cur
+		if matchesRouteVCL(cur, base) {
+			res.Programmed = true
+			results.set(res, true)
+			continue
+		}
+		if msg, failed := r.memoisedFailure(base); failed {
+			res.Message = msg
+			results.set(res, true)
+			continue
+		}
+		name := st.loadedAs(base)
+		var compiled time.Duration // 0 = nothing compiled in this pass
+		if name == "" {
+			compileResult := ""
+			name = st.freeName(base)
+			if err := r.throttle.wait(ctx); err != nil {
+				return nil, fmt.Errorf("waiting to compile route VCL %s: %w", name, err)
+			}
+			start := time.Now()
+			resp, err := r.varnishadm.VCLInline(name, d.doc)
+			compileTook := time.Since(start)
+			status, payload, transport := cliOutcome(resp, err)
+			if transport {
+				return nil, fmt.Errorf("varnishadm.VCLInline(%s): %w", name, err)
+			}
+			if status != varnishadm.ClisOk {
+				res.Message = trimMessage(payload)
+				results.set(res, true)
+				failErr := fmt.Errorf("route VCL %s (slot %d, %s): %s", name, slot, d.policy, res.Message)
+				if isCompileFailure(payload) {
+					r.compileFailures[base] = failureMemo{msg: res.Message, at: r.now()}
+					compileResult = dashboard.RouteVCLCompileError
+					r.logger.Warn("route VCL failed to compile, slot keeps its previous VCL",
+						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", status)
+				} else {
+					retry = append(retry, failErr)
+					compileResult = dashboard.RouteVCLOtherError
+					r.logger.Warn("route VCL could not be loaded, slot keeps its previous VCL, will retry",
+						"slot", slot, "name", name, "policy", d.policy, "keeping", cur, "status", status, "error", res.Message)
+				}
+				dashboard.PublishRouteVCLReloadFail(r.dashBus, slot, failErr, compileResult, compileTook)
+				continue
+			}
+			compiled = compileTook
+			r.logger.Info("route VCL compiled", "slot", slot, "name", name, "policy", d.policy,
+				"duration", time.Since(start).Round(time.Millisecond))
+		}
+		resp, err := r.varnishadm.VCLLabel(label, name)
+		status, payload, transport := cliOutcome(resp, err)
+		if transport {
+			return nil, fmt.Errorf("varnishadm.VCLLabel(%s, %s): %w", label, name, err)
+		}
+		if status != varnishadm.ClisOk {
+			// E.g. "would create a loop": the document returns to a label
+			// that leads back here. That depends on other slots' documents,
+			// so it is not memoised: the compiled VCL stays loaded and the
+			// label is retried on every pass.
+			res.Message = trimMessage(payload)
+			results.set(res, true)
+			failErr := fmt.Errorf("route VCL %s (slot %d, %s): vcl.label %s: %s", name, slot, d.policy, label, res.Message)
+			retry = append(retry, failErr)
+			r.logger.Warn("route VCL could not be labelled, slot keeps its previous VCL, will retry",
+				"slot", slot, "name", name, "policy", d.policy, "error", res.Message)
+			dashboard.PublishRouteVCLReloadFail(r.dashBus, slot, failErr, dashboard.RouteVCLOtherError, 0)
+			continue
+		}
+		res.Programmed = true
+		res.VCLName = name
+		results.set(res, true)
+		r.logger.Info("route VCL slot programmed", "slot", slot, "name", name, "policy", d.policy, "previous", cur)
+		dashboard.PublishRouteVCLReload(r.dashBus, slot, name, compiled)
+		if strings.HasPrefix(cur, routeVCLPrefix) {
+			r.discard(cur, slog.LevelWarn)
+		}
+	}
+	// Forget failures of documents no longer wanted, so the map stays small.
+	for name := range r.compileFailures {
+		if !wanted[name] {
+			delete(r.compileFailures, name)
+		}
+	}
+	return &slotPass{results: results.m, wanted: wanted, retry: errors.Join(retry...)}, nil
+}
+
+// memoisedFailure returns the remembered VCC failure of a route VCL base
+// name, unless it has expired.
+func (r *Reloader) memoisedFailure(base string) (string, bool) {
+	f, ok := r.compileFailures[base]
+	if !ok {
+		return "", false
+	}
+	if !r.now().Before(f.at.Add(r.memoTTL)) {
+		delete(r.compileFailures, base)
+		return "", false
+	}
+	return f.msg, true
+}
+
+// validateSlot checks one manifest entry. On success it returns the slot's
+// desired document; otherwise the result explains why the slot is skipped.
+func validateSlot(key string, entry RouteVCLSlot, pool int, data map[string]string) (SlotResult, desiredSlot, bool) {
+	res := SlotResult{Policy: entry.Policy, Slot: -1, Hash: entry.Hash, Route: entry.Route}
+	slot, err := strconv.Atoi(key)
+	if err != nil || slot < 0 || strconv.Itoa(slot) != key {
+		res.Message = fmt.Sprintf("invalid slot %q in route VCL manifest", key)
+		return res, desiredSlot{}, false
+	}
+	res.Slot = slot
+	if slot >= pool {
+		res.Message = fmt.Sprintf("slot %d is outside the pool of %d slots", slot, pool)
+		return res, desiredSlot{}, false
+	}
+	if !isHexHash(entry.Hash) {
+		res.Message = fmt.Sprintf("invalid hash %q for slot %d in route VCL manifest", entry.Hash, slot)
+		return res, desiredSlot{}, false
+	}
+	doc, ok := data[SlotKey(slot)]
+	if !ok {
+		res.Message = fmt.Sprintf("route VCL ConfigMap has no key %s", SlotKey(slot))
+		return res, desiredSlot{}, false
+	}
+	if got := RouteVCLHash(doc); got != entry.Hash {
+		res.Message = fmt.Sprintf("hash of %s is %s, manifest says %s", SlotKey(slot), got, entry.Hash)
+		return res, desiredSlot{}, false
+	}
+	return res, desiredSlot{policy: entry.Policy, route: entry.Route, hash: entry.Hash, doc: doc}, true
+}
+
+func isHexHash(h string) bool {
+	if len(h) != 64 {
+		return false
+	}
+	for _, c := range h {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// trimMessage trims CLI output and caps it at maxResultMessage bytes.
+func trimMessage(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxResultMessage {
+		return s
+	}
+	const suffix = "\n... (truncated)"
+	cut := maxResultMessage - len(suffix)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + suffix
+}
+
+// discardOrphans discards route VCLs no label points at, except loads of a
+// wanted document (their label is being retried). Normal operation never
+// leaves any; this catches leftovers from interrupted reconciles.
+func (r *Reloader) discardOrphans(wanted map[string]bool) error {
+	st, err := r.list()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, name := range st.order {
+		e := st.entries[name]
+		if e.IsLabel() || e.Labels > 0 || e.Status == "active" || !strings.HasPrefix(name, routeVCLPrefix) {
+			continue
+		}
+		if isWanted(name, wanted) {
+			continue
+		}
+		r.logger.Info("discarding orphaned route VCL", "name", name)
+		if !r.discard(name, slog.LevelWarn) {
+			errs = append(errs, fmt.Errorf("orphaned route VCL %s could not be discarded", name))
+		}
+	}
+	if len(errs) > 0 {
+		// Not worth a retry storm: the next reconcile tries again.
+		r.logger.Warn("orphan cleanup incomplete", "error", errors.Join(errs...))
+	}
 	return nil
 }
 
-// generateVCLName creates a unique timestamped VCL name. A monotonic sequence
-// number guarantees uniqueness even when two reloads land in the same
-// millisecond (the timestamp alone has only millisecond resolution).
+// isWanted reports whether name is a load of one of the wanted base names.
+func isWanted(name string, wanted map[string]bool) bool {
+	for base := range wanted {
+		if matchesRouteVCL(name, base) {
+			return true
+		}
+	}
+	return false
+}
+
+// generateVCLName creates a unique timestamped master VCL name. A monotonic
+// sequence number guarantees uniqueness even when two reloads land in the
+// same millisecond (the timestamp alone has only millisecond resolution).
+// The sequence is zero-padded so names stay sortable.
 func (r *Reloader) generateVCLName() string {
 	now := time.Now()
-	return fmt.Sprintf("%s%s_%03d_%d",
+	return fmt.Sprintf("%s%s_%03d_%06d",
 		vclPrefix,
 		now.Format("20060102_150405"),
 		now.Nanosecond()/1e6, // milliseconds

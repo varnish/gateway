@@ -742,6 +742,11 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 	// Attach ExternalProxy hints for routes whose Service is type ExternalName
 	r.attachExternalProxies(ctx, collectedRoutes)
 
+	// Attach route VCL slots from the Gateway's route VCL manifest
+	if err := r.attachRouteVCLSlots(ctx, gateway, collectedRoutes); err != nil {
+		return err
+	}
+
 	// Group routes by hostname
 	routesByHost := make(map[string][]ghost.Route)
 	for _, route := range collectedRoutes {
@@ -792,6 +797,81 @@ func (r *HTTPRouteReconciler) updateConfigMap(ctx context.Context, gateway *gate
 		"backends", len(collectedRoutes))
 
 	return nil
+}
+
+// attachRouteVCLSlots sets VCLSlot on every collected route whose HTTPRoute
+// holds a slot in the Gateway's "{gateway}-route-vcl" manifest. Routes start
+// out with no slot, so a slot that left the manifest disappears from
+// routing.json. A missing ConfigMap means no slots. A manifest that does not
+// parse is an error (the reconcile is retried) rather than silently dropping
+// every slot from routing.json.
+func (r *HTTPRouteReconciler) attachRouteVCLSlots(ctx context.Context, gateway *gatewayv1.Gateway, collectedRoutes []ghost.Route) error {
+	manifest, _, err := readRouteVCLManifest(ctx, r.Client, client.ObjectKeyFromObject(gateway))
+	if err != nil {
+		return err
+	}
+	if len(manifest.Slots) == 0 {
+		return nil
+	}
+	slotByRoute := make(map[string]int, len(manifest.Slots))
+	for key, s := range manifest.Slots {
+		n, ok := parseManifestSlot(key)
+		if !ok || s.Route == "" {
+			continue
+		}
+		slotByRoute[s.Route] = n
+	}
+	for i := range collectedRoutes {
+		if n, ok := slotByRoute[collectedRoutes[i].RouteName]; ok {
+			slot := n
+			collectedRoutes[i].VCLSlot = &slot
+		}
+	}
+	return nil
+}
+
+// findHTTPRoutesForRouteVCLConfigMap maps a "{gateway}-route-vcl" ConfigMap
+// to the HTTPRoutes named in its manifest, slotted or unassigned, so a route
+// whose slot appears or disappears has routing.json regenerated. On update
+// controller-runtime maps both the old and the new object, which covers
+// routes that dropped out of the manifest entirely.
+func (r *HTTPRouteReconciler) findHTTPRoutesForRouteVCLConfigMap(ctx context.Context, obj client.Object) []reconcile.Request {
+	cm, ok := obj.(*corev1.ConfigMap)
+	if !ok || !strings.HasSuffix(cm.Name, vcl.RouteVCLConfigMapSuffix) {
+		return nil
+	}
+	manifest, err := vcl.ParseRouteVCLManifest(cm.Data[vcl.ManifestKey])
+	if err != nil {
+		r.Logger.Warn("route VCL manifest does not parse", "configmap", client.ObjectKeyFromObject(cm), "error", err)
+		return nil
+	}
+	return routeRequestsFromManifest(manifest)
+}
+
+// routeRequestsFromManifest returns one request per distinct HTTPRoute named
+// in a manifest's slots and unassigned list.
+func routeRequestsFromManifest(m vcl.RouteVCLManifest) []reconcile.Request {
+	seen := make(map[types.NamespacedName]bool)
+	var out []reconcile.Request
+	add := func(route string) {
+		ns, name, ok := strings.Cut(route, "/")
+		if !ok || ns == "" || name == "" {
+			return
+		}
+		nn := types.NamespacedName{Namespace: ns, Name: name}
+		if seen[nn] {
+			return
+		}
+		seen[nn] = true
+		out = append(out, reconcile.Request{NamespacedName: nn})
+	}
+	for _, s := range m.Slots {
+		add(s.Route)
+	}
+	for _, u := range m.Unassigned {
+		add(u.Route)
+	}
+	return out
 }
 
 // attachCachePolicies resolves VarnishCachePolicies for each collected route.
@@ -1758,6 +1838,11 @@ func (r *HTTPRouteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&gatewayv1beta1.ReferenceGrant{},
 			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForReferenceGrant),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.findHTTPRoutesForRouteVCLConfigMap),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isRouteVCLConfigMap)),
 		).
 		Complete(r)
 }
