@@ -28,6 +28,7 @@ sub vcl_recv {
     unset req.http.X-Ghost-Grace;
     unset req.http.X-Ghost-Keep;
     unset req.http.X-Ghost-Cache-Key-Extra;
+    unset req.http.X-Ghost-Timeout;
     unset req.http.X-Ghost-Filter-Context;
     unset req.http.X-Ghost-Redirect-Config;
     unset req.http.X-Ghost-Error;
@@ -111,6 +112,27 @@ sub vcl_backend_fetch {
     # Route VCL slot signal. The master consumes it in the dispatch block, but
     # a route VCL runs ghost again (which sets it again) with no dispatch.
     unset bereq.http.X-Ghost-VCL-Slot;
+
+    # Per-route timeout. Ghost sets X-Ghost-Timeout in vcl_recv because backends
+    # are pooled by address:port and cannot carry per-route timeouts themselves.
+    #
+    # Deliberately NOT unset here: it must survive the fetch so the postamble
+    # vcl_backend_error can tell a timed-out route apart from an ordinary 503.
+    #
+    # connect_timeout is included so an unreachable pod fails inside the route's
+    # budget instead of varnishd's 3.5s global. Gateway API scopes backendRequest
+    # to after request headers are sent, but the bound users want is their own
+    # wall-clock wait.
+    #
+    # Each std.duration() fallback is that parameter's varnishd default, never 0s:
+    # a malformed value must not become "time out immediately".
+    # NB: between_bytes bounds the gap between body bytes, not the total --
+    # a slow drip still streams forever, and SSE on a timed-out route gets cut.
+    if (bereq.http.X-Ghost-Timeout) {
+        set bereq.connect_timeout = std.duration(bereq.http.X-Ghost-Timeout, 3.5s);
+        set bereq.first_byte_timeout = std.duration(bereq.http.X-Ghost-Timeout, 60s);
+        set bereq.between_bytes_timeout = std.duration(bereq.http.X-Ghost-Timeout, 60s);
+    }
 }
 
 sub vcl_pipe {
@@ -120,6 +142,7 @@ sub vcl_pipe {
     # after this must still run.
     unset bereq.http.X-Ghost-Pass;
     unset bereq.http.X-Ghost-VCL-Slot;
+    unset bereq.http.X-Ghost-Timeout;
     unset bereq.http.X-Ghost-Forced-TTL;
     unset bereq.http.X-Ghost-Default-TTL;
     unset bereq.http.X-Ghost-Grace;
@@ -179,6 +202,7 @@ sub vcl_backend_response {
     unset bereq.http.X-Ghost-Forced-TTL;
     unset bereq.http.X-Ghost-Grace;
     unset bereq.http.X-Ghost-Keep;
+    unset bereq.http.X-Ghost-Timeout;
 }
 
 sub vcl_deliver {
