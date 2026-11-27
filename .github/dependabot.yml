@@ -1,0 +1,20 @@
+version: 2
+
+# Action updates exist mainly to keep .github/workflows/actions.lock from going
+# stale. When Dependabot bumps an action in an onboarded workflow it regenerates
+# the matching lockfile entry in the same pull request, so the pin and the
+# workflow stay in step without anyone remembering to rerun `gh actions-lock`.
+#
+# Only the github-actions ecosystem is enabled. Go, Rust and the Dockerfile base
+# images are deliberately left out: those versions are driven by go.mod,
+# ghost/Cargo.toml and the Varnish release we build against, not by upstream tags.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
