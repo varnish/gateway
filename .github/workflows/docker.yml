@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: Check if commit has a version tag
         id: check
-        uses: actions/github-script@v8.0.0
+        uses: actions/github-script@v9.0.0
         with:
           script: |
             const sha = context.payload.workflow_run.head_sha;
@@ -88,7 +88,7 @@ jobs:
       image: ${{ env.IMAGE_PREFIX }}/gateway-operator
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -104,7 +104,7 @@ jobs:
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6.19.2
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: docker/operator.Dockerfile
@@ -120,7 +120,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: operator-digest-${{ matrix.runner }}
           path: /tmp/digests/*
@@ -135,7 +135,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -144,7 +144,7 @@ jobs:
         run: echo "version=$(cat .version)" >> $GITHUB_OUTPUT
 
       - name: Download digests
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: operator-digest-*
           path: /tmp/digests
@@ -198,7 +198,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -218,7 +218,7 @@ jobs:
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6.19.2
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: docker/chaperone.Dockerfile
@@ -236,7 +236,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: chaperone-digest-${{ matrix.runner }}
           path: /tmp/digests/*
@@ -251,7 +251,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -260,7 +260,7 @@ jobs:
         run: echo "version=$(cat .version)" >> $GITHUB_OUTPUT
 
       - name: Download digests
-        uses: actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: chaperone-digest-*
           path: /tmp/digests
@@ -308,7 +308,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.1.0
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
