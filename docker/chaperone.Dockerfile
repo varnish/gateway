@@ -14,6 +14,10 @@ RUN CGO_ENABLED=0 go build -mod=vendor -o /chaperone ./cmd/chaperone
 # transaction so they are always version-matched. VARNISH_VERSION is the
 # upstream major.minor.patch (e.g. 9.0.1); the apt-get glob pattern matches
 # whatever distro suffix the repo has stamped on it (e.g. 9.0.1-1~trixie).
+#
+# rustup comes from Debian's archive rather than `curl https://sh.rustup.rs | sh`
+# so the build does not execute an unpinned remote script. The toolchain itself
+# is still fetched by rustup from static.rust-lang.org.
 FROM debian:trixie-slim AS rust-builder
 
 ARG VARNISH_VERSION
@@ -32,9 +36,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
          > /etc/apt/sources.list.d/varnish.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-         build-essential pkg-config clang libclang-dev \
+         build-essential pkg-config clang libclang-dev rustup \
          "varnish=${VARNISH_VERSION}*" "varnish-dev=${VARNISH_VERSION}*" \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
+    && rustup toolchain install 1.92.0 \
+    && rustup default 1.92.0 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/root/.cargo/bin:${PATH}"
