@@ -11,6 +11,9 @@ on:
     types:
       - completed
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ghcr.io/varnish

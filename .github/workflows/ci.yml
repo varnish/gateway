@@ -19,6 +19,9 @@ on:
       - 'LICENSE'
       - '.gitignore'
 
+permissions:
+  contents: read
+
 jobs:
   test-go:
     runs-on: ubuntu-latest

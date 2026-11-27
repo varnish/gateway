@@ -17,6 +17,9 @@ on:
   # Allow manual trigger from the Actions tab
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Build and deploy docs
