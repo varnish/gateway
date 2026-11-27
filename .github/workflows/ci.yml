@@ -69,7 +69,7 @@ jobs:
   test-rust:
     runs-on: ubuntu-latest
     container:
-      image: debian:trixie-slim
+      image: debian:trixie-20261123-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
       options: --user root
     steps:
       - name: Checkout
