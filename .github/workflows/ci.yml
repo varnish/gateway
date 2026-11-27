@@ -27,12 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -44,7 +44,7 @@ jobs:
         run: go vet ./...
 
       - name: Cache envtest binaries
-        uses: actions/cache@v5
+        uses: actions/cache@v5.1.0
         with:
           path: testbin
           key: envtest-1.31.0-${{ runner.os }}
@@ -61,7 +61,7 @@ jobs:
             go test -tags=integration -coverprofile=coverage.txt ./...
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v5.5.5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.txt
@@ -73,7 +73,7 @@ jobs:
       options: --user root
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           persist-credentials: false
 
@@ -119,7 +119,7 @@ jobs:
       # the ghost VMOD is absent, which is the case in test-go. This job has
       # both, so run them here against the pinned Varnish version.
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -137,12 +137,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.1.0
         with:
           persist-credentials: false
 
       - name: Install Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@v5.1.0
         with:
           version: '3.14.0'
 
