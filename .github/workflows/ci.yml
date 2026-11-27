@@ -98,8 +98,9 @@ jobs:
 
       - name: Set up Rust
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 --component clippy
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rustup
+          rustup toolchain install 1.92.0 --component clippy
+          rustup default 1.92.0
 
       - name: Run clippy (warnings as errors)
         run: cd ghost && cargo clippy --release -- -D warnings
