@@ -77,9 +77,22 @@ RUN export DEBIAN_FRONTEND=noninteractive \
          > /etc/apt/sources.list.d/varnish.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends "varnish=${VARNISH_VERSION}*" libcap2-bin \
+         "varnish-modules=${VARNISH_VERSION}*" \
+         "vmod-cfg=${VARNISH_VERSION}*" \
+         "vmod-digest=${VARNISH_VERSION}*" \
+         "vmod-fileserver=${VARNISH_VERSION}*" \
+         "vmod-geoip2=${VARNISH_VERSION}*" \
+         "vmod-jq=${VARNISH_VERSION}*" \
+         "vmod-k8s-endpoint=${VARNISH_VERSION}*" \
+         "vmod-oidc=${VARNISH_VERSION}*" \
+         "vmod-querystring=${VARNISH_VERSION}*" \
+         "vmod-redis=${VARNISH_VERSION}*" \
+         "vmod-reqwest=${VARNISH_VERSION}*" \
+         "vmod-rers=${VARNISH_VERSION}*" \
+         "vmod-uuid=${VARNISH_VERSION}*" \
     && setcap cap_ipc_lock,cap_net_bind_service+ep /usr/sbin/varnishd \
     && apt-get remove -y libcap2-bin curl gpg dirmngr && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/* ~/.gnupg \
+    && rm -rf /var/lib/apt/lists/* ~/.gnupg /usr/lib/varnish/vmods/libvmod_*.la \
     && adduser --uid 1000 --quiet --system --no-create-home --home /nonexistent --group varnish || true
 
 USER varnish
