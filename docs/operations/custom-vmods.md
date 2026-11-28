@@ -1,8 +1,26 @@
 # Custom VMODs
 
-VMODs are shared objects loaded into varnishd at startup. Varnish Gateway ships with the ghost VMOD (routing) plus the standard VMODs that come with varnishd — see the [Varnish VMOD documentation](https://varnish-cache.org/docs/trunk/reference/vmod.html) for the current set.
+VMODs are shared objects loaded into varnishd at startup. Varnish Gateway ships with the ghost VMOD (routing), the standard VMODs that come with varnishd (see the [Varnish VMOD documentation](https://varnish-cache.org/docs/trunk/reference/vmod.html)), and the extra VMODs Varnish Software packages for each Varnish release:
 
-There are two ways to add your own: **bake them into a custom image** (recommended) or **stage them in via an init container**.
+| Package | VMODs (`import` name) |
+|---------|------------------------|
+| `varnish-modules` | `accept`, `bodyaccess`, `header`, `saintmode`, `str`, `tcp`, `var`, `vsthrottle`, `xkey` |
+| `vmod-cfg` | `cfg` |
+| `vmod-digest` | `digest` |
+| `vmod-fileserver` | `fileserver` |
+| `vmod-geoip2` | `geoip2` |
+| `vmod-jq` | `jq` |
+| `vmod-k8s-endpoint` | `k8s_endpoint` |
+| `vmod-oidc` | `oidc` |
+| `vmod-querystring` | `querystring` |
+| `vmod-redis` | `redis` |
+| `vmod-reqwest` | `reqwest` |
+| `vmod-rers` | `rers` |
+| `vmod-uuid` | `uuid` |
+
+These are installed from the same repository as varnishd and pinned to the same version, so they can be imported from user VCL with no extra setup. See [Extra Varnish Cache features](https://varnish.org/docs/extra-features/) for what each one does.
+
+For anything else, there are two ways to add your own: **bake them into a custom image** (recommended) or **stage them in via an init container**.
 
 ## Option 1: Custom gateway image
 

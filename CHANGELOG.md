@@ -7,8 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release has two headline features: **per-route VCL** and **packaged
+VMODs**. A `VarnishVCLPolicy` attaches VCL to a single HTTPRoute, and the
+chaperone image now ships Varnish Software's VMOD collection, so route and
+gateway VCL can import xkey tag invalidation, vsthrottle rate limiting, OIDC authentication,
+dynamic backends through reqwest, and more, without building a custom image.
+Per-route VCL is a preview and is off by default.
+
 ### Added
 
+- **Per-HTTPRoute VCL (preview).** A `VarnishVCLPolicy` attaches a VCL document to one HTTPRoute. The VCL runs only for requests that route matches, composed as gateway preamble, route VCL, gateway user VCL, postamble, so route subroutines run before the gateway VCL's. It is off by default and is enabled per GatewayClass with `spec.routeVCL.enabled`.
+- **Slot-based delivery.** Each Gateway has a fixed pool of VCL slots (`routeVCL.slotPoolSize`, default 64, max 256). Accepted policies keep their slot across document edits, and a document that fails to compile leaves the previous version serving.
+- **Status reporting.** `Accepted` and `Programmed` conditions with specific reasons, `status.slots`, and per-pod compiler output in `status.podResults`, shown by `kubectl get vvp`.
+- **Route VCL metrics and dashboard.** New `chaperone_route_vcl_*` and `varnish_gateway_route_vcl_*` metrics, a Route VCL section in the chaperone dashboard, and a compile throttle (`ROUTE_VCL_COMPILE_RATE`, `ROUTE_VCL_COMPILE_BURST`).
+- **Route VCL guide and caveats.** A user guide with a trust statement and worked example, and a reference page listing the routing, cache and capacity limits.
+- **Extra VMODs in the chaperone image.** The image now installs the VMOD packages Varnish Software publishes for each Varnish release, pinned to the same version as `varnish`: `varnish-modules` (accept, bodyaccess, header, saintmode, str, tcp, var, vsthrottle, xkey), `vmod-cfg`, `vmod-digest`, `vmod-fileserver`, `vmod-geoip2`, `vmod-jq`, `vmod-k8s-endpoint`, `vmod-oidc`, `vmod-querystring`, `vmod-redis`, `vmod-reqwest`, `vmod-rers` and `vmod-uuid`. Gateway and route VCL can `import` them without a custom image. The image grows by about 50 MB.
 - **ExternalName backends forward request bodies.** POST, PUT, PATCH and
   DELETE to a Service of type `ExternalName` used to be rejected locally with
   `405 Method Not Allowed`; the body is now read off the client and sent
@@ -21,11 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Transfer-Encoding`. Reading an uncached body makes the fetch
   non-retryable, per Varnish's read-once rule; call `std.cache_req_body()` in
   `vcl_recv` to keep retries.
-- **Per-HTTPRoute VCL (preview).** A `VarnishVCLPolicy` attaches a VCL document to one HTTPRoute. The VCL runs only for requests that route matches, composed as gateway preamble, route VCL, gateway user VCL, postamble, so route subroutines run before the gateway VCL's. It is off by default and is enabled per GatewayClass with `spec.routeVCL.enabled`.
-- **Slot-based delivery.** Each Gateway has a fixed pool of VCL slots (`routeVCL.slotPoolSize`, default 64, max 256). Accepted policies keep their slot across document edits, and a document that fails to compile leaves the previous version serving.
-- **Status reporting.** `Accepted` and `Programmed` conditions with specific reasons, `status.slots`, and per-pod compiler output in `status.podResults`, shown by `kubectl get vvp`.
-- **Route VCL metrics and dashboard.** New `chaperone_route_vcl_*` and `varnish_gateway_route_vcl_*` metrics, a Route VCL section in the chaperone dashboard, and a compile throttle (`ROUTE_VCL_COMPILE_RATE`, `ROUTE_VCL_COMPILE_BURST`).
-- **Route VCL guide and caveats.** A user guide with a trust statement and worked example, and a reference page listing the routing, cache and capacity limits.
 
 ### Changed
 

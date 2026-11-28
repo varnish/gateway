@@ -133,6 +133,9 @@ So you write plain subroutines and `import` lines. Some rules follow from that:
   `return`, the gateway user VCL runs after your code and has the last word.
   A gateway VCL that ends `vcl_recv` with `return (pass)` (the shipped
   default) therefore still runs your `vcl_recv` first.
+- You can `import` any VMOD in the gateway image: the standard ones, ghost,
+  and the packaged collection listed in [Custom VMODs](../operations/custom-vmods.md)
+  (`xkey`, `vsthrottle`, `oidc`, `reqwest` and others).
 - You do not need `vcl 4.1;`. If you include it, it is dropped.
 - `X-Gateway-Route` (`namespace/name`) and `X-Gateway-Listener`
   (`{proto}-{port}`) are set, as they are for the gateway VCL.
